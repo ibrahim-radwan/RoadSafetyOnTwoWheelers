@@ -1,6 +1,6 @@
 # Road Safety on Two Wheelers - FusionApp
 
-![Sensing Box Overview](./images/sensing_box.png)
+![Sensing Box Overview](https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/main/FusionApp/images/sensing_box.png)
 
 ## Overview
 This application provides real-time object detection for road safety, specifically designed for two-wheeled vehicles. The system can detect cars, persons, and other objects to enhance rider safety.
