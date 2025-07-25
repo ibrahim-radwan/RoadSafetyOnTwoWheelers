@@ -7,24 +7,22 @@ This is the public repository for the road safety project at the University of C
 </div>
 
 ## Project Overview
-[Your project description here]
+TBA
 
 ## Features
-- [Feature 1]
-- [Feature 2]
-- [Feature 3]
+- ...
 
 ## Installation
-[Installation instructions]
+[TBA]
 
 ## Usage
-[Usage instructions]
+[TBA]
 
 ## Research Papers
 **2025 Publications:**  
 1. **"Towards Autonomous Riding: A Review of Perception, Planning, and Control in Intelligent Two-Wheelers"**  
    - *Authors*: [Mohammed Hassanin, Mohammad Abu Alsheikh, Carlos C. N. Kuhn, Damith Herath, Dinh Thai Hoang, Ibrahim Radwan]  
-   - *Preprint*: [](https://www.arxiv.org/abs/2507.11852)
+   - *Preprint*: ![arXiv](https://www.arxiv.org/abs/2507.11852)
 
 ## Team Members
 1. Ibrahim Radwan
