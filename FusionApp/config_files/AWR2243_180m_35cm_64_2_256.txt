@@ -1,0 +1,181 @@
+#
+#For detailed view of mmWave Radar configuration structure
+#please refer 
+#ti\control\mmwavelink\docs\doxygen\html\index.html
+#
+
+#
+#Global configuration
+#Firmware download enable/disable; 1 - Enable; 0 - Disable
+#mmWaveLink logging enable/disable; 1 - Enable; 0 - Disable
+#Transport mode; 1 - I2C; 0 - SPI
+#Flash connected enable/disable; 1 - Enable; 0 - Disable
+#
+EnableFwDownload=1;
+EnableMmwlLogging=0;
+TransferMode=0;
+IsFlashConnected=1;
+#END
+
+#
+#power on master arguments, please modify if needed.
+#rlClientCbs_t: crcType 0:16Bit/1:32Bit/2:64Bit, 
+# ackTimeout: This timeout value can vary on different PC, user needs to recalibrate 
+#  this value based on the system where this application runs. Ideally ackTimeout 
+#  should be in range of ~5mSec 
+#
+crcType=1;
+ackTimeout=50000;
+#END
+
+#
+#channel config parameters, please modify if needed.
+#rlChanCfg_t
+#
+channelTx=5;
+channelRx=15;
+cascading=0;
+#END
+
+#
+#ADC out config parameters, please modify if needed.
+#rlAdcOutCfg_t
+#
+adcBits=2;
+adcFormat=2;
+#END
+
+#
+#DATA format config parameters, please modify if needed.
+#rlDevDataFmtCfg_t
+#
+rxChanEn=15;
+adcBitsD=2;
+adcFmt=1;
+iqSwapSel=0;
+chInterleave=0;
+#END
+
+#
+#Low power config Paramters, please modify if needed.
+#rlLowPowerModeCfg_t
+#
+anaCfg=0;
+lpAdcMode=0;
+#END
+
+#
+#Data Path config parameters, please modify if needed
+#rlDevDataPathCfg_t
+#
+intfSel=1;
+transferFmtPkt0=1;
+transferFmtPkt1=0;
+cqConfig=2;
+cq0TransSize=64;
+cq1TransSize=64;
+cq2TransSize=64;
+#END
+
+#
+#LVDS clock config parameters, please modify if needed
+#rlDevDataPathClkCfg_t
+#
+laneClk=1;
+dataRate=1;
+#END
+
+#
+#SET HSI clock parameters, please modify if needed.
+#rlDevHsiClk_t
+#
+hsiClk=9
+#END
+
+#
+#LANE config parameters, please modify if needed.
+#rlDevLaneEnable_t
+#
+laneEn=15;
+#END
+
+#
+#LVDS Lane Config parameters, please modify if needed.
+#rlDevLvdsLaneCfg_t
+#
+laneFmtMap=0;
+laneParamCfg=1;
+#END
+
+#
+#Programmable Filter config parameters, please modify if needed.
+#rlRfProgFiltConf_t
+#
+profileId=0;
+coeffStartIdx=0;
+progFiltLen=14;
+progFiltFreqShift=100;
+#END
+
+#
+#Profile config parameters, please modify if needed.
+#rlProfileCfg_t
+#
+profileId=0;
+pfVcoSelect=2;
+startFreqConst=1435384035;
+idleTimeConst=200;
+adcStartTimeConst=380;
+rampEndTime=5000;
+txOutPowerBackoffCode=0;
+txPhaseShifter=0;
+freqSlopeConst=200;
+txStartTime=500;
+numAdcSamples=256;
+digOutSampleRate=11555;
+hpfCornerFreq1=0;
+hpfCornerFreq2=0;
+rxGain=160;#32+2<<6
+#END
+
+#
+#Chirp Configuration parameters, please modify if needed.
+#rlChirpCfg_t
+#
+chirpStartIdx=0;
+chirpEndIdx=0;
+profileIdCPCFG=0;
+startFreqVar=0;
+freqSlopeVar=0;
+idleTimeVar=0;
+adcStartTimeVar=0;
+txEnable=1;
+#END
+
+#
+#Chirp Configuration parameters, please modify if needed.
+#rlChirpCfg_t
+#
+chirpStartIdx=1;
+chirpEndIdx=1;
+profileIdCPCFG=0;
+startFreqVar=0;
+freqSlopeVar=0;
+idleTimeVar=0;
+adcStartTimeVar=0;
+txEnable=4;
+#END
+
+#
+#Frame configuration parameters, please modify if needed.
+#rlFrameCfg_t
+#
+chirpStartIdxFCF=0;
+chirpEndIdxFCF=1;
+frameCount=0;
+loopCount=64;
+periodicity=10000000;
+triggerDelay=0;
+numAdcSamples=512;
+triggerSelect=1;
+#END
