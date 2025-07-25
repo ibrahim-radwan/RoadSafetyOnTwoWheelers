@@ -21,7 +21,7 @@ TBA
 ## Research Papers
 **2025 Publications:**  
 1. **"Towards Autonomous Riding: A Review of Perception, Planning, and Control in Intelligent Two-Wheelers"**  
-   - *Authors*: [Mohammed Hassanin, Mohammad Abu Alsheikh, Carlos C. N. Kuhn, Damith Herath, Dinh Thai Hoang, Ibrahim Radwan]  
+   - *Authors*: Mohammed Hassanin, Mohammad Abu Alsheikh, Carlos C. N. Kuhn, Damith Herath, Dinh Thai Hoang, Ibrahim Radwan  
    - *Preprint*: [https://www.arxiv.org/abs/2507.11852](https://www.arxiv.org/abs/2507.11852)
 
 ## Team Members
