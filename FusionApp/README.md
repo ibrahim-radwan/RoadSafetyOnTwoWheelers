@@ -10,12 +10,10 @@ This application provides real-time object detection for road safety, specifical
 ### Car Detection
 | ![Car Detection 1](images/cars_1.png) | ![Car Detection 2](images/cars_2.png) | ![Car Detection 3](images/cars_3.png) |
 |:---:|:---:|:---:|
-| Daytime detection | Multiple vehicles | Night detection |
 
 ### Person Detection
 | ![Person Detection 1](images/persons_1.png) | ![Person Detection 2](images/persons_2.png) | ![Person Detection 3](images/persons_3.png) |
 |:---:|:---:|:---:|
-| Single pedestrian | Group crossing | Low-light detection |
 
 ## Features
 - Real-time object detection for cars and pedestrians
