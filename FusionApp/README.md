@@ -13,7 +13,7 @@ This application provides real-time object detection for road safety, specifical
 | Daytime detection | Multiple vehicles | Night detection |
 
 ### Person Detection
-| ![Person Detection 1](https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/raw/main/FusionApp/image/person1.png) | ![Person Detection 2](https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/raw/main/FusionApp/image/person2.png) | ![Person Detection 3](https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/raw/main/FusionApp/image/person3.png) |
+| ![Person Detection 1](images/persons_1.png) | ![Person Detection 2](images/persons_2.png) | ![Person Detection 3](images/persons_3.png) |
 |:---:|:---:|:---:|
 | Single pedestrian | Group crossing | Low-light detection |
 
