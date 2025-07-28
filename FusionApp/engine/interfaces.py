@@ -12,13 +12,19 @@ class CameraFeed(ABC):
     """Abstract base class for camera data sources (live or recorded)"""
 
     @abstractmethod
-    def run(self, stream_queue: multiprocessing.Queue, stop_event) -> None:
+    def run(
+        self,
+        stream_queue: multiprocessing.Queue,
+        stop_event,
+        control_queue: Optional[multiprocessing.Queue] = None,
+    ) -> None:
         """
         Stream camera data to the output queue.
 
         Args:
             stream_queue: Queue to send camera frames to
             stop_event: Event to signal when to stop streaming
+            control_queue: Optional queue for recording control commands (live mode)
         """
         pass
 

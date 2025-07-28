@@ -4,6 +4,7 @@ from utils import setup_logger
 
 from typing import Optional
 from multiprocessing import Process, Queue, Event
+import queue
 
 
 class FusionEngine:
@@ -148,6 +149,10 @@ class FusionEngine:
                 "camera_results_queue must be provided when camera_feed_config is available"
             )
 
+        # Create separate control queues for camera and radar
+        radar_control_queue = Queue() if control_queue is not None else None
+        camera_control_queue = Queue() if control_queue is not None else None
+
         # Create instances using configuration in the target process
         self.logger.info("Creating feed and analyzer instances...")
         try:
@@ -179,7 +184,7 @@ class FusionEngine:
             args=(
                 self._radar_stream_queue,
                 stop_event,
-                control_queue,
+                radar_control_queue,
                 status_queue,
             ),
         )
@@ -208,7 +213,7 @@ class FusionEngine:
                 args=(
                     self._camera_stream_queue,
                     stop_event,
-                    control_queue,
+                    camera_control_queue,
                 ),
             )
             processes.append(camera_process)
@@ -241,9 +246,42 @@ class FusionEngine:
                 f"Process {i}: PID: {process.pid}, alive: {process.is_alive()}, exit_code: {process.exitcode}"
             )
 
-        # Wait for stop signal
+        # Control command forwarding loop
+        if control_queue is not None:
+            self.logger.info("Starting control command forwarding...")
+
+        # Wait for stop signal and handle control commands
         while not stop_event.is_set():
-            time.sleep(0.1)
+            # Check for control commands and forward them to both camera and radar
+            if control_queue is not None:
+                try:
+                    command = control_queue.get_nowait()
+                    self.logger.info(f"Received control command: {command}")
+
+                    # Forward command to radar
+                    if radar_control_queue is not None:
+                        try:
+                            radar_control_queue.put(command)
+                            self.logger.debug(f"Forwarded command to radar: {command}")
+                        except Exception as e:
+                            self.logger.error(f"Error forwarding command to radar: {e}")
+
+                    # Forward command to camera
+                    if camera_control_queue is not None:
+                        try:
+                            camera_control_queue.put(command)
+                            self.logger.debug(f"Forwarded command to camera: {command}")
+                        except Exception as e:
+                            self.logger.error(
+                                f"Error forwarding command to camera: {e}"
+                            )
+
+                except queue.Empty:
+                    pass
+                except Exception as e:
+                    self.logger.error(f"Error processing control command: {e}")
+
+            time.sleep(0.01)  # Small sleep to prevent busy waiting
 
         self.logger.info("FusionEngine stopping...")
 
