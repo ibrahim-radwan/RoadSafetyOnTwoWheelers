@@ -25,6 +25,8 @@ class LiveFusionApp:
         self.stop_event = Event()
         self.radar_results_queue = Queue()
         self.camera_results_queue = Queue()
+        # Add control queue for recording control
+        self.control_queue = Queue()
 
         # Set up signal handlers for clean shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -52,6 +54,8 @@ class LiveFusionApp:
                 self.radar_results_queue,
                 self.camera_results_queue,
                 self.stop_event,
+                self.control_queue,  # Pass control queue for recording control
+                None,  # status_queue not needed for live mode
             ),
         )
 
@@ -78,9 +82,13 @@ class LiveFusionApp:
             visualizer.set_radar_data_callback(lambda: self._current_radar_data)
             visualizer.set_camera_data_callback(lambda: self._current_camera_data)
 
-            # Set up record callback (placeholder for now)
+            # Set up record callback - now actually controls recording
             def record_callback(command):
-                print(f"Record command: {command} (placeholder)")
+                print(f"Record command: {command}")
+                try:
+                    self.control_queue.put(command)
+                except Exception as e:
+                    print(f"Error sending record command: {e}")
 
             visualizer.set_record_callback(record_callback)
 
@@ -155,6 +163,8 @@ class LiveFusionApp:
                 self.radar_results_queue,
                 None,  # No camera results queue
                 self.stop_event,
+                self.control_queue,  # Pass control queue for recording control
+                None,  # status_queue not needed for live mode
             ),
         )
 
@@ -180,9 +190,13 @@ class LiveFusionApp:
             visualizer.set_radar_data_callback(lambda: self._current_radar_data)
             visualizer.set_camera_data_callback(lambda: None)  # No camera data
 
-            # Set up record callback (placeholder for now)
+            # Set up record callback - now actually controls recording
             def record_callback(command):
-                print(f"Record command: {command} (placeholder)")
+                print(f"Record command: {command}")
+                try:
+                    self.control_queue.put(command)
+                except Exception as e:
+                    print(f"Error sending record command: {e}")
 
             visualizer.set_record_callback(record_callback)
 

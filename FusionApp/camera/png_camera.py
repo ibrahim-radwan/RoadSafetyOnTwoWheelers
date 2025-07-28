@@ -124,8 +124,14 @@ class PNGCamera(CameraFeed):
             # End of recording
             self._playback_state = PlaybackState.STOPPED
 
-    def run(self, stream_queue: multiprocessing.Queue, stop_event):
+    def run(
+        self,
+        stream_queue: multiprocessing.Queue,
+        stop_event,
+        _: Optional[multiprocessing.Queue] = None,
+    ):
         """Main playback loop for recorded camera frames with synchronized timing"""
+
         # Initialize logger and load frame files in target process
         self.logger = setup_logger("PNGCamera")
         self._load_frame_files()

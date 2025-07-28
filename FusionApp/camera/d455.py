@@ -10,6 +10,7 @@ import cv2
 
 from config_params import CFGS
 from engine.interfaces import CameraFeed
+from utils import setup_logger
 
 
 class D455Config:
@@ -32,13 +33,18 @@ class D455(CameraFeed):
         # Store only serializable configuration
         self._config = d455_config
         self._dest_dir = d455_config.dest_dir
-        
+
         # Initialize these in run() method
         self._start_time: Optional[float] = None
         self._frame_queue: Optional[queue.Queue] = None
         self._pipeline = None
         self._rs_config = None
         self._send_thread: Optional[threading.Thread] = None
+        self.logger = None
+
+        # Recording control
+        self._is_recording = False
+        self._control_queue: Optional[multiprocessing.Queue] = None
 
     def __enter__(self):
         return self
@@ -46,7 +52,35 @@ class D455(CameraFeed):
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._pipeline is not None:
             self._pipeline.stop()
-        print("***** D455 cleaned up. *****")
+        if self.logger is not None:
+            self.logger.info("Cleaned up")
+
+    def _check_control_commands(self):
+        """Check for recording control commands"""
+        if self._control_queue is None:
+            return
+
+        try:
+            while True:
+                command = self._control_queue.get_nowait()
+                if command == "start_recording":
+                    self._is_recording = True
+                    if self.logger:
+                        self.logger.info("Recording started")
+                    else:
+                        # Fallback: initialize logger if not available
+                        self.logger = setup_logger("D455")
+                        self.logger.info("Recording started")
+                elif command == "stop_recording":
+                    self._is_recording = False
+                    if self.logger:
+                        self.logger.info("Recording stopped")
+                    else:
+                        # Fallback: initialize logger if not available
+                        self.logger = setup_logger("D455")
+                        self.logger.info("Recording stopped")
+        except queue.Empty:
+            pass
 
     def _read_and_store_frame(self):
         assert self._pipeline is not None, "D455 camera is not initialized"
@@ -56,11 +90,6 @@ class D455(CameraFeed):
 
         assert self._start_time is not None, "Start time is not initialized"
         timestamp = end - self._start_time
-        integer_part = f"{int(timestamp):010d}"
-        fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
-        frame_number = f"{frames.get_frame_number():012d}"
-        filename = f"{integer_part}_{fraction_part}_{frame_number}.png"
-        filepath = os.path.join(self._dest_dir, filename)
 
         # ir_frame = frames.get_infrared_frame()
         rgb_frame = frames.get_color_frame()
@@ -68,50 +97,73 @@ class D455(CameraFeed):
         # ir_data = np.asanyarray(ir_frame.get_data())
         rgb_data = np.asanyarray(rgb_frame.get_data())
 
-        # Save as numpy array
-        cv2.imwrite(filepath, rgb_data)
+        # Only save frame if recording is enabled
+        if self._is_recording:
+            integer_part = f"{int(timestamp):010d}"
+            fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
+            frame_number = f"{frames.get_frame_number():012d}"
+            filename = f"{integer_part}_{fraction_part}_{frame_number}.png"
+            filepath = os.path.join(self._dest_dir, filename)
 
-        # print(f"***** D455 **** Saved data to {filepath}")
+            # Save as numpy array
+            cv2.imwrite(filepath, rgb_data)
+            if self.logger:
+                self.logger.debug(f"Saved data to {filepath}")
 
         return D455Frame(timestamp, rgb_data)
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
         assert self._frame_queue is not None, "Frame queue is not initialized"
         while not stop_event.is_set():
+            # Check for control commands periodically
+            self._check_control_commands()
+
             # Wait for a frame to be available
             try:
                 video_frame = self._frame_queue.get(timeout=1)
                 try:
                     stream_queue.put(video_frame)
                 except Exception as e:
-                    print(f"***** D455 send_frame **** Error sending data: {e}")
+                    if self.logger is not None:
+                        self.logger.error(f"Error sending data: {e}")
                     break
             except queue.Empty:
                 # No frame available, continue
-                print("***** D455 send_frame **** Warning: No frame available to send.")
+                if self.logger is not None:
+                    self.logger.warning("No frame available to send")
                 continue
             except KeyboardInterrupt:
-                print(
-                    "***** D455 send_frame **** Keyboard interrupt received, stopping..."
-                )
+                if self.logger is not None:
+                    self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
 
-        print("***** D455 send_frame **** Stopped... *****")
+        if self.logger is not None:
+            self.logger.info("Send frame thread stopped")
 
-    def run(self, stream_queue: multiprocessing.Queue, stop_event):
-        print("***** D455 **** Starting... *****")
-        
+    def run(
+        self,
+        stream_queue: multiprocessing.Queue,
+        stop_event,
+        control_queue: Optional[multiprocessing.Queue] = None,
+    ):
+        # Initialize logger in target process
+        self.logger = setup_logger("D455")
+        self.logger.info("Starting...")
+
+        # Store control queue reference
+        self._control_queue = control_queue
+
         # Initialize components in target process
         self._start_time = time.perf_counter()
         self._frame_queue = queue.Queue()
 
-        print("INFO: Initializing D455 camera")
+        self.logger.info("Initializing D455 camera")
         self._pipeline = rs.pipeline()
         self._rs_config = rs.config()
         self._rs_config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
         self._rs_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
         self._rs_config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 30)
-        print("INFO: Starting D455 camera")
+        self.logger.info("Starting D455 camera")
         assert self._pipeline is not None, "D455 camera is not initialized"
         self._pipeline.start(self._rs_config)
 
@@ -128,14 +180,17 @@ class D455(CameraFeed):
 
         while not stop_event.is_set():
             try:
+                # Check for control commands
+                self._check_control_commands()
+
                 # Update the data and check if the data is okay
                 video_frame = self._read_and_store_frame()
                 self._frame_queue.put(video_frame)
             except KeyboardInterrupt:
-                print("***** D455 **** Keyboard interrupt received, stopping...")
+                self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
 
         if self._pipeline is not None:
             self._pipeline.stop()
 
-        print("***** D455 stopped. *****")
+        self.logger.info("Stopped")

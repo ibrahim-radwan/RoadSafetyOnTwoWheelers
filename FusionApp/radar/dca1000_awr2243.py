@@ -56,6 +56,10 @@ class DCA1000EVM(RadarFeed):
         self.logger = None
         self._send_thread: Optional[threading.Thread] = None
 
+        # Recording control
+        self._is_recording = False
+        self._control_queue: Optional[multiprocessing.Queue] = None
+
     def __enter__(self):
         return self
 
@@ -66,7 +70,34 @@ class DCA1000EVM(RadarFeed):
             self._dca.close()
             radar.AWR2243_poweroff()
         if self.logger is not None:
-            self.logger.info("***** DCA1000 cleaned up. *****")
+            self.logger.info("Cleaned up")
+
+    def _check_control_commands(self):
+        """Check for recording control commands"""
+        if self._control_queue is None:
+            return
+
+        try:
+            while True:
+                command = self._control_queue.get_nowait()
+                if command == "start_recording":
+                    self._is_recording = True
+                    if self.logger:
+                        self.logger.info("Recording started")
+                    else:
+                        # Fallback: initialize logger if not available
+                        self.logger = setup_logger("DCA1000EVM")
+                        self.logger.info("Recording started")
+                elif command == "stop_recording":
+                    self._is_recording = False
+                    if self.logger:
+                        self.logger.info("Recording stopped")
+                    else:
+                        # Fallback: initialize logger if not available
+                        self.logger = setup_logger("DCA1000EVM")
+                        self.logger.info("Recording stopped")
+        except queue.Empty:
+            pass
 
     def _read_and_store_frame(self):
         # Read the data from the DCA1000
@@ -75,33 +106,42 @@ class DCA1000EVM(RadarFeed):
         data_buf = self._dca.fastRead_in_Cpp_thread_get()
         end = time.perf_counter()
 
-        # print(f"***** DCA1000EVM **** Read {data_buf.nbytes/1024:.3f} KBs in {end-start:.6f}")
-        # print(f"***** DCA1000EVM **** Bandwidth: {data_buf.nbytes/(end-start)/1e6:.4f} MB/s")
+        if self.logger:
+            self.logger.debug(f"Read {data_buf.nbytes/1024:.3f} KBs in {end-start:.6f}")
+            self.logger.debug(f"Bandwidth: {data_buf.nbytes/(end-start)/1e6:.4f} MB/s")
 
         assert self._start_time is not None, "Start time is not initialized"
         timestamp = end - self._start_time
-        integer_part = f"{int(timestamp):010d}"
-        fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
-        frame_number = f"{self._last_frame_number:012d}"
-        filename = f"{integer_part}_{fraction_part}_{frame_number}.bin"
-        filepath = os.path.join(self._dest_dir, filename)
 
-        with open(filepath, "wb") as bin_file:
-            data_buf.tofile(bin_file)
+        # Only save frame if recording is enabled
+        if self._is_recording:
+            integer_part = f"{int(timestamp):010d}"
+            fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
+            frame_number = f"{self._last_frame_number:012d}"
+            filename = f"{integer_part}_{fraction_part}_{frame_number}.bin"
+            filepath = os.path.join(self._dest_dir, filename)
 
-        # print(f"***** DCA1000EVM **** Saved data to {filepath}")
+            with open(filepath, "wb") as bin_file:
+                data_buf.tofile(bin_file)
+
+            if self.logger:
+                self.logger.debug(f"Saved data to {filepath}")
 
         return DCA1000Frame(timestamp, data_buf)
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
         assert self._frame_queue is not None, "Frame queue is not initialized"
         while not stop_event.is_set():
+            # Check for control commands periodically
+            self._check_control_commands()
+
             # Wait for a frame to be available
             try:
                 dca_frame = self._frame_queue.get(timeout=1)
-                # print(
-                #     f"***** DCA1000EVM **** Sending frame: {dca_frame.timestamp}, messages left in queue: {self._frame_queue.qsize()}"
-                # )
+                if self.logger:
+                    self.logger.debug(
+                        f"Sending frame: {dca_frame.timestamp}, messages left in queue: {self._frame_queue.qsize()}"
+                    )
 
                 # Send the frame data over the multiprocessing queue
                 try:
@@ -119,7 +159,9 @@ class DCA1000EVM(RadarFeed):
                 if self.logger is not None:
                     self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
-                break
+
+        if self.logger is not None:
+            self.logger.info("Send frame thread stopped")
 
     def run(
         self,
@@ -128,9 +170,14 @@ class DCA1000EVM(RadarFeed):
         control_queue: Optional[multiprocessing.Queue] = None,
         status_queue: Optional[multiprocessing.Queue] = None,
     ):
-        # Initialize logger and components in target process
+        # Initialize logger in target process
         self.logger = setup_logger("DCA1000EVM")
-        self.logger.info("Starting... *****")
+
+        # Store control queue reference
+        self._control_queue = control_queue
+
+        # Initialize logger and components in target process
+        self.logger.info("Starting...")
 
         # Create destination directory if it doesn't exist
         if not os.path.exists(self._dest_dir):
@@ -197,6 +244,9 @@ class DCA1000EVM(RadarFeed):
 
         while not stop_event.is_set():
             try:
+                # Check for control commands
+                self._check_control_commands()
+
                 # Update the data and check if the data is okay
                 radar_frame = self._read_and_store_frame()
 
@@ -214,7 +264,7 @@ class DCA1000EVM(RadarFeed):
             self._dca.close()
             radar.AWR2243_poweroff()
 
-        self.logger.info("***** DCA1000 stopped. *****")
+        self.logger.info("Stopped")
 
 
 class PlaybackState(Enum):
@@ -258,7 +308,7 @@ class DCA1000Recording(RadarFeed):
     def _initialize(self):
         """Initialize the recording playback by scanning files and loading config"""
         if self.logger is not None:
-            self.logger.info("Initializing DCA1000 Recording playback...")
+            self.logger.info("Initializing playback...")
         self._scan_recording_files()
         self._load_radar_config()
         if self.logger is not None:
@@ -636,7 +686,7 @@ class DCA1000Recording(RadarFeed):
         self.logger = setup_logger("DCA1000Recording")
         self._initialize()
 
-        self.logger.info("Starting DCA1000 Recording playback...")
+        self.logger.info("Starting playback...")
 
         # Send ADC parameters first (similar to live DCA1000EVM)
         if self._ADC_PARAMS_l is None:
@@ -677,7 +727,7 @@ class DCA1000Recording(RadarFeed):
         if self._send_thread and self._send_thread.is_alive():
             self._send_thread.join(timeout=5.0)
 
-        self.logger.info("DCA1000 Recording playback stopped")
+        self.logger.info("Playback stopped")
 
     def _handle_control_command(self, command):
         """Handle playback control commands from UI"""
@@ -797,4 +847,4 @@ class DCA1000Recording(RadarFeed):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
-        self.logger.info("DCA1000 Recording cleaned up")
+        self.logger.info("Cleaned up")
