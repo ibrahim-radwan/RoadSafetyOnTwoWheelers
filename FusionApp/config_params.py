@@ -43,7 +43,7 @@ class CFGS:
 
     DEST_DIR = os.path.join(
         os.getcwd(),
-        "../recordings/",
+        "../../recordings/",
         time.strftime("%Y_%m_%d_%H_%M_00", time.localtime()),
     )
 

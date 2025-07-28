@@ -208,6 +208,7 @@ class FusionEngine:
                 args=(
                     self._camera_stream_queue,
                     stop_event,
+                    control_queue,
                 ),
             )
             processes.append(camera_process)

@@ -39,6 +39,10 @@ class D455(CameraFeed):
         self._pipeline = None
         self._rs_config = None
         self._send_thread: Optional[threading.Thread] = None
+        
+        # Recording control
+        self._is_recording = False
+        self._control_queue: Optional[multiprocessing.Queue] = None
 
     def __enter__(self):
         return self
@@ -48,6 +52,23 @@ class D455(CameraFeed):
             self._pipeline.stop()
         print("***** D455 cleaned up. *****")
 
+    def _check_control_commands(self):
+        """Check for recording control commands"""
+        if self._control_queue is None:
+            return
+            
+        try:
+            while True:
+                command = self._control_queue.get_nowait()
+                if command == "start_recording":
+                    self._is_recording = True
+                    print("***** D455 **** Recording started")
+                elif command == "stop_recording":
+                    self._is_recording = False
+                    print("***** D455 **** Recording stopped")
+        except queue.Empty:
+            pass
+
     def _read_and_store_frame(self):
         assert self._pipeline is not None, "D455 camera is not initialized"
         # Read the data from the D455
@@ -56,28 +77,33 @@ class D455(CameraFeed):
 
         assert self._start_time is not None, "Start time is not initialized"
         timestamp = end - self._start_time
-        integer_part = f"{int(timestamp):010d}"
-        fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
-        frame_number = f"{frames.get_frame_number():012d}"
-        filename = f"{integer_part}_{fraction_part}_{frame_number}.png"
-        filepath = os.path.join(self._dest_dir, filename)
-
+        
         # ir_frame = frames.get_infrared_frame()
         rgb_frame = frames.get_color_frame()
 
         # ir_data = np.asanyarray(ir_frame.get_data())
         rgb_data = np.asanyarray(rgb_frame.get_data())
 
-        # Save as numpy array
-        cv2.imwrite(filepath, rgb_data)
+        # Only save frame if recording is enabled
+        if self._is_recording:
+            integer_part = f"{int(timestamp):010d}"
+            fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
+            frame_number = f"{frames.get_frame_number():012d}"
+            filename = f"{integer_part}_{fraction_part}_{frame_number}.png"
+            filepath = os.path.join(self._dest_dir, filename)
 
-        # print(f"***** D455 **** Saved data to {filepath}")
+            # Save as numpy array
+            cv2.imwrite(filepath, rgb_data)
+            # print(f"***** D455 **** Saved data to {filepath}")
 
         return D455Frame(timestamp, rgb_data)
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
         assert self._frame_queue is not None, "Frame queue is not initialized"
         while not stop_event.is_set():
+            # Check for control commands periodically
+            self._check_control_commands()
+            
             # Wait for a frame to be available
             try:
                 video_frame = self._frame_queue.get(timeout=1)
@@ -98,8 +124,11 @@ class D455(CameraFeed):
 
         print("***** D455 send_frame **** Stopped... *****")
 
-    def run(self, stream_queue: multiprocessing.Queue, stop_event):
+    def run(self, stream_queue: multiprocessing.Queue, stop_event, control_queue: Optional[multiprocessing.Queue] = None):
         print("***** D455 **** Starting... *****")
+        
+        # Store control queue reference
+        self._control_queue = control_queue
         
         # Initialize components in target process
         self._start_time = time.perf_counter()
@@ -128,6 +157,9 @@ class D455(CameraFeed):
 
         while not stop_event.is_set():
             try:
+                # Check for control commands
+                self._check_control_commands()
+                
                 # Update the data and check if the data is okay
                 video_frame = self._read_and_store_frame()
                 self._frame_queue.put(video_frame)

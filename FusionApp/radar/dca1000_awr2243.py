@@ -55,6 +55,10 @@ class DCA1000EVM(RadarFeed):
         self._last_frame_number = 0
         self.logger = None
         self._send_thread: Optional[threading.Thread] = None
+        
+        # Recording control
+        self._is_recording = False
+        self._control_queue: Optional[multiprocessing.Queue] = None
 
     def __enter__(self):
         return self
@@ -68,6 +72,29 @@ class DCA1000EVM(RadarFeed):
         if self.logger is not None:
             self.logger.info("***** DCA1000 cleaned up. *****")
 
+    def _check_control_commands(self):
+        """Check for recording control commands"""
+        if self._control_queue is None:
+            return
+            
+        try:
+            while True:
+                command = self._control_queue.get_nowait()
+                if command == "start_recording":
+                    self._is_recording = True
+                    if self.logger:
+                        self.logger.info("***** DCA1000EVM **** Recording started")
+                    else:
+                        print("***** DCA1000EVM **** Recording started")
+                elif command == "stop_recording":
+                    self._is_recording = False
+                    if self.logger:
+                        self.logger.info("***** DCA1000EVM **** Recording stopped")
+                    else:
+                        print("***** DCA1000EVM **** Recording stopped")
+        except queue.Empty:
+            pass
+
     def _read_and_store_frame(self):
         # Read the data from the DCA1000
         start = time.perf_counter()
@@ -80,22 +107,28 @@ class DCA1000EVM(RadarFeed):
 
         assert self._start_time is not None, "Start time is not initialized"
         timestamp = end - self._start_time
-        integer_part = f"{int(timestamp):010d}"
-        fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
-        frame_number = f"{self._last_frame_number:012d}"
-        filename = f"{integer_part}_{fraction_part}_{frame_number}.bin"
-        filepath = os.path.join(self._dest_dir, filename)
+        
+        # Only save frame if recording is enabled
+        if self._is_recording:
+            integer_part = f"{int(timestamp):010d}"
+            fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
+            frame_number = f"{self._last_frame_number:012d}"
+            filename = f"{integer_part}_{fraction_part}_{frame_number}.bin"
+            filepath = os.path.join(self._dest_dir, filename)
 
-        with open(filepath, "wb") as bin_file:
-            data_buf.tofile(bin_file)
+            with open(filepath, "wb") as bin_file:
+                data_buf.tofile(bin_file)
 
-        # print(f"***** DCA1000EVM **** Saved data to {filepath}")
+            # print(f"***** DCA1000EVM **** Saved data to {filepath}")
 
         return DCA1000Frame(timestamp, data_buf)
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
         assert self._frame_queue is not None, "Frame queue is not initialized"
         while not stop_event.is_set():
+            # Check for control commands periodically
+            self._check_control_commands()
+            
             # Wait for a frame to be available
             try:
                 dca_frame = self._frame_queue.get(timeout=1)
@@ -119,7 +152,9 @@ class DCA1000EVM(RadarFeed):
                 if self.logger is not None:
                     self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
-                break
+
+        if self.logger is not None:
+            self.logger.info("***** DCA1000EVM send_frame **** Stopped... *****")
 
     def run(
         self,
@@ -128,8 +163,13 @@ class DCA1000EVM(RadarFeed):
         control_queue: Optional[multiprocessing.Queue] = None,
         status_queue: Optional[multiprocessing.Queue] = None,
     ):
-        # Initialize logger and components in target process
+        # Initialize logger in target process
         self.logger = setup_logger("DCA1000EVM")
+        
+        # Store control queue reference
+        self._control_queue = control_queue
+
+        # Initialize logger and components in target process
         self.logger.info("Starting... *****")
 
         # Create destination directory if it doesn't exist
@@ -197,6 +237,9 @@ class DCA1000EVM(RadarFeed):
 
         while not stop_event.is_set():
             try:
+                # Check for control commands
+                self._check_control_commands()
+                
                 # Update the data and check if the data is okay
                 radar_frame = self._read_and_store_frame()
 
