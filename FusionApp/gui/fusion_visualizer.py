@@ -11,7 +11,12 @@ import logging
 import traceback
 import queue
 import numpy as np
+
+# Fix OpenCV Qt plugin conflicts before importing cv2 - only on Linux
+if os.name != 'nt':  # Not Windows
+    os.environ.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
 import cv2
+
 from typing import Optional, Callable, Dict, Any, List
 
 from PyQt5.QtWidgets import (
