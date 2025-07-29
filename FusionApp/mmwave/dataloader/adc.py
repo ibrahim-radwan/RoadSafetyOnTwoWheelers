@@ -12,6 +12,7 @@
 # ==============================================================================
 
 import codecs
+import os
 import socket
 import struct
 import json
@@ -154,6 +155,11 @@ class DCA1000:
         self.data_socket = socket.socket(socket.AF_INET,
                                          socket.SOCK_DGRAM,
                                          socket.IPPROTO_UDP)
+
+        # Enable socket reuse to prevent "Address already in use" errors - only on Linux
+        if os.name != 'nt':  # Not Windows
+            self.config_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.data_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         # Bind data socket to fpga
         self.data_socket.bind(self.data_recv)

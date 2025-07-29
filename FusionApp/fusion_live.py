@@ -3,14 +3,25 @@ Live fusion application using the new polymorphic architecture.
 This is a clean, modern replacement using the refactored engine.
 """
 
+import os
+import sys
 import multiprocessing
 from multiprocessing import Queue, Event
 import time
 import signal
-import sys
 import threading
 import queue
 import argparse
+
+# Fix Qt platform plugin issues with OpenCV - only on Linux
+if os.name != 'nt':  # Not Windows
+    # Remove the OpenCV Qt plugin path from environment
+    if 'QT_QPA_PLATFORM_PLUGIN_PATH' in os.environ:
+        del os.environ['QT_QPA_PLATFORM_PLUGIN_PATH']
+
+    # Force Qt to use a working platform - try xcb first, fallback to offscreen
+    os.environ['QT_QPA_PLATFORM'] = 'xcb'
+    os.environ['QT_DEBUG_PLUGINS'] = '0'
 
 from PyQt5.QtWidgets import QApplication
 
@@ -137,12 +148,29 @@ class LiveFusionApp:
             self.stop_event.set()
 
         finally:
-            # Clean shutdown
+            # Clean shutdown with improved process termination
             print("Shutting down...")
-            fusion_process.join(timeout=5)
-
+            self.stop_event.set()
+            
+            # Give processes time to clean up
+            time.sleep(1)
+            
+            # Try graceful shutdown first
             if fusion_process.is_alive():
+                print("Waiting for fusion process to terminate...")
+                fusion_process.join(timeout=3)
+            
+            # Force termination if still alive
+            if fusion_process.is_alive():
+                print("Force terminating fusion process...")
                 fusion_process.terminate()
+                fusion_process.join(timeout=2)
+            
+            # Kill if still alive
+            if fusion_process.is_alive():
+                print("Force killing fusion process...")
+                fusion_process.kill()
+                fusion_process.join()
 
             print("Shutdown complete.")
 
@@ -237,12 +265,29 @@ class LiveFusionApp:
             self.stop_event.set()
 
         finally:
-            # Clean shutdown
+            # Clean shutdown with improved process termination
             print("Shutting down...")
-            fusion_process.join(timeout=5)
-
+            self.stop_event.set()
+            
+            # Give processes time to clean up
+            time.sleep(1)
+            
+            # Try graceful shutdown first
             if fusion_process.is_alive():
+                print("Waiting for fusion process to terminate...")
+                fusion_process.join(timeout=3)
+            
+            # Force termination if still alive
+            if fusion_process.is_alive():
+                print("Force terminating fusion process...")
                 fusion_process.terminate()
+                fusion_process.join(timeout=2)
+            
+            # Kill if still alive
+            if fusion_process.is_alive():
+                print("Force killing fusion process...")
+                fusion_process.kill()
+                fusion_process.join()
 
             print("Shutdown complete.")
 
