@@ -7,7 +7,6 @@ import glob
 import re
 from enum import Enum
 from mmwave.dataloader import DCA1000
-import fpga_udp as radar
 import threading
 from typing import Optional, List, Tuple
 from numpy import ndarray
@@ -68,7 +67,6 @@ class DCA1000EVM(RadarFeed):
             self._dca.fastRead_in_Cpp_thread_stop()
             self._dca.stream_stop()
             self._dca.close()
-            radar.AWR2243_poweroff()
         if self.logger is not None:
             self.logger.info("Cleaned up")
 
@@ -191,14 +189,9 @@ class DCA1000EVM(RadarFeed):
 
         self._dca = DCA1000()
 
-        self._dca.reset_radar()
         self._dca.reset_fpga()
         self.logger.info("Waiting 1s for radar and FPGA reset...")
         time.sleep(1)
-
-        radar.AWR2243_init(self._config.radar_config_file)
-
-        radar.AWR2243_setFrameCfg(0)
 
         (
             LVDSDataSizePerChirp_l,
@@ -228,8 +221,6 @@ class DCA1000EVM(RadarFeed):
 
         self._dca.stream_start()
         self._dca.fastRead_in_Cpp_thread_start()
-
-        radar.AWR2243_sensorStart()
 
         # Create and start a thread for sending frames
         self._send_thread = threading.Thread(
@@ -262,7 +253,6 @@ class DCA1000EVM(RadarFeed):
             self._dca.fastRead_in_Cpp_thread_stop()
             self._dca.stream_stop()
             self._dca.close()
-            radar.AWR2243_poweroff()
 
         self.logger.info("Stopped")
 

@@ -12,16 +12,17 @@ import signal
 import threading
 import queue
 import argparse
+import fpga_udp
 
 # Fix Qt platform plugin issues with OpenCV - only on Linux
-if os.name != 'nt':  # Not Windows
+if os.name != "nt":  # Not Windows
     # Remove the OpenCV Qt plugin path from environment
-    if 'QT_QPA_PLATFORM_PLUGIN_PATH' in os.environ:
-        del os.environ['QT_QPA_PLATFORM_PLUGIN_PATH']
+    if "QT_QPA_PLATFORM_PLUGIN_PATH" in os.environ:
+        del os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"]
 
     # Force Qt to use a working platform - try xcb first, fallback to offscreen
-    os.environ['QT_QPA_PLATFORM'] = 'xcb'
-    os.environ['QT_DEBUG_PLUGINS'] = '0'
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+    os.environ["QT_DEBUG_PLUGINS"] = "0"
 
 from PyQt5.QtWidgets import QApplication
 
@@ -29,7 +30,6 @@ from engine.fusion_factory import FusionFactory
 from gui.fusion_visualizer import FusionVisualizer
 from sample_processing.radar_params import ADCParams
 from config_params import CFGS
-from radar.radar_initializer import RadarInitializer
 from utils import setup_logger
 
 
@@ -158,21 +158,21 @@ class LiveFusionApp:
             # Clean shutdown with improved process termination
             self.logger.info("Shutting down...")
             self.stop_event.set()
-            
+
             # Give processes time to clean up
             time.sleep(1)
-            
+
             # Try graceful shutdown first
             if fusion_process.is_alive():
                 self.logger.info("Waiting for fusion process to terminate...")
                 fusion_process.join(timeout=3)
-            
+
             # Force termination if still alive
             if fusion_process.is_alive():
                 self.logger.warning("Force terminating fusion process...")
                 fusion_process.terminate()
                 fusion_process.join(timeout=2)
-            
+
             # Kill if still alive
             if fusion_process.is_alive():
                 self.logger.warning("Force killing fusion process...")
@@ -275,21 +275,23 @@ class LiveFusionApp:
             # Clean shutdown with improved process termination
             self.logger.info("Shutting down...")
             self.stop_event.set()
-            
+
             # Give processes time to clean up
             time.sleep(1)
-            
+
+            fpga_udp.AWR2243_poweroff()
+
             # Try graceful shutdown first
             if fusion_process.is_alive():
                 self.logger.info("Waiting for fusion process to terminate...")
                 fusion_process.join(timeout=3)
-            
+
             # Force termination if still alive
             if fusion_process.is_alive():
                 self.logger.warning("Force terminating fusion process...")
                 fusion_process.terminate()
                 fusion_process.join(timeout=2)
-            
+
             # Kill if still alive
             if fusion_process.is_alive():
                 self.logger.warning("Force killing fusion process...")
@@ -320,6 +322,22 @@ def main():
 
     try:
         app = LiveFusionApp()
+
+        # initialize AWR2243 radar as it only works in main process
+        ret = fpga_udp.AWR2243_init(CFGS.AWR2243_CONFIG_FILE)
+        if ret != 0:
+            logger.error("Failed to initialize AWR2243 radar with return code: %d", ret)
+            sys.exit(0)
+
+        fpga_udp.AWR2243_setFrameCfg(0)
+
+        ret = fpga_udp.AWR2243_sensorStart()
+
+        if ret != 0:
+            logger.error("Failed to start AWR2243 sensor with return code: %d", ret)
+            sys.exit(0)
+
+        time.sleep(1)  # Allow time for radar to start
 
         if args.radar_only:
             app.run_radar_only(args.use_3d)
