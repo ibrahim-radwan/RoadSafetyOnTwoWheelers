@@ -30,10 +30,16 @@ from gui.fusion_visualizer import FusionVisualizer
 from sample_processing.radar_params import ADCParams
 from config_params import CFGS
 from radar.radar_initializer import RadarInitializer
+from utils import setup_logger
+
+
+# Module-level logger for main function
+logger = setup_logger("fusion_live")
 
 
 class LiveFusionApp:
     def __init__(self):
+        self.logger = setup_logger("LiveFusionApp")
         self.stop_event = Event()
         self.radar_results_queue = Queue()
         self.camera_results_queue = Queue()
@@ -50,7 +56,7 @@ class LiveFusionApp:
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
-        print(f"\nReceived signal {signum}, shutting down...")
+        self.logger.info(f"Received signal {signum}, shutting down...")
         self.stop_event.set()
         # Clean up radar resources
         if hasattr(self, 'radar_initializer'):
@@ -58,13 +64,13 @@ class LiveFusionApp:
 
     def run_camera_and_radar(self, use_3d: bool = False):
         """Run live camera + radar fusion with GUI"""
-        print("Starting Live Camera + Radar Fusion...")
+        self.logger.info("Starting Live Camera + Radar Fusion...")
 
         try:
             # Initialize radar in main process
-            print("Initializing radar in main process...")
+            self.logger.info("Initializing radar in main process...")
             self.radar_init_data = self.radar_initializer.initialize()
-            print("Radar initialization completed successfully")
+            self.logger.info("Radar initialization completed successfully")
             
             # Use ADC parameters from radar initialization (no need to recreate)
             adc_params = ADCParams(CFGS.AWR2243_CONFIG_FILE)  # Still needed for visualizer
@@ -85,7 +91,7 @@ class LiveFusionApp:
                 ),
             )
         except Exception as e:
-            print(f"Failed to initialize radar or create fusion engine: {e}")
+            self.logger.error(f"Failed to initialize radar or create fusion engine: {e}")
             return
 
         # Current data storage
@@ -113,11 +119,11 @@ class LiveFusionApp:
 
             # Set up record callback - now actually controls recording
             def record_callback(command):
-                print(f"Record command: {command}")
+                self.logger.info(f"Record command: {command}")
                 try:
                     self.control_queue.put(command)
                 except Exception as e:
-                    print(f"Error sending record command: {e}")
+                    self.logger.error(f"Error sending record command: {e}")
 
             visualizer.set_record_callback(record_callback)
 
@@ -148,7 +154,7 @@ class LiveFusionApp:
                         time.sleep(0.01)  # Small sleep to prevent busy waiting
 
                 except Exception as e:
-                    print(f"Error in data processor: {e}")
+                    self.logger.error(f"Error in data processor: {e}")
                     self.stop_event.set()
 
             # Start data processing thread
@@ -162,12 +168,12 @@ class LiveFusionApp:
                 self.stop_event.set()
 
         except KeyboardInterrupt:
-            print("Keyboard interrupt received, stopping...")
+            self.logger.info("Keyboard interrupt received, stopping...")
             self.stop_event.set()
 
         finally:
             # Clean shutdown with improved process termination
-            print("Shutting down...")
+            self.logger.info("Shutting down...")
             self.stop_event.set()
             
             # Clean up radar resources
@@ -178,32 +184,32 @@ class LiveFusionApp:
             
             # Try graceful shutdown first
             if fusion_process.is_alive():
-                print("Waiting for fusion process to terminate...")
+                self.logger.info("Waiting for fusion process to terminate...")
                 fusion_process.join(timeout=3)
             
             # Force termination if still alive
             if fusion_process.is_alive():
-                print("Force terminating fusion process...")
+                self.logger.warning("Force terminating fusion process...")
                 fusion_process.terminate()
                 fusion_process.join(timeout=2)
             
             # Kill if still alive
             if fusion_process.is_alive():
-                print("Force killing fusion process...")
+                self.logger.warning("Force killing fusion process...")
                 fusion_process.kill()
                 fusion_process.join()
 
-            print("Shutdown complete.")
+            self.logger.info("Shutdown complete.")
 
     def run_radar_only(self, use_3d: bool = False):
         """Run live radar-only mode with GUI"""
-        print("Starting Live Radar-Only Mode...")
+        self.logger.info("Starting Live Radar-Only Mode...")
 
         try:
             # Initialize radar in main process
-            print("Initializing radar in main process...")
+            self.logger.info("Initializing radar in main process...")
             self.radar_init_data = self.radar_initializer.initialize()
-            print("Radar initialization completed successfully")
+            self.logger.info("Radar initialization completed successfully")
             
             # Use ADC parameters from radar initialization (no need to recreate)
             adc_params = ADCParams(CFGS.AWR2243_CONFIG_FILE)  # Still needed for visualizer
@@ -224,7 +230,7 @@ class LiveFusionApp:
                 ),
             )
         except Exception as e:
-            print(f"Failed to initialize radar or create fusion engine: {e}")
+            self.logger.error(f"Failed to initialize radar or create fusion engine: {e}")
             return
 
         # Current data storage
@@ -251,11 +257,11 @@ class LiveFusionApp:
 
             # Set up record callback - now actually controls recording
             def record_callback(command):
-                print(f"Record command: {command}")
+                self.logger.info(f"Record command: {command}")
                 try:
                     self.control_queue.put(command)
                 except Exception as e:
-                    print(f"Error sending record command: {e}")
+                    self.logger.error(f"Error sending record command: {e}")
 
             visualizer.set_record_callback(record_callback)
 
@@ -278,7 +284,7 @@ class LiveFusionApp:
                         time.sleep(0.01)  # Small sleep to prevent busy waiting
 
                 except Exception as e:
-                    print(f"Error in data processor: {e}")
+                    self.logger.error(f"Error in data processor: {e}")
                     self.stop_event.set()
 
             # Start data processing thread
@@ -292,12 +298,12 @@ class LiveFusionApp:
                 self.stop_event.set()
 
         except KeyboardInterrupt:
-            print("Keyboard interrupt received, stopping...")
+            self.logger.info("Keyboard interrupt received, stopping...")
             self.stop_event.set()
 
         finally:
             # Clean shutdown with improved process termination
-            print("Shutting down...")
+            self.logger.info("Shutting down...")
             self.stop_event.set()
             
             # Clean up radar resources
@@ -308,22 +314,22 @@ class LiveFusionApp:
             
             # Try graceful shutdown first
             if fusion_process.is_alive():
-                print("Waiting for fusion process to terminate...")
+                self.logger.info("Waiting for fusion process to terminate...")
                 fusion_process.join(timeout=3)
             
             # Force termination if still alive
             if fusion_process.is_alive():
-                print("Force terminating fusion process...")
+                self.logger.warning("Force terminating fusion process...")
                 fusion_process.terminate()
                 fusion_process.join(timeout=2)
             
             # Kill if still alive
             if fusion_process.is_alive():
-                print("Force killing fusion process...")
+                self.logger.warning("Force killing fusion process...")
                 fusion_process.kill()
                 fusion_process.join()
 
-            print("Shutdown complete.")
+            self.logger.info("Shutdown complete.")
 
 
 def main():
@@ -354,7 +360,7 @@ def main():
             app.run_camera_and_radar(args.use_3d)
 
     except KeyboardInterrupt:
-        print("\nApplication interrupted by user")
+        logger.info("Application interrupted by user")
         sys.exit(0)
 
 
