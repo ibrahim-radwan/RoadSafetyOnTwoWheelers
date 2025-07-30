@@ -12,16 +12,17 @@ import signal
 import threading
 import queue
 import argparse
+import fpga_udp
 
 # Fix Qt platform plugin issues with OpenCV - only on Linux
-if os.name != 'nt':  # Not Windows
+if os.name != "nt":  # Not Windows
     # Remove the OpenCV Qt plugin path from environment
-    if 'QT_QPA_PLATFORM_PLUGIN_PATH' in os.environ:
-        del os.environ['QT_QPA_PLATFORM_PLUGIN_PATH']
+    if "QT_QPA_PLATFORM_PLUGIN_PATH" in os.environ:
+        del os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"]
 
     # Force Qt to use a working platform - try xcb first, fallback to offscreen
-    os.environ['QT_QPA_PLATFORM'] = 'xcb'
-    os.environ['QT_DEBUG_PLUGINS'] = '0'
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+    os.environ["QT_DEBUG_PLUGINS"] = "0"
 
 from PyQt5.QtWidgets import QApplication
 
@@ -29,10 +30,16 @@ from engine.fusion_factory import FusionFactory
 from gui.fusion_visualizer import FusionVisualizer
 from sample_processing.radar_params import ADCParams
 from config_params import CFGS
+from utils import setup_logger
+
+
+# Module-level logger for main function
+logger = setup_logger("fusion_live")
 
 
 class LiveFusionApp:
     def __init__(self):
+        self.logger = setup_logger("LiveFusionApp")
         self.stop_event = Event()
         self.radar_results_queue = Queue()
         self.camera_results_queue = Queue()
@@ -45,12 +52,12 @@ class LiveFusionApp:
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
-        print(f"\nReceived signal {signum}, shutting down...")
+        self.logger.info(f"Received signal {signum}, shutting down...")
         self.stop_event.set()
 
     def run_camera_and_radar(self, use_3d: bool = False):
         """Run live camera + radar fusion with GUI"""
-        print("Starting Live Camera + Radar Fusion...")
+        self.logger.info("Starting Live Camera + Radar Fusion...")
 
         # Initialize ADC parameters
         adc_params = ADCParams(CFGS.AWR2243_CONFIG_FILE)
@@ -95,11 +102,11 @@ class LiveFusionApp:
 
             # Set up record callback - now actually controls recording
             def record_callback(command):
-                print(f"Record command: {command}")
+                self.logger.info(f"Record command: {command}")
                 try:
                     self.control_queue.put(command)
                 except Exception as e:
-                    print(f"Error sending record command: {e}")
+                    self.logger.error(f"Error sending record command: {e}")
 
             visualizer.set_record_callback(record_callback)
 
@@ -130,7 +137,7 @@ class LiveFusionApp:
                         time.sleep(0.01)  # Small sleep to prevent busy waiting
 
                 except Exception as e:
-                    print(f"Error in data processor: {e}")
+                    self.logger.error(f"Error in data processor: {e}")
                     self.stop_event.set()
 
             # Start data processing thread
@@ -144,39 +151,39 @@ class LiveFusionApp:
                 self.stop_event.set()
 
         except KeyboardInterrupt:
-            print("Keyboard interrupt received, stopping...")
+            self.logger.info("Keyboard interrupt received, stopping...")
             self.stop_event.set()
 
         finally:
             # Clean shutdown with improved process termination
-            print("Shutting down...")
+            self.logger.info("Shutting down...")
             self.stop_event.set()
-            
+
             # Give processes time to clean up
             time.sleep(1)
-            
+
             # Try graceful shutdown first
             if fusion_process.is_alive():
-                print("Waiting for fusion process to terminate...")
+                self.logger.info("Waiting for fusion process to terminate...")
                 fusion_process.join(timeout=3)
-            
+
             # Force termination if still alive
             if fusion_process.is_alive():
-                print("Force terminating fusion process...")
+                self.logger.warning("Force terminating fusion process...")
                 fusion_process.terminate()
                 fusion_process.join(timeout=2)
-            
+
             # Kill if still alive
             if fusion_process.is_alive():
-                print("Force killing fusion process...")
+                self.logger.warning("Force killing fusion process...")
                 fusion_process.kill()
                 fusion_process.join()
 
-            print("Shutdown complete.")
+            self.logger.info("Shutdown complete.")
 
     def run_radar_only(self, use_3d: bool = False):
         """Run live radar-only mode with GUI"""
-        print("Starting Live Radar-Only Mode...")
+        self.logger.info("Starting Live Radar-Only Mode...")
 
         # Initialize ADC parameters
         adc_params = ADCParams(CFGS.AWR2243_CONFIG_FILE)
@@ -220,11 +227,11 @@ class LiveFusionApp:
 
             # Set up record callback - now actually controls recording
             def record_callback(command):
-                print(f"Record command: {command}")
+                self.logger.info(f"Record command: {command}")
                 try:
                     self.control_queue.put(command)
                 except Exception as e:
-                    print(f"Error sending record command: {e}")
+                    self.logger.error(f"Error sending record command: {e}")
 
             visualizer.set_record_callback(record_callback)
 
@@ -247,7 +254,7 @@ class LiveFusionApp:
                         time.sleep(0.01)  # Small sleep to prevent busy waiting
 
                 except Exception as e:
-                    print(f"Error in data processor: {e}")
+                    self.logger.error(f"Error in data processor: {e}")
                     self.stop_event.set()
 
             # Start data processing thread
@@ -261,35 +268,37 @@ class LiveFusionApp:
                 self.stop_event.set()
 
         except KeyboardInterrupt:
-            print("Keyboard interrupt received, stopping...")
+            self.logger.info("Keyboard interrupt received, stopping...")
             self.stop_event.set()
 
         finally:
             # Clean shutdown with improved process termination
-            print("Shutting down...")
+            self.logger.info("Shutting down...")
             self.stop_event.set()
-            
+
             # Give processes time to clean up
             time.sleep(1)
-            
+
+            fpga_udp.AWR2243_poweroff()
+
             # Try graceful shutdown first
             if fusion_process.is_alive():
-                print("Waiting for fusion process to terminate...")
+                self.logger.info("Waiting for fusion process to terminate...")
                 fusion_process.join(timeout=3)
-            
+
             # Force termination if still alive
             if fusion_process.is_alive():
-                print("Force terminating fusion process...")
+                self.logger.warning("Force terminating fusion process...")
                 fusion_process.terminate()
                 fusion_process.join(timeout=2)
-            
+
             # Kill if still alive
             if fusion_process.is_alive():
-                print("Force killing fusion process...")
+                self.logger.warning("Force killing fusion process...")
                 fusion_process.kill()
                 fusion_process.join()
 
-            print("Shutdown complete.")
+            self.logger.info("Shutdown complete.")
 
 
 def main():
@@ -314,13 +323,29 @@ def main():
     try:
         app = LiveFusionApp()
 
+        # initialize AWR2243 radar as it only works in main process
+        ret = fpga_udp.AWR2243_init(CFGS.AWR2243_CONFIG_FILE)
+        if ret != 0:
+            logger.error("Failed to initialize AWR2243 radar with return code: %d", ret)
+            sys.exit(0)
+
+        fpga_udp.AWR2243_setFrameCfg(0)
+
+        ret = fpga_udp.AWR2243_sensorStart()
+
+        if ret != 0:
+            logger.error("Failed to start AWR2243 sensor with return code: %d", ret)
+            sys.exit(0)
+
+        time.sleep(1)  # Allow time for radar to start
+
         if args.radar_only:
             app.run_radar_only(args.use_3d)
         else:
             app.run_camera_and_radar(args.use_3d)
 
     except KeyboardInterrupt:
-        print("\nApplication interrupted by user")
+        logger.info("Application interrupted by user")
         sys.exit(0)
 
 
