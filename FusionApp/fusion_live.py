@@ -45,10 +45,6 @@ class LiveFusionApp:
         self.camera_results_queue = Queue()
         # Add control queue for recording control
         self.control_queue = Queue()
-        
-        # Initialize radar in main process to avoid multiprocessing issues
-        self.radar_initializer = RadarInitializer()
-        self.radar_init_data = None
 
         # Set up signal handlers for clean shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -58,41 +54,28 @@ class LiveFusionApp:
         """Handle shutdown signals gracefully"""
         self.logger.info(f"Received signal {signum}, shutting down...")
         self.stop_event.set()
-        # Clean up radar resources
-        if hasattr(self, 'radar_initializer'):
-            self.radar_initializer.cleanup()
 
     def run_camera_and_radar(self, use_3d: bool = False):
         """Run live camera + radar fusion with GUI"""
         self.logger.info("Starting Live Camera + Radar Fusion...")
 
-        try:
-            # Initialize radar in main process
-            self.logger.info("Initializing radar in main process...")
-            self.radar_init_data = self.radar_initializer.initialize()
-            self.logger.info("Radar initialization completed successfully")
-            
-            # Use ADC parameters from radar initialization (no need to recreate)
-            adc_params = ADCParams(CFGS.AWR2243_CONFIG_FILE)  # Still needed for visualizer
+        # Initialize ADC parameters
+        adc_params = ADCParams(CFGS.AWR2243_CONFIG_FILE)
 
-            # Create fusion engine with live camera and radar
-            fusion_engine = FusionFactory.create_live_fusion()
+        # Create fusion engine with live camera and radar
+        fusion_engine = FusionFactory.create_live_fusion()
 
-            # Start fusion engine in a separate process
-            fusion_process = multiprocessing.Process(
-                target=fusion_engine.run,
-                args=(
-                    self.radar_results_queue,
-                    self.camera_results_queue,
-                    self.stop_event,
-                    self.control_queue,  # Pass control queue for recording control
-                    None,  # status_queue not needed for live mode
-                    self.radar_init_data,  # Pass radar initialization data directly to run method
-                ),
-            )
-        except Exception as e:
-            self.logger.error(f"Failed to initialize radar or create fusion engine: {e}")
-            return
+        # Start fusion engine in a separate process
+        fusion_process = multiprocessing.Process(
+            target=fusion_engine.run,
+            args=(
+                self.radar_results_queue,
+                self.camera_results_queue,
+                self.stop_event,
+                self.control_queue,  # Pass control queue for recording control
+                None,  # status_queue not needed for live mode
+            ),
+        )
 
         # Current data storage
         self._current_radar_data = None
@@ -176,9 +159,6 @@ class LiveFusionApp:
             self.logger.info("Shutting down...")
             self.stop_event.set()
             
-            # Clean up radar resources
-            self.radar_initializer.cleanup()
-            
             # Give processes time to clean up
             time.sleep(1)
             
@@ -205,33 +185,23 @@ class LiveFusionApp:
         """Run live radar-only mode with GUI"""
         self.logger.info("Starting Live Radar-Only Mode...")
 
-        try:
-            # Initialize radar in main process
-            self.logger.info("Initializing radar in main process...")
-            self.radar_init_data = self.radar_initializer.initialize()
-            self.logger.info("Radar initialization completed successfully")
-            
-            # Use ADC parameters from radar initialization (no need to recreate)
-            adc_params = ADCParams(CFGS.AWR2243_CONFIG_FILE)  # Still needed for visualizer
+        # Initialize ADC parameters
+        adc_params = ADCParams(CFGS.AWR2243_CONFIG_FILE)
 
-            # Create fusion engine with radar only
-            fusion_engine = FusionFactory.create_live_radar_only()
+        # Create fusion engine with radar only
+        fusion_engine = FusionFactory.create_live_radar_only()
 
-            # Start fusion engine in a separate process
-            fusion_process = multiprocessing.Process(
-                target=fusion_engine.run,
-                args=(
-                    self.radar_results_queue,
-                    None,  # No camera results queue
-                    self.stop_event,
-                    self.control_queue,  # Pass control queue for recording control
-                    None,  # status_queue not needed for live mode
-                    self.radar_init_data,  # Pass radar initialization data directly to run method
-                ),
-            )
-        except Exception as e:
-            self.logger.error(f"Failed to initialize radar or create fusion engine: {e}")
-            return
+        # Start fusion engine in a separate process
+        fusion_process = multiprocessing.Process(
+            target=fusion_engine.run,
+            args=(
+                self.radar_results_queue,
+                None,  # No camera results queue
+                self.stop_event,
+                self.control_queue,  # Pass control queue for recording control
+                None,  # status_queue not needed for live mode
+            ),
+        )
 
         # Current data storage
         self._current_radar_data = None
@@ -305,9 +275,6 @@ class LiveFusionApp:
             # Clean shutdown with improved process termination
             self.logger.info("Shutting down...")
             self.stop_event.set()
-            
-            # Clean up radar resources
-            self.radar_initializer.cleanup()
             
             # Give processes time to clean up
             time.sleep(1)

@@ -27,6 +27,7 @@ class FusionFactory:
         Args:
             camera_config: Configuration for camera
             radar_config: Configuration for radar
+            radar_config_file: Path to radar configuration file for analyzer
 
         Returns:
             Configured FusionEngine with configuration dictionaries
@@ -74,6 +75,7 @@ class FusionFactory:
 
         Args:
             radar_config: Configuration for radar
+            radar_config_file: Path to radar configuration file for analyzer
 
         Returns:
             Configured FusionEngine with configuration dictionaries for radar only

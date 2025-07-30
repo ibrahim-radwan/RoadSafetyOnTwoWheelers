@@ -50,7 +50,7 @@ class FusionEngine:
                 "Camera feed config and camera analyser config must both be provided or both be None"
             )
 
-    def _create_radar_feed(self, config: dict, radar_init_data: Optional[dict] = None):
+    def _create_radar_feed(self, config: dict):
         """Create radar feed instance from configuration."""
         feed_type = config["type"]
         sync_state = config.get("sync_state")
@@ -63,7 +63,7 @@ class FusionEngine:
             radar_config = DCA1000Config(radar_config_file=radar_config_file)
             if "dest_dir" in config:
                 radar_config.dest_dir = config["dest_dir"]
-            return DCA1000EVM(radar_config, radar_init_data=radar_init_data)
+            return DCA1000EVM(radar_config)
         elif feed_type == "DCA1000Recording":
             from radar.dca1000_awr2243 import DCA1000Recording, DCA1000Config
 
@@ -123,7 +123,6 @@ class FusionEngine:
         stop_event=None,
         control_queue: Optional[Queue] = None,
         status_queue: Optional[Queue] = None,
-        radar_init_data: Optional[dict] = None,
     ):
         """
         Run the fusion engine with polymorphic feeds and analyzers.
@@ -157,7 +156,7 @@ class FusionEngine:
         # Create instances using configuration in the target process
         self.logger.info("Creating feed and analyzer instances...")
         try:
-            radar_feed = self._create_radar_feed(self.radar_feed_config, radar_init_data)
+            radar_feed = self._create_radar_feed(self.radar_feed_config)
             radar_analyser = self._create_radar_analyser(self.radar_analyser_config)
 
             camera_feed = None

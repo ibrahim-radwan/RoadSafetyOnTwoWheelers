@@ -42,20 +42,10 @@ class DCA1000Frame:
 
 
 class DCA1000EVM(RadarFeed):
-    def __init__(self, dca1000_config: DCA1000Config = DCA1000Config(), radar_init_data: Optional[dict] = None):
+    def __init__(self, dca1000_config: DCA1000Config = DCA1000Config()):
         # Store only serializable configuration
         self._config = dca1000_config
         self._dest_dir = dca1000_config.dest_dir
-        
-        # radar_init_data is REQUIRED - contains pre-initialized radar data from main process
-        # This is mandatory because radar initialization must be done in the main process
-        # to avoid multiprocessing issues with DCA1000 and fpga_udp libraries
-        if radar_init_data is None:
-            raise ValueError(
-                "radar_init_data is required. Radar initialization must be done in main process "
-                "to avoid multiprocessing issues with DCA1000 and fpga_udp libraries."
-            )
-        self._radar_init_data = radar_init_data
 
         # Initialize these in run() method
         self._start_time: Optional[float] = None
@@ -77,8 +67,8 @@ class DCA1000EVM(RadarFeed):
         if self._dca is not None:
             self._dca.fastRead_in_Cpp_thread_stop()
             self._dca.stream_stop()
-            # Note: Don't close the DCA instance here as it's owned by RadarInitializer
-            # Note: radar.AWR2243_poweroff() is now handled by RadarInitializer.cleanup()
+            self._dca.close()
+            radar.AWR2243_poweroff()
         if self.logger is not None:
             self.logger.info("Cleaned up")
 
@@ -199,27 +189,47 @@ class DCA1000EVM(RadarFeed):
         self._start_time = time.perf_counter()
         self._frame_queue = queue.Queue()
 
-        # Use pre-initialized radar data (MANDATORY)
-        # Radar initialization MUST be done in main process to avoid multiprocessing
-        # issues with DCA1000 and fpga_udp libraries
-        self.logger.info("Using pre-initialized radar data from main process...")
-        
-        # Extract the pre-initialized data
-        self._ADC_PARAMS_l = self._radar_init_data["adc_params"]
-        
-        # Use the pre-initialized DCA1000 instance directly
-        # This avoids the overhead of closing and reopening the connection
-        self._dca = self._radar_init_data["dca_instance"]
-        
-        self.logger.info("Using pre-initialized DCA1000 instance and radar configuration")
+        self._dca = DCA1000()
+
+        self._dca.reset_radar()
+        self._dca.reset_fpga()
+        self.logger.info("Waiting 1s for radar and FPGA reset...")
+        time.sleep(1)
+
+        radar.AWR2243_init(self._config.radar_config_file)
+
+        radar.AWR2243_setFrameCfg(0)
+
+        (
+            LVDSDataSizePerChirp_l,
+            maxSendBytesPerChirp_l,
+            self._ADC_PARAMS_l,
+            CFG_PARAMS_l,
+        ) = self._dca.AWR2243_read_config(self._config.radar_config_file)
+        self._dca.refresh_parameter()
+
+        self.logger.info(
+            "LVDSDataSizePerChirp:%d must <= maxSendBytesPerChirp:%d"
+            % (LVDSDataSizePerChirp_l, maxSendBytesPerChirp_l)
+        )
+
+        self.logger.info("System connection check: %s", self._dca.sys_alive_check())
+        self.logger.info(self._dca.read_fpga_version())
+        self.logger.info(
+            "Config fpga: %s", self._dca.config_fpga(self._config.dca_config_file)
+        )
+        self.logger.info(
+            "Config record packet delay: %s",
+            self._dca.config_record(self._config.dca_config_file),
+        )
 
         # Pass ADC parameters to the stream_queue before streaming data
         stream_queue.put({"ADC_PARAMS": self._ADC_PARAMS_l})
 
-        # self._dca.stream_start()
-        # self._dca.fastRead_in_Cpp_thread_start()
+        self._dca.stream_start()
+        self._dca.fastRead_in_Cpp_thread_start()
 
-        # radar.AWR2243_sensorStart()
+        radar.AWR2243_sensorStart()
 
         # Create and start a thread for sending frames
         self._send_thread = threading.Thread(
@@ -251,8 +261,8 @@ class DCA1000EVM(RadarFeed):
         if self._dca is not None:
             self._dca.fastRead_in_Cpp_thread_stop()
             self._dca.stream_stop()
-            # Note: Don't close the DCA instance here as it's owned by RadarInitializer
-            # Note: radar.AWR2243_poweroff() is now handled by RadarInitializer.cleanup()
+            self._dca.close()
+            radar.AWR2243_poweroff()
 
         self.logger.info("Stopped")
 
