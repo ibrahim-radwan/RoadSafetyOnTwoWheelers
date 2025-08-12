@@ -389,7 +389,7 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     #     radar_cube, adc_params.tx, adc_params.rx, adc_params.samples, magnitude=True
     # )
     capon_time = time.perf_counter() - capon_start
-    logger.info(
+    logger.debug(
         f"    [RADAR_PROFILE] Capon beamforming ({adc_params.samples} iterations): {capon_time:.4f}s"
     )
     logger.debug(
@@ -720,11 +720,8 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
         radar_cube, adc_params.tx, adc_params.rx, adc_params.samples
     )
 
-    print(beamWeights.flags)
-    print(range_azimuth.flags)
-
     capon_time = time.perf_counter() - capon_start
-    logger.info(
+    logger.debug(
         f"    [RADAR_PROFILE] Capon beamforming ({adc_params.samples} iterations): {capon_time:.4f}s"
     )
     logger.debug(
