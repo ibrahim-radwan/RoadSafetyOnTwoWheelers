@@ -2,3 +2,4 @@ __pycache__/
 build/
 fpga_udp.egg-info/
 FusionApp/fpga_udp/fpga_udp.cpython-310-x86_64-linux-gnu.so
+.vscode/
