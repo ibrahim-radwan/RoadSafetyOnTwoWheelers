@@ -13,6 +13,7 @@ import threading
 import queue
 import argparse
 import fpga_udp
+from mmwave import dsp
 
 # Fix Qt platform plugin issues with OpenCV - only on Linux
 if os.name != "nt":  # Not Windows
@@ -337,7 +338,8 @@ def main():
             logger.error("Failed to start AWR2243 sensor with return code: %d", ret)
             sys.exit(0)
 
-        time.sleep(1)  # Allow time for radar to start
+        # time.sleep(1)  # Allow time for radar to start: removed as precompile takes a while
+        dsp.precompile_kernels()
 
         if args.radar_only:
             app.run_radar_only(args.use_3d)
