@@ -15,6 +15,7 @@ import threading
 import queue
 import logging
 
+from mmwave import dsp
 from PyQt5.QtWidgets import QApplication
 
 from engine.fusion_factory import FusionFactory
@@ -448,6 +449,8 @@ def main():
 
     try:
         app = ReplayFusionApp(args.file_path, args.config_file)
+
+        dsp.precompile_kernels()
 
         if args.radar_only:
             app.run_replay_radar_only(args.use_3d)

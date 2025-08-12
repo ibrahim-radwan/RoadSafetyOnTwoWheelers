@@ -70,7 +70,7 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
     fft2d_azimuth_out = np.fft.fftshift(fft2d_azimuth_out, axes=2)
     # Filter fft2d_azimuth_out with the DopplerIdx from CFAR and PG
     # azimuth_in(numDetObj, numVirtualAntennas)
-    azimuth_in = np.zeros((num_det_obj, config.numAngleBins), dtype=np.complex128)
+    azimuth_in = np.zeros((num_det_obj, config.numAngleBins), dtype=np.complex64)
     azimuth_in[:, :config.numVirtualAntAzim] = np.array([fft2d_azimuth_out[i, :, dopplerIdx] for i, dopplerIdx in
                                                          enumerate(
                                                              det_obj_2d[:, DOPPLERIDX].astype(np.uint32))]).squeeze()
@@ -249,6 +249,141 @@ def aoa_capon(x, steering_vector, magnitude=False):
         return np.abs(den), weights
     else:
         return den, weights
+
+from numba import njit, prange
+
+@njit(cache=True)
+def gen_steering_vec_jitted(ang_est_range, ang_est_resolution, num_ant):
+    # Returns (num_vec, steering_vectors) with dtype complex64
+    num_vec = int(2 * ang_est_range / ang_est_resolution + 1)
+    steering_vectors = np.empty((num_vec, num_ant), dtype=np.complex64)
+    for kk in range(num_vec):
+        theta = (-ang_est_range + kk * ang_est_resolution) * (np.pi / 180.0)
+        s = np.sin(theta)
+        for jj in range(num_ant):
+            phase = -np.pi * jj * s
+            steering_vectors[kk, jj] = np.cos(phase) + 1j * np.sin(phase)
+    return num_vec, steering_vectors
+
+
+@njit(parallel=False, fastmath=True, nogil=True)
+def aoa_capon_jitted(x_arr, adc_tx, adc_rx, adc_samples):
+    """Perform AOA estimation using Capon (MVDR) Beamforming on a rx by chirp slice
+
+    Calculate the aoa spectrum via capon beamforming method using one full frame as input.
+    This should be performed for each range bin to achieve AOA estimation for a full frame
+    This function will calculate both the angle spectrum and corresponding Capon weights using
+    the equations prescribed below.
+
+    .. math::
+        P_{ca} (\\theta) = \\frac{1}{a^{H}(\\theta) R_{xx}^{-1} a(\\theta)}
+        
+        w_{ca} (\\theta) = \\frac{R_{xx}^{-1} a(\\theta)}{a^{H}(\\theta) R_{xx}^{-1} a(\\theta)}
+
+    Args:
+        x (ndarray): Output of the 1d range fft with shape (num_ant, numChirps)
+        steering_vector (ndarray): A 2D-array of size (numTheta, num_ant) generated from gen_steering_vec
+        magnitude (bool): Azimuth theta bins should return complex data (False) or magnitude data (True). Default=False
+
+    Raises:
+        ValueError: steering_vector and or x are not the correct shape
+
+    Returns:
+        A list containing numVec and steeringVectors
+        den (ndarray: A 1D-Array of size (numTheta) containing azimuth angle estimations for the given range
+        weights (ndarray): A 1D-Array of size (num_ant) containing the Capon weights for the given input data
+    
+    Example:
+        >>> # In this example, dataIn is the input data organized as numFrames by RDC
+        >>> Frame = 0
+        >>> dataIn = np.random.rand((num_frames, num_chirps, num_vrx, num_adc_samples))
+        >>> for i in range(256):
+        >>>     scan_aoa_capon[i,:], _ = dss.aoa_capon(dataIn[Frame,:,:,i].T, steering_vector, magnitude=True)
+
+    """
+    
+    ANGLE_RANGE = 90
+    ANGLE_RES = 1
+    ANGLE_BINS = (ANGLE_RANGE * 2) // ANGLE_RES + 1
+
+    __range_azimuth = np.zeros((ANGLE_BINS, adc_samples), dtype=np.float32)
+    _, __steering_vec = gen_steering_vec_jitted(
+        ANGLE_RANGE, ANGLE_RES, adc_tx * adc_rx
+    )
+    __steering_vec = __steering_vec.astype(np.complex64)
+
+    __beam_weights = np.zeros(
+        (adc_tx * adc_rx, adc_samples),
+        dtype=np.complex64,
+    )
+
+    __sv_T = np.ascontiguousarray(__steering_vec.T)   # (num_ant, num_angles), complex64
+    __sv_conj = __steering_vec.conj()                 # (num_angles, num_ant)
+
+    num_ant = adc_tx * adc_rx
+    if __steering_vec.shape[1] != num_ant:
+        raise ValueError("'steering_vector' size does not match adc_tx*adc_rx")
+    if not (x_arr.shape[0] == num_ant or x_arr.shape[1] == num_ant):
+        raise ValueError("'input_data' does not have an antenna axis equal to adc_tx*adc_rx")
+
+
+    for i in prange(x_arr.shape[2]):
+        x = x_arr[:, :, i]
+        # Rxx = cov_matrix(x)
+        
+        if x.ndim > 2:
+            raise ValueError("x has more than 2 dimensions.")
+
+        if x.shape[0] != num_ant and x.shape[1] == num_ant:
+            x = x.T
+        # If neither axis equals num_ant, let downstream guard fail clearly
+        if x.shape[0] != num_ant:
+            raise ValueError("'input_data' per-bin slice has invalid antenna dimension")
+
+        # Make contiguous and unify dtype
+        X = np.ascontiguousarray(x.astype(np.complex64))
+
+        # Covariance
+        Rxx = (X @ X.conj().T) / X.shape[1]
+
+        # Forward-backward average without np.matrix/J/np.fliplr
+        Rfb = 0.5 * (Rxx + Rxx[::-1, ::-1].conj())
+
+        # Inverse
+        R_inv = np.linalg.inv(Rfb)
+
+        # first = R_inv @ steering.T  -> (num_ant, num_angles)
+        first = R_inv.astype(np.complex64) @ __sv_T
+
+        # Equivalent to einsum over antenna axis, but Numba-friendly
+        # den = 1.0 / np.sum(__sv_conj * first.T, axis=1)
+        denom = np.sum(__sv_conj * first.T, axis=1).astype(np.complex64)  # ensure complex64
+        den = np.reciprocal(denom)  # stays complex64 in Numba
+
+        # Preserve existing behavior: one weight vector per range bin as (first @ den)
+        __beam_weights[:, i] = first @ den
+
+        __range_azimuth[:, i] = np.abs(den)
+
+    return __range_azimuth, __beam_weights
+
+def precompile_kernels():
+    # Pre-JIT aoa_capon_jitted to avoid first-frame latency
+    from numba import types
+    
+    # Try precompiling by signature (fast, no execution)
+
+    print("[WARMUP] Precompiling aoa_capon_jitted by signature")
+
+    sig = (
+        types.complex64[:, :, :],  # x_arr
+        types.int64,                # adc_tx
+        types.int64,                # adc_rx
+        types.int64,                # adc_samples
+    )
+    aoa_capon_jitted.compile(sig)
+
+    print("[WARMUP] aoa_capon_jitted precompiled by signature")
 
 
 # ------------------------------- HELPER FUNCTIONS -------------------------------
@@ -848,14 +983,14 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
 
     # Zero pad azimuth
     azimuth_ant = virtual_ant[:2 * num_rx, :]
-    azimuth_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex128)
+    azimuth_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex64)
     azimuth_ant_padded[:2 * num_rx, :] = azimuth_ant
 
     # Process azimuth information
     azimuth_fft = np.fft.fft(azimuth_ant_padded, axis=0)
     k_max = np.argmax(np.abs(azimuth_fft), axis=0)  # shape = (num_detected_obj, )
     # peak_1 = azimuth_fft[k_max]
-    peak_1 = np.zeros_like(k_max, dtype=np.complex128)
+    peak_1 = np.zeros_like(k_max, dtype=np.complex64)
     for i in range(len(k_max)):
         peak_1[i] = azimuth_fft[k_max[i], i]
 
@@ -865,14 +1000,14 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
 
     # Zero pad elevation
     elevation_ant = virtual_ant[2 * num_rx:, :]
-    elevation_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex128)
+    elevation_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex64)
     # elevation_ant_padded[:len(elevation_ant)] = elevation_ant
     elevation_ant_padded[:num_rx, :] = elevation_ant
 
     # Process elevation information
     elevation_fft = np.fft.fft(elevation_ant, axis=0)
     elevation_max = np.argmax(np.log2(np.abs(elevation_fft)), axis=0)  # shape = (num_detected_obj, )
-    peak_2 = np.zeros_like(elevation_max, dtype=np.complex128)
+    peak_2 = np.zeros_like(elevation_max, dtype=np.complex64)
     # peak_2 = elevation_fft[np.argmax(np.log2(np.abs(elevation_fft)))]
     for i in range(len(elevation_max)):
         peak_2[i] = elevation_fft[elevation_max[i], i]
