@@ -1,6 +1,7 @@
 import multiprocessing
+import os
 import numpy as np
-from queue import Empty
+from queue import Empty, Full
 from camera.d455 import D455Frame
 from typing import List, Optional
 import time
@@ -111,6 +112,9 @@ class D455Analyser(CameraAnalyser):
                 # Add debug logging to see if we're receiving frames
                 self.logger.debug("D455Analyser waiting for frame...")
                 video_frame = input_queue.get(timeout=1)
+                # Allow immediate shutdown via sentinel
+                if isinstance(video_frame, dict) and video_frame.get("STOP"):
+                    break
                 self.logger.debug(f"D455Analyser received frame with timestamp: {video_frame.timestamp}")
                 
                 # Track frame analysis time separately
@@ -119,7 +123,12 @@ class D455Analyser(CameraAnalyser):
                 analysis_end_time = time.perf_counter()
                 analysis_time = analysis_end_time - analysis_start_time
                 
-                output_queue.put(D455Results(video_frame, objects))
+                # Avoid blocking if consumer is stopping
+                try:
+                    output_queue.put_nowait(D455Results(video_frame, objects))
+                except Full:
+                    self.logger.warning("Camera results queue full, dropping result to exit cleanly")
+                    # Continue without blocking
                 self.logger.debug(f"Put detection result in output queue: frame timestamp={video_frame.timestamp}, detected_objects={len(objects)}")
                 total_end_time = time.perf_counter()
                 total_processing_time_frame = total_end_time - total_start_time
@@ -155,3 +164,5 @@ class D455Analyser(CameraAnalyser):
             self.logger.info(f"[CAMERA_PROFILE] Final summary: processed {frame_count} frames, avg analysis={avg_analysis_time:.4f}s ({1/avg_analysis_time:.2f} FPS), avg total={avg_total_time:.4f}s ({1/avg_total_time:.2f} FPS)")
         
         self.logger.info("D455Analyser stopped.")
+        # Forcefully exit to avoid third-party background threads keeping process alive
+        os._exit(0)

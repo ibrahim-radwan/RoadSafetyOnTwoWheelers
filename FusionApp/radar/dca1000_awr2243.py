@@ -141,13 +141,13 @@ class DCA1000EVM(RadarFeed):
                         f"Sending frame: {dca_frame.timestamp}, messages left in queue: {self._frame_queue.qsize()}"
                     )
 
-                # Send the frame data over the multiprocessing queue
+                # Send the frame data over the multiprocessing queue without blocking
                 try:
-                    stream_queue.put(dca_frame)
+                    stream_queue.put_nowait(dca_frame)
                 except Exception as e:
                     if self.logger is not None:
-                        self.logger.error(f"Error sending data: {e}")
-                    break
+                        self.logger.warning(f"Queue busy/closed, dropping frame: {e}")
+                    time.sleep(0.001)
             except queue.Empty:
                 # No frame available, continue
                 if self.logger is not None:
@@ -248,6 +248,10 @@ class DCA1000EVM(RadarFeed):
                 self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
                 break
+
+        # Ensure sender thread exits
+        if self._send_thread and self._send_thread.is_alive():
+            self._send_thread.join(timeout=2.0)
 
         if self._dca is not None:
             self._dca.fastRead_in_Cpp_thread_stop()
@@ -528,7 +532,12 @@ class DCA1000Recording(RadarFeed):
                     # Read and send the current frame
                     try:
                         frame = self._read_frame_from_file(filepath)
-                        stream_queue.put(frame)
+                        # Avoid blocking if analyzer is shutting down
+                        try:
+                            stream_queue.put_nowait(frame)
+                        except Exception as e:
+                            self.logger.warning(f"Queue busy/closed, dropping frame: {e}")
+                            time.sleep(0.001)
 
                         self.logger.debug(
                             f"Sent frame {self._current_frame_index}: {os.path.basename(filepath)} "
@@ -716,6 +725,16 @@ class DCA1000Recording(RadarFeed):
         # Wait for sender thread to finish
         if self._send_thread and self._send_thread.is_alive():
             self._send_thread.join(timeout=5.0)
+
+        # Ensure stream_queue feeder exits from this process
+        try:
+            if stream_queue is not None:
+                stream_queue.close()
+                stream_queue.join_thread()
+        except Exception:
+            pass
+        # Explicitly exit to avoid any underlying file IO or OpenMP threads lingering
+        os._exit(0)
 
         self.logger.info("Playback stopped")
 

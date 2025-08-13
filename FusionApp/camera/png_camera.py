@@ -7,6 +7,7 @@ import glob
 from typing import Optional, List, Tuple
 import threading
 import multiprocessing
+import os
 import numpy as np
 import cv2
 from enum import Enum
@@ -128,7 +129,7 @@ class PNGCamera(CameraFeed):
         self,
         stream_queue: multiprocessing.Queue,
         stop_event,
-        _: Optional[multiprocessing.Queue] = None,
+        control_queue: Optional[multiprocessing.Queue] = None,
     ):
         """Main playback loop for recorded camera frames with synchronized timing"""
 
@@ -164,6 +165,18 @@ class PNGCamera(CameraFeed):
 
         while not stop_event.is_set():
             try:
+                # Handle external control commands if provided (e.g., stop)
+                if control_queue is not None:
+                    try:
+                        cmd = control_queue.get_nowait()
+                        if isinstance(cmd, str) and cmd == "stop":
+                            self.logger.info("Received stop command; exiting")
+                            break
+                        if isinstance(cmd, dict) and cmd.get("STOP"):
+                            self.logger.info("Received STOP sentinel; exiting")
+                            break
+                    except queue.Empty:
+                        pass
                 # Check synchronized playback state if available
                 if use_sync:
                     sync_playback_state = SyncStateUtils.get_playback_state(
@@ -254,7 +267,8 @@ class PNGCamera(CameraFeed):
                         frame = self._read_current_frame()
                         if frame is not None:
                             try:
-                                stream_queue.put(frame)
+                                # Avoid blocking during shutdown if consumer stops
+                                stream_queue.put_nowait(frame)
                                 self.logger.debug(
                                     f"Sent frame {frame_count} to analyzer: {frame.timestamp}"
                                 )
@@ -275,8 +289,9 @@ class PNGCamera(CameraFeed):
                                     )
 
                             except Exception as e:
-                                self.logger.error(f"Error sending frame: {e}")
-                                break
+                                # Queue full or closed; skip frame to allow clean shutdown
+                                self.logger.warning(f"Could not send frame (queue busy/closed): {e}")
+                                time.sleep(0.001)
 
                         # Advance to next frame
                         self._advance_frame()
@@ -292,7 +307,17 @@ class PNGCamera(CameraFeed):
                 self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
 
+        # Ensure the multiprocessing queue feeder thread in this process exits
+        try:
+            if stream_queue is not None:
+                stream_queue.close()
+                stream_queue.join_thread()
+        except Exception:
+            pass
+
         self.logger.info(f"Playback stopped. Sent total {frame_count} frames")
+        # Ensure the process fully terminates (no hardware to clean here)
+        os._exit(0)
 
     def get_current_frame_info(self) -> Optional[Tuple[int, float, str]]:
         """Get information about the current frame"""

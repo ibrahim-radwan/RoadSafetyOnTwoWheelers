@@ -270,12 +270,20 @@ class ReplayFusionApp:
             self.stop_event.set()
 
         finally:
-            # Clean shutdown
+            # Clean shutdown with extended grace period before force
             print("Shutting down...")
-            fusion_process.join(timeout=5)
-
+            total_wait = 0
+            while fusion_process.is_alive() and total_wait < 20:
+                fusion_process.join(timeout=2)
+                total_wait += 2
             if fusion_process.is_alive():
+                print("Fusion process still alive, terminating...")
                 fusion_process.terminate()
+                fusion_process.join(timeout=5)
+            if fusion_process.is_alive():
+                print("Fusion process did not terminate, killing...")
+                fusion_process.kill()
+                fusion_process.join()
 
             # Clean up manager
             self.manager.shutdown()
@@ -394,12 +402,20 @@ class ReplayFusionApp:
             self.stop_event.set()
 
         finally:
-            # Clean shutdown
+            # Clean shutdown with extended grace period before force
             print("Shutting down...")
-            fusion_process.join(timeout=5)
-
+            total_wait = 0
+            while fusion_process.is_alive() and total_wait < 20:
+                fusion_process.join(timeout=2)
+                total_wait += 2
             if fusion_process.is_alive():
+                print("Fusion process still alive, terminating...")
                 fusion_process.terminate()
+                fusion_process.join(timeout=5)
+            if fusion_process.is_alive():
+                print("Fusion process did not terminate, killing...")
+                fusion_process.kill()
+                fusion_process.join()
 
             # Clean up manager
             self.manager.shutdown()
@@ -448,6 +464,8 @@ def main():
         sys.exit(1)
 
     try:
+        # Use spawn start method to avoid inheriting background threads that can block shutdown
+        multiprocessing.set_start_method('spawn', force=True)
         app = ReplayFusionApp(args.file_path, args.config_file)
 
         dsp.precompile_kernels()
