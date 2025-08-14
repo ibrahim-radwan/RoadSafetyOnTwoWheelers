@@ -24,6 +24,10 @@ if os.name != "nt":  # Not Windows
     # Force Qt to use a working platform - try xcb first, fallback to offscreen
     os.environ["QT_QPA_PLATFORM"] = "xcb"
     os.environ["QT_DEBUG_PLUGINS"] = "0"
+    # Prefer software rendering on embedded devices to avoid GLX/EGL issues
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+    os.environ.setdefault("QT_XCB_NO_XI2", "1")
 
 from PyQt5.QtWidgets import QApplication
 

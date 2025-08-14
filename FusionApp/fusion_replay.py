@@ -16,6 +16,18 @@ import queue
 import logging
 
 from mmwave import dsp
+
+# Ensure Qt platform and GL settings are compatible on embedded/Linux (e.g., Jetson)
+if os.name != "nt":
+    os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("QT_DEBUG_PLUGINS", "0")
+    # Prevent Qt xcb plugin from attempting GLX/EGL integrations on systems without them
+    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+    # Silence XInput2 warnings on Jetson/Xorg configurations lacking XI2
+    os.environ.setdefault("QT_XCB_NO_XI2", "1")
+
 from PyQt5.QtWidgets import QApplication
 
 from engine.fusion_factory import FusionFactory
@@ -430,6 +442,8 @@ def main():
     )
     parser.add_argument(
         "--file-path",
+        "--file",
+        dest="file_path",
         type=str,
         required=True,
         help="Path to recorded radar data directory",
@@ -465,7 +479,7 @@ def main():
 
     try:
         # Use spawn start method to avoid inheriting background threads that can block shutdown
-        multiprocessing.set_start_method('spawn', force=True)
+        multiprocessing.set_start_method("spawn", force=True)
         app = ReplayFusionApp(args.file_path, args.config_file)
 
         dsp.precompile_kernels()

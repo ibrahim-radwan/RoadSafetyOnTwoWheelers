@@ -14,12 +14,16 @@ import numpy as np
 
 # Fix OpenCV Qt plugin conflicts before importing cv2 - only on Linux
 import pyqtgraph as pg
-if os.name != 'nt':  # Not Windows
-    os.environ.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
+
+if os.name != "nt":  # Not Windows
+    os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+    # Prefer software rendering on NVIDIA Jetson to avoid GLX/EGL issues
+    if os.path.exists("/etc/nv_tegra_release"):
+        os.environ.setdefault("QT_OPENGL", "software")
 import cv2
 
-# Configure pyqtgraph for performance
-pg.setConfigOptions(useOpenGL=True, antialias=False, imageAxisOrder="row-major")
+# Configure pyqtgraph defaults (do not force OpenGL here; decide at runtime)
+pg.setConfigOptions(antialias=False, imageAxisOrder="row-major")
 
 from typing import Optional, Callable, Dict, Any, List
 
@@ -36,6 +40,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import QTimer, Qt, QRectF
+from PyQt5.QtGui import QOpenGLContext, QSurfaceFormat, QOffscreenSurface
 
 # Matplotlib removed from visualizer rendering; pyqtgraph is used for speed
 
@@ -116,7 +121,9 @@ class FusionVisualizer(QWidget):
         """Setup the complete user interface"""
         # Set window properties
         title = (
-            "Fusion Live Visualization" if self.mode == "live" else "Fusion Recording Playback"
+            "Fusion Live Visualization"
+            if self.mode == "live"
+            else "Fusion Recording Playback"
         )
         self.setWindowTitle(title)
         self.setGeometry(100, 100, 1400, 1000)
@@ -124,15 +131,22 @@ class FusionVisualizer(QWidget):
         # Create main layout
         main_layout = QVBoxLayout()
 
-        # Setup plots and widgets
+        # Choose rendering backend and then setup plots and widgets
+        self._configure_pyqtgraph_backend()
         self._setup_plots()
 
         # Create 2x2 grid layout for all modes
         plots_layout = QGridLayout()
         plots_layout.addWidget(self.camera_widget, 0, 0)  # Upper-left: Camera/Video
-        plots_layout.addWidget(self.point_cloud_widget, 0, 1)  # Upper-right: Point cloud
-        plots_layout.addWidget(self.range_doppler_widget, 1, 0)  # Lower-left: Range-Doppler
-        plots_layout.addWidget(self.range_azimuth_widget, 1, 1)  # Lower-right: Range-Azimuth
+        plots_layout.addWidget(
+            self.point_cloud_widget, 0, 1
+        )  # Upper-right: Point cloud
+        plots_layout.addWidget(
+            self.range_doppler_widget, 1, 0
+        )  # Lower-left: Range-Doppler
+        plots_layout.addWidget(
+            self.range_azimuth_widget, 1, 1
+        )  # Lower-right: Range-Azimuth
 
         # Set equal row and column stretch factors for 50/50 split
         plots_layout.setRowStretch(0, 1)
@@ -150,6 +164,50 @@ class FusionVisualizer(QWidget):
         # Finalize
         self.setLayout(main_layout)
 
+    def _configure_pyqtgraph_backend(self) -> None:
+        """Decide whether to enable OpenGL acceleration for pyqtgraph.
+
+        On systems like NVIDIA Jetson, the XCB plugin may not have GLX/EGL,
+        which causes QOpenGLWidget context creation to fail. We detect this
+        at runtime and fall back to software rendering by default.
+        """
+        try:
+            # Allow user override via env var
+            force_software = os.environ.get("PG_FORCE_SOFTWARE", "0") == "1"
+            if force_software:
+                pg.setConfigOptions(useOpenGL=False)
+                self.logger.info("pyqtgraph OpenGL disabled by PG_FORCE_SOFTWARE=1")
+                return
+
+            # Try creating an offscreen OpenGL context to verify availability
+            fmt = QSurfaceFormat()
+            fmt.setRenderableType(QSurfaceFormat.OpenGLES)
+            ctx = QOpenGLContext()
+            ctx.setFormat(fmt)
+
+            surface = QOffscreenSurface()
+            surface.setFormat(fmt)
+            surface.create()
+
+            gl_ok = ctx.create() and ctx.isValid() and ctx.makeCurrent(surface)
+
+            if gl_ok:
+                pg.setConfigOptions(useOpenGL=True)
+                self.logger.info("pyqtgraph OpenGL enabled (context valid)")
+                ctx.doneCurrent()
+            else:
+                pg.setConfigOptions(useOpenGL=False)
+                self.logger.warning(
+                    "pyqtgraph OpenGL not available; using software rendering"
+                )
+        except Exception as e:
+            # Any failure → fall back to software
+            pg.setConfigOptions(useOpenGL=False)
+            if hasattr(self, "logger"):
+                self.logger.warning(
+                    f"Failed to init OpenGL context; falling back to software: {e}"
+                )
+
     def _setup_plots(self):
         """Setup camera display and pyqtgraph plots"""
         # Camera/Video widget - always present
@@ -164,13 +222,19 @@ class FusionVisualizer(QWidget):
         if self.adc_params:
             try:
                 self.pc_max_range = self.adc_params.max_range
-                self.logger.info(f"Using max range from ADC params: {self.pc_max_range} m")
+                self.logger.info(
+                    f"Using max range from ADC params: {self.pc_max_range} m"
+                )
             except AttributeError:
                 self.pc_max_range = 10.0
-                self.logger.warning("ADC params don't have max_range attribute, using default: 10.0 m")
+                self.logger.warning(
+                    "ADC params don't have max_range attribute, using default: 10.0 m"
+                )
         else:
             self.pc_max_range = 10.0
-            self.logger.warning("No ADC params provided, using default max range: 10.0 m")
+            self.logger.warning(
+                "No ADC params provided, using default max range: 10.0 m"
+            )
 
         # Precompute LUT similar to 'jet'
         try:
@@ -409,9 +473,7 @@ class FusionVisualizer(QWidget):
             self._update_camera_display(camera_data)
             t_camera = time.perf_counter() - cam_t0
 
-            rdra_times = self._update_radar_displays(
-                radar_data, rd_extents, ra_extents
-            )
+            rdra_times = self._update_radar_displays(radar_data, rd_extents, ra_extents)
             t_rd = rdra_times.get("rd", 0.0)
             t_ra = rdra_times.get("ra", 0.0)
             t_pc = rdra_times.get("pc", 0.0)
@@ -552,11 +614,15 @@ class FusionVisualizer(QWidget):
                 y_data = np.asarray(point_cloud_data["y"], dtype=float)
 
                 if x_data.shape[0] != y_data.shape[0]:
-                    self.logger.warning("Point cloud coordinate arrays have inconsistent lengths")
+                    self.logger.warning(
+                        "Point cloud coordinate arrays have inconsistent lengths"
+                    )
                     return time.perf_counter() - t0
 
                 # Colors: use snr or intensity; fallback to index
-                colors = point_cloud_data.get("snr", point_cloud_data.get("intensity", None))
+                colors = point_cloud_data.get(
+                    "snr", point_cloud_data.get("intensity", None)
+                )
                 if colors is None or len(colors) != len(x_data):
                     colors = np.arange(len(x_data), dtype=float)
                 colors = np.asarray(colors, dtype=float)
@@ -571,11 +637,16 @@ class FusionVisualizer(QWidget):
                 if self._lut_jet is not None:
                     lut = self._lut_jet
                     # Build per-point brushes
-                    brushes = [pg.mkBrush(int(lut[i, 0]), int(lut[i, 1]), int(lut[i, 2]), 255) for i in idx]
+                    brushes = [
+                        pg.mkBrush(int(lut[i, 0]), int(lut[i, 1]), int(lut[i, 2]), 255)
+                        for i in idx
+                    ]
                 else:
                     brushes = pg.mkBrush(0, 200, 255, 255)
 
-                self.pc_scatter_item.setData(x=x_data, y=y_data, brush=brushes, pen=None)
+                self.pc_scatter_item.setData(
+                    x=x_data, y=y_data, brush=brushes, pen=None
+                )
 
                 # Keep ranges steady
                 self.pc_plot.setXRange(-self.pc_max_range, self.pc_max_range, padding=0)
@@ -590,28 +661,50 @@ class FusionVisualizer(QWidget):
             try:
                 status = self.status_callback()
                 if status:
-                    # Update progress
+                    # Throttle UI updates to reduce overhead on embedded devices
+                    now = time.perf_counter()
+                    if not hasattr(self, "_last_status_ui"):
+                        self._last_status_ui = {
+                            "t": 0.0,
+                            "state": None,
+                            "current_frame": None,
+                            "total_frames": None,
+                            "progress": None,
+                        }
+
+                    # Only update at most every 50 ms
+                    if now - self._last_status_ui.get("t", 0.0) < 0.05:
+                        return
+
+                    total_frames = int(status.get("total_frames", 0))
+                    current_frame = int(status.get("current_frame", 0))
                     progress = int(status.get("progress_percent", 0))
-                    self.progress_bar.setValue(progress)
-
-                    # Update slider maximum
-                    total_frames = status.get("total_frames", 0)
-                    if total_frames > 0 and self.seek_slider.maximum() != total_frames:
-                        self.seek_slider.setMaximum(total_frames)
-                        self.progress_bar.setMaximum(total_frames)
-
-                    # Update slider position
-                    if not self.seek_slider.isSliderDown():
-                        current_frame = status.get("current_frame", 0)
-                        self.seek_slider.setValue(current_frame)
-                        self.progress_bar.setValue(current_frame)
-
-                    # Update status label
                     state = status.get("state", "UNKNOWN")
-                    current_frame = status.get("current_frame", 0)
-                    self.status_label.setText(
-                        f"{state} - Frame {current_frame}/{total_frames}"
-                    )
+
+                    # Update slider maximum once when it changes
+                    if (
+                        total_frames > 0
+                        and self._last_status_ui.get("total_frames") != total_frames
+                    ):
+                        if self.seek_slider.maximum() != total_frames:
+                            self.seek_slider.setMaximum(total_frames)
+                            self.progress_bar.setMaximum(total_frames)
+
+                    # Update slider position only when not interacting and when changed
+                    if not self.seek_slider.isSliderDown():
+                        if self._last_status_ui.get("current_frame") != current_frame:
+                            self.seek_slider.setValue(current_frame)
+                            self.progress_bar.setValue(current_frame)
+
+                    # Update status label only when changed
+                    if (
+                        self._last_status_ui.get("state") != state
+                        or self._last_status_ui.get("current_frame") != current_frame
+                        or self._last_status_ui.get("total_frames") != total_frames
+                    ):
+                        self.status_label.setText(
+                            f"{state} - Frame {current_frame}/{total_frames}"
+                        )
 
                     # Update button state - but don't override user actions immediately
                     if state == "PLAYING" and not self.is_playing:
@@ -625,6 +718,17 @@ class FusionVisualizer(QWidget):
                         if state == "STOPPED":
                             self.seek_slider.setValue(0)
                             self.progress_bar.setValue(0)
+
+                    # Record last update snapshot and timestamp
+                    self._last_status_ui.update(
+                        {
+                            "t": now,
+                            "state": state,
+                            "current_frame": current_frame,
+                            "total_frames": total_frames,
+                            "progress": progress,
+                        }
+                    )
 
             except Exception as e:
                 self.logger.debug(f"No status update available: {e}")
