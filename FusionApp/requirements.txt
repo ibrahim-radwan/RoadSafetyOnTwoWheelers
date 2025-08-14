@@ -5,6 +5,7 @@
 PyQt5
 matplotlib
 opencv-python
+pyqtgraph
 
 # Scientific Computing
 numpy>=2.0.0
