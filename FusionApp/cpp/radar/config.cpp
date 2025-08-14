@@ -7,7 +7,8 @@
 namespace radar
 {
 
-RadarConfig::RadarConfig(const std::string& config_file_path) : _config_file_path(config_file_path)
+RadarConfig::RadarConfig(const std::string& config_file_path)
+    : _config_file_path(config_file_path)
 {
     // Initialize default values
     _adc_params.IQ = 2;
@@ -24,7 +25,8 @@ void RadarConfig::parseConfigFile()
     std::ifstream config_file(_config_file_path);
     if (!config_file.is_open())
     {
-        throw std::runtime_error("Cannot open config file: " + _config_file_path);
+        throw std::runtime_error("Cannot open config file: " +
+                                 _config_file_path);
     }
 
     std::string line;
@@ -53,13 +55,15 @@ void RadarConfig::parseConfigFile()
         parseChannelConfig(key, value);
         parseProfileConfig(key, value, cur_profile_id);
         parseChirpConfig(key, value);
-        parseFrameConfig(key, value, chirp_start_idx_fcf, chirp_end_idx_fcf, loop_count);
+        parseFrameConfig(key, value, chirp_start_idx_fcf, chirp_end_idx_fcf,
+                         loop_count);
     }
 
     config_file.close();
 }
 
-void RadarConfig::parseChannelConfig(const std::string& key, const std::string& value)
+void RadarConfig::parseChannelConfig(const std::string& key,
+                                     const std::string& value)
 {
     if (key == "channelTx")
     {
@@ -92,7 +96,8 @@ void RadarConfig::parseChannelConfig(const std::string& key, const std::string& 
     }
 }
 
-void RadarConfig::parseProfileConfig(const std::string& key, const std::string& value,
+void RadarConfig::parseProfileConfig(const std::string& key,
+                                     const std::string& value,
                                      int& cur_profile_id)
 {
     if (key == "profileId")
@@ -119,7 +124,8 @@ void RadarConfig::parseProfileConfig(const std::string& key, const std::string& 
         }
         else if (key == "freqSlopeConst")
         {
-            _adc_params.freq_slope = std::stoi(value) * (3.6e3 * 900 / (1 << 26));
+            _adc_params.freq_slope =
+                std::stoi(value) * (3.6e3 * 900 / (1 << 26));
         }
         else if (key == "txStartTime")
         {
@@ -137,11 +143,13 @@ void RadarConfig::parseProfileConfig(const std::string& key, const std::string& 
 
     if (key == "rxGain")
     {
-        cur_profile_id++;  // Avoid frameCfg numAdcSamples being treated as profile
+        cur_profile_id++;  // Avoid frameCfg numAdcSamples being treated as
+                           // profile
     }
 }
 
-void RadarConfig::parseChirpConfig(const std::string& key, const std::string& value)
+void RadarConfig::parseChirpConfig(const std::string& key,
+                                   const std::string& value)
 {
     if (key == "chirpStartIdx")
     {
@@ -161,9 +169,10 @@ void RadarConfig::parseChirpConfig(const std::string& key, const std::string& va
     }
 }
 
-void RadarConfig::parseFrameConfig(const std::string& key, const std::string& value,
-                                   int& chirp_start_idx_fcf, int& chirp_end_idx_fcf,
-                                   int& loop_count)
+void RadarConfig::parseFrameConfig(const std::string& key,
+                                   const std::string& value,
+                                   int& chirp_start_idx_fcf,
+                                   int& chirp_end_idx_fcf, int& loop_count)
 {
     if (key == "chirpStartIdxFCF")
     {
@@ -229,14 +238,16 @@ void RadarConfig::calculateDerivedParams()
     _adc_params.tx = static_cast<int>(_tx_enable_buf.size());
 
     // Calculate LVDS data size per chirp
-    _lvds_data_size_per_chirp =
-        _adc_params.samples * _adc_params.rx * _adc_params.IQ * _adc_params.bytes + 52;
+    _lvds_data_size_per_chirp = _adc_params.samples * _adc_params.rx *
+                                    _adc_params.IQ * _adc_params.bytes +
+                                52;
     _lvds_data_size_per_chirp =
         static_cast<int>(std::ceil(_lvds_data_size_per_chirp / 256.0) * 256);
 
     // Calculate max send bytes per chirp
-    _max_send_bytes_per_chirp = (_adc_params.idleTime + _adc_params.rampEndTime) *
-                                _cfg_params.numlaneEn * _cfg_params.lvdsBW / 8.0;
+    _max_send_bytes_per_chirp =
+        (_adc_params.idleTime + _adc_params.rampEndTime) *
+        _cfg_params.numlaneEn * _cfg_params.lvdsBW / 8.0;
 }
 
 void RadarConfig::validateConfig() const
@@ -244,7 +255,8 @@ void RadarConfig::validateConfig() const
     if (_adc_params.tx > _cfg_params.numTxChan)
     {
         throw std::runtime_error("exceed max tx num, check channelTx(" +
-                                 std::to_string(_cfg_params.numTxChan) + ") and chirp cfg(" +
+                                 std::to_string(_cfg_params.numTxChan) +
+                                 ") and chirp cfg(" +
                                  std::to_string(_adc_params.tx) + ").");
     }
 
@@ -258,13 +270,15 @@ void RadarConfig::validateConfig() const
 
     for (size_t i = 1; i < _chirp_end_idx_buf.size(); ++i)
     {
-        int current_chirp_num = _chirp_end_idx_buf[i] - _chirp_start_idx_buf[i] + 1;
+        int current_chirp_num =
+            _chirp_end_idx_buf[i] - _chirp_start_idx_buf[i] + 1;
         all_chirp_num += current_chirp_num;
 
         if (tmp_chirp_num != current_chirp_num)
         {
             throw std::runtime_error(
-                "AWR2243_read_config does not support different chirp number in different tx ant "
+                "AWR2243_read_config does not support different chirp number "
+                "in different tx ant "
                 "yet.");
         }
     }
@@ -282,7 +296,8 @@ std::string RadarConfig::trim(const std::string& str) const
     return str.substr(first, (last - first + 1));
 }
 
-std::pair<std::string, std::string> RadarConfig::parseLine(const std::string& line) const
+std::pair<std::string, std::string> RadarConfig::parseLine(
+    const std::string& line) const
 {
     size_t eq_pos = line.find('=');
     if (eq_pos == std::string::npos)
@@ -307,4 +322,43 @@ std::pair<std::string, std::string> RadarConfig::parseLine(const std::string& li
     return {key, value};
 }
 
+// --- toString implementations ---
+std::string radar::AdcParams::toString() const
+{
+    return "AdcParams{" + std::string("startFreq=") +
+           std::to_string(startFreq) + ", " +
+           "idleTime=" + std::to_string(idleTime) + ", " +
+           "adc_valid_start_time=" + std::to_string(adc_valid_start_time) +
+           ", " + "rampEndTime=" + std::to_string(rampEndTime) + ", " +
+           "freq_slope=" + std::to_string(freq_slope) + ", " +
+           "txStartTime=" + std::to_string(txStartTime) + ", " +
+           "samples=" + std::to_string(samples) + ", " +
+           "sample_rate=" + std::to_string(sample_rate) + ", " +
+           "rx=" + std::to_string(rx) + ", " + "tx=" + std::to_string(tx) +
+           ", " + "IQ=" + std::to_string(IQ) + ", " +
+           "bytes=" + std::to_string(bytes) + ", " +
+           "chirps=" + std::to_string(chirps) + ", " +
+           "frame_periodicity=" + std::to_string(frame_periodicity) + "}";
+}
+
+std::string radar::CfgParams::toString() const
+{
+    return "CfgParams{" + std::string("txAntMask=") +
+           std::to_string(txAntMask) + ", " +
+           "rxAntMask=" + std::to_string(rxAntMask) + ", " +
+           "numTxChan=" + std::to_string(numTxChan) + ", " +
+           "numRxChan=" + std::to_string(numRxChan) + ", " +
+           "lvdsBW=" + std::to_string(lvdsBW) + ", " +
+           "numlaneEn=" + std::to_string(numlaneEn) + "}";
+}
+
+std::string radar::RadarConfig::toString() const
+{
+    return std::string("RadarConfig{\n  ") + _adc_params.toString() + ",\n  " +
+           _cfg_params.toString() + ",\n  " +
+           "LVDSDataSizePerChirp=" + std::to_string(_lvds_data_size_per_chirp) +
+           ", " +
+           "MaxSendBytesPerChirp=" + std::to_string(_max_send_bytes_per_chirp) +
+           "\n}";
+}
 }  // namespace radar

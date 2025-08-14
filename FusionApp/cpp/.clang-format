@@ -14,7 +14,7 @@ BreakBeforeBraces: Allman
 Cpp11BracedListStyle: true
 
 # Line length
-ColumnLimit: 100
+# ColumnLimit: 0
 
 # Spacing
 SpaceAfterCStyleCast: false
