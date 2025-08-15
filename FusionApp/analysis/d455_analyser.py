@@ -1,17 +1,39 @@
 import multiprocessing
 import os
 import numpy as np
+
+# NumPy 2.x compatibility for libs that still reference deprecated aliases
+if not hasattr(np, "bool"):
+    np.bool = np.bool_
 from queue import Empty, Full
 from camera.d455 import D455Frame
 from typing import List, Optional
 import time
 import logging
+
+# Disable Ultralytics auto-install attempts
+os.environ.setdefault("ULTRALYTICS_REQUIREMENTS", "0")
 from ultralytics import YOLO
 import torch
 
 from engine.interfaces import CameraAnalyser
 from config_params import CFGS
 from utils import setup_logger
+
+
+def _running_on_jetson() -> bool:
+    """Return True if running on an NVIDIA Jetson device."""
+    try:
+        if os.path.exists("/etc/nv_tegra_release"):
+            return True
+        model_path = "/proc/device-tree/model"
+        if os.path.exists(model_path):
+            with open(model_path, "r", errors="ignore") as f:
+                content = f.read()
+                return "NVIDIA" in content and "Jetson" in content
+    except Exception:
+        pass
+    return False
 
 
 class Rectangle:
@@ -68,6 +90,7 @@ class D455Analyser(CameraAnalyser):
         self._opt_model_half: bool = False
         self._opt_predict_kwargs_supported: Optional[bool] = None
         self._opt_predict_kwargs_status_logged: bool = False
+        self._backend: str = "torch"
 
     def _detect_objects(self, rgb_image: np.ndarray):
         """Detect persons, cars, bicycles, and motorcycles in the image"""
@@ -168,19 +191,43 @@ class D455Analyser(CameraAnalyser):
                 f"[YOLO_OPT] cuda_available={self._opt_cuda_available}, cudnn_benchmark={self._opt_cudnn_benchmark}, tf32_enabled={self._opt_tf32_allowed}, matmul_precision_high={self._opt_matmul_precision_set}, imgsz={self._imgsz}"
             )
         else:
-            # Load YOLOv8 model (GPU path only); rely on Ultralytics internals for placement/precision
-            self._yolo_model = YOLO("yolov8n.pt")
-            # Log device info
-            try:
-                name = torch.cuda.get_device_name(0)
+            # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
+            model_loaded = False
+            if _running_on_jetson():
+                try:
+                    self._yolo_model = YOLO("yolov8n.engine")
+                    self._backend = "tensorrt"
+                    model_loaded = True
+                    self.logger.info("Loaded TensorRT engine 'yolov8n.engine'")
+                except Exception as e:
+                    self.logger.info(
+                        f"TensorRT engine not used ({e}); falling back to PyTorch 'yolov8n.pt'"
+                    )
+            else:
                 self.logger.info(
-                    f"Using CUDA device: {name}, imgsz={self._imgsz}, half={self._half}"
+                    "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
                 )
-            except Exception:
-                pass
-            self.logger.info(
-                f"[YOLO_OPT] cuda_available={self._opt_cuda_available}, cudnn_benchmark={self._opt_cudnn_benchmark}, tf32_enabled={self._opt_tf32_allowed}, matmul_precision_high={self._opt_matmul_precision_set}, optimizations='default-call'"
-            )
+            try:
+                if not model_loaded:
+                    self._yolo_model = YOLO("yolov8n.pt")
+                    self._backend = "torch"
+                    model_loaded = True
+            except Exception as e:
+                self.logger.error(f"Failed to load YOLO model: {e}")
+                self._analysis_enabled = False
+
+            # Log device and optimization info
+            if self._analysis_enabled and model_loaded:
+                try:
+                    name = torch.cuda.get_device_name(0)
+                    self.logger.info(
+                        f"Using CUDA device: {name}, backend={self._backend}, imgsz={self._imgsz}"
+                    )
+                except Exception:
+                    pass
+                self.logger.info(
+                    f"[YOLO_OPT] cuda_available={self._opt_cuda_available}, cudnn_benchmark={self._opt_cudnn_benchmark}, tf32_enabled={self._opt_tf32_allowed}, matmul_precision_high={self._opt_matmul_precision_set}, optimizations='default-call', backend={self._backend}"
+                )
 
             # Warm up kernels to reduce first-frame latency
             try:
@@ -244,7 +291,7 @@ class D455Analyser(CameraAnalyser):
                     self.logger.info(
                         f"[CAMERA_PROFILE] Average over {frame_count} frames: analysis={avg_analysis_time:.4f}s ({1/avg_analysis_time:.2f} FPS), total={avg_total_time:.4f}s ({1/avg_total_time:.2f} FPS)"
                     )
-                    # Provide additional breakdown at DEBUG level
+                    # Provide additional breakdown at INFO level (user request)
                     avg_queue_wait = total_queue_wait_time / frame_count
                     avg_output_put = total_output_put_time / frame_count
                     self.logger.info(
