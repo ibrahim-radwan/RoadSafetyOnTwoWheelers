@@ -157,6 +157,7 @@ class PNGCamera(CameraFeed):
         self._last_frame_time = time.perf_counter()
         frame_count = 0
         last_timeline_position = 0.0  # Track timeline position for seeking detection
+        last_sync_playback_state = None
 
         # DEBUG: Log initial state
         self.logger.debug(
@@ -165,16 +166,32 @@ class PNGCamera(CameraFeed):
 
         while not stop_event.is_set():
             try:
-                # Handle external control commands if provided (e.g., stop)
+                # Handle external control commands if provided
                 if control_queue is not None:
                     try:
                         cmd = control_queue.get_nowait()
-                        if isinstance(cmd, str) and cmd == "stop":
-                            self.logger.info("Received stop command; exiting")
-                            break
                         if isinstance(cmd, dict) and cmd.get("STOP"):
                             self.logger.info("Received STOP sentinel; exiting")
                             break
+                        if isinstance(cmd, str):
+                            # In synchronized mode, GUI updates SyncState; ignore here.
+                            # In legacy mode, handle basic controls locally.
+                            if not use_sync:
+                                if cmd == "play":
+                                    self._playback_state = PlaybackState.PLAYING
+                                    self._last_frame_time = time.perf_counter()
+                                elif cmd == "pause":
+                                    self._playback_state = PlaybackState.PAUSED
+                                elif cmd == "stop":
+                                    self._playback_state = PlaybackState.STOPPED
+                                    self._current_frame_index = 0
+                                elif cmd.startswith("seek:"):
+                                    try:
+                                        frame_index = int(cmd.split(":")[1])
+                                        if 0 <= frame_index < len(self._frame_files):
+                                            self._current_frame_index = frame_index
+                                    except Exception:
+                                        pass
                     except queue.Empty:
                         pass
                 # Check synchronized playback state if available
@@ -182,7 +199,14 @@ class PNGCamera(CameraFeed):
                     sync_playback_state = SyncStateUtils.get_playback_state(
                         self._sync_state
                     )
+                    # Reset index when transitioning to STOPPED so restart begins at frame 0
+                    if (
+                        sync_playback_state == SyncPlaybackState.STOPPED
+                        and last_sync_playback_state != SyncPlaybackState.STOPPED
+                    ):
+                        self._current_frame_index = 0
                     is_playing = sync_playback_state == SyncPlaybackState.PLAYING
+                    last_sync_playback_state = sync_playback_state
                 else:
                     is_playing = self._playback_state == PlaybackState.PLAYING
 
@@ -191,10 +215,12 @@ class PNGCamera(CameraFeed):
                     current_timeline = SyncStateUtils.get_current_timeline_position(
                         self._sync_state
                     )
-                    # Detect seeking (timeline position jumped significantly) or reset to beginning
+                    # Detect seeking or timeline reset (backward move, large jump, or reset)
                     timeline_diff = abs(current_timeline - last_timeline_position)
-                    if timeline_diff > 1.0 or (
-                        current_timeline == 0.0 and last_timeline_position > 1.0
+                    if (
+                        current_timeline < last_timeline_position - 0.05
+                        or timeline_diff > 0.5
+                        or current_timeline == 0.0
                     ):
                         # Timeline jumped or reset - find the correct frame to seek to
                         start_timestamp = SyncStateUtils.get_start_timestamp(
@@ -212,7 +238,7 @@ class PNGCamera(CameraFeed):
                                 best_index = i
 
                         self._current_frame_index = best_index
-                        self.logger.info(
+                        self.logger.debug(
                             f"Seeked to frame {best_index} (timestamp: {target_timestamp:.3f}s, timeline: {current_timeline:.3f}s)"
                         )
 
@@ -290,7 +316,9 @@ class PNGCamera(CameraFeed):
 
                             except Exception as e:
                                 # Queue full or closed; skip frame to allow clean shutdown
-                                self.logger.warning(f"Could not send frame (queue busy/closed): {e}")
+                                self.logger.warning(
+                                    f"Could not send frame (queue busy/closed): {e}"
+                                )
                                 time.sleep(0.001)
 
                         # Advance to next frame
@@ -316,8 +344,8 @@ class PNGCamera(CameraFeed):
             pass
 
         self.logger.info(f"Playback stopped. Sent total {frame_count} frames")
-        # Ensure the process fully terminates (no hardware to clean here)
-        os._exit(0)
+
+        return
 
     def get_current_frame_info(self) -> Optional[Tuple[int, float, str]]:
         """Get information about the current frame"""

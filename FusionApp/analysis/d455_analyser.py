@@ -14,23 +14,26 @@ from utils import setup_logger
 
 
 class Rectangle:
-    def __init__(self, x: float, y: float, width: float, height: float, class_id: int = 0, confidence: float = 1.0):
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        class_id: int = 0,
+        confidence: float = 1.0,
+    ):
         self.x = x
         self.y = y
         self.width = width
         self.height = height
         self.class_id = class_id
         self.confidence = confidence
-        
+
         # Map YOLO class IDs to names
-        self.class_names = {
-            0: 'person',
-            1: 'bicycle',
-            2: 'car',
-            3: 'motorcycle'
-        }
-        
-        self.object_type = self.class_names.get(class_id, 'unknown')
+        self.class_names = {0: "person", 1: "bicycle", 2: "car", 3: "motorcycle"}
+
+        self.object_type = self.class_names.get(class_id, "unknown")
 
 
 D455Objects = List[Rectangle]
@@ -53,19 +56,23 @@ class D455Analyser(CameraAnalyser):
         objects = []
         try:
             if self._yolo_model is None:
-                self._yolo_model = YOLO('yolov8n.pt')
+                self._yolo_model = YOLO("yolov8n.pt")
             start_time = time.perf_counter()
             results = self._yolo_model(rgb_image, verbose=False)
             height, width, _ = rgb_image.shape
-            
+
             # Target classes: person, bicycle, car, motorcycle
             target_classes = {0, 1, 2, 3}
-            
+
             for r in results:
-                for box, cls, conf in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.cls.cpu().numpy(), r.boxes.conf.cpu().numpy()):
+                for box, cls, conf in zip(
+                    r.boxes.xyxy.cpu().numpy(),
+                    r.boxes.cls.cpu().numpy(),
+                    r.boxes.conf.cpu().numpy(),
+                ):
                     class_id = int(cls)
                     confidence = float(conf)
-                    
+
                     # Filter by class and confidence
                     if class_id in target_classes and confidence > 0.5:
                         x1, y1, x2, y2 = box
@@ -73,8 +80,10 @@ class D455Analyser(CameraAnalyser):
                         y = int(y1)
                         box_width = int(x2 - x1)
                         box_height = int(y2 - y1)
-                        objects.append(Rectangle(x, y, box_width, box_height, class_id, confidence))
-                        
+                        objects.append(
+                            Rectangle(x, y, box_width, box_height, class_id, confidence)
+                        )
+
             end_time = time.perf_counter()
             detection_time = end_time - start_time
             # self.logger.debug(f"YOLOv8 detection: {detection_time:.4f} seconds ({1/detection_time:.2f} FPS)")
@@ -98,8 +107,8 @@ class D455Analyser(CameraAnalyser):
         self.logger = setup_logger("D455Analyser")
         self.logger.info("Starting D455Analyser...")
         # Load YOLOv8 model (uses GPU if available)
-        self._yolo_model = YOLO('yolov8n.pt')
-        
+        self._yolo_model = YOLO("yolov8n.pt")
+
         # Performance tracking
         frame_count = 0
         total_analysis_time = 0
@@ -108,45 +117,55 @@ class D455Analyser(CameraAnalyser):
         while not stop_event.is_set():
             try:
                 total_start_time = time.perf_counter()
-                
+
                 # Add debug logging to see if we're receiving frames
                 self.logger.debug("D455Analyser waiting for frame...")
                 video_frame = input_queue.get(timeout=1)
                 # Allow immediate shutdown via sentinel
                 if isinstance(video_frame, dict) and video_frame.get("STOP"):
                     break
-                self.logger.debug(f"D455Analyser received frame with timestamp: {video_frame.timestamp}")
-                
+                self.logger.debug(
+                    f"D455Analyser received frame with timestamp: {video_frame.timestamp}"
+                )
+
                 # Track frame analysis time separately
                 analysis_start_time = time.perf_counter()
                 objects = self._analyse_frame(video_frame)
                 analysis_end_time = time.perf_counter()
                 analysis_time = analysis_end_time - analysis_start_time
-                
+
                 # Avoid blocking if consumer is stopping
                 try:
                     output_queue.put_nowait(D455Results(video_frame, objects))
                 except Full:
-                    self.logger.warning("Camera results queue full, dropping result to exit cleanly")
+                    self.logger.warning(
+                        "Camera results queue full, dropping result to exit cleanly"
+                    )
                     # Continue without blocking
-                self.logger.debug(f"Put detection result in output queue: frame timestamp={video_frame.timestamp}, detected_objects={len(objects)}")
+                self.logger.debug(
+                    f"Put detection result in output queue: frame timestamp={video_frame.timestamp}, detected_objects={len(objects)}"
+                )
                 total_end_time = time.perf_counter()
                 total_processing_time_frame = total_end_time - total_start_time
-                
+
                 # Update statistics
                 frame_count += 1
                 total_analysis_time += analysis_time
                 total_processing_time += total_processing_time_frame
-                
+
                 # Print average statistics every 30 frames at INFO level
                 if frame_count % 30 == 0:
                     avg_analysis_time = total_analysis_time / frame_count
                     avg_total_time = total_processing_time / frame_count
-                    self.logger.info(f"[CAMERA_PROFILE] Average over {frame_count} frames: analysis={avg_analysis_time:.4f}s ({1/avg_analysis_time:.2f} FPS), total={avg_total_time:.4f}s ({1/avg_total_time:.2f} FPS)")
-                
+                    self.logger.info(
+                        f"[CAMERA_PROFILE] Average over {frame_count} frames: analysis={avg_analysis_time:.4f}s ({1/avg_analysis_time:.2f} FPS), total={avg_total_time:.4f}s ({1/avg_total_time:.2f} FPS)"
+                    )
+
                 # Also log individual frame processing
-                self.logger.debug(f"[CAMERA_PROFILE] Frame {frame_count}: analysis={analysis_time:.4f}s, total={total_processing_time_frame:.4f}s, detected {len(objects)} objects")
-                    
+                self.logger.debug(
+                    f"[CAMERA_PROFILE] Frame {frame_count}: analysis={analysis_time:.4f}s, total={total_processing_time_frame:.4f}s, detected {len(objects)} objects"
+                )
+
             except Empty:
                 self.logger.debug("D455Analyser: No frames available, continuing...")
                 continue
@@ -161,8 +180,10 @@ class D455Analyser(CameraAnalyser):
         if frame_count > 0:
             avg_analysis_time = total_analysis_time / frame_count
             avg_total_time = total_processing_time / frame_count
-            self.logger.info(f"[CAMERA_PROFILE] Final summary: processed {frame_count} frames, avg analysis={avg_analysis_time:.4f}s ({1/avg_analysis_time:.2f} FPS), avg total={avg_total_time:.4f}s ({1/avg_total_time:.2f} FPS)")
-        
+            self.logger.info(
+                f"[CAMERA_PROFILE] Final summary: processed {frame_count} frames, avg analysis={avg_analysis_time:.4f}s ({1/avg_analysis_time:.2f} FPS), avg total={avg_total_time:.4f}s ({1/avg_total_time:.2f} FPS)"
+            )
+
         self.logger.info("D455Analyser stopped.")
-        # Forcefully exit to avoid third-party background threads keeping process alive
-        os._exit(0)
+
+        return

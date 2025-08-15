@@ -224,5 +224,5 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 stop_event.set()  # Stop on critical error
 
         self.logger.info("RadarHeatmapAnalyser stopped")
-        # Forcefully exit to avoid any background threads (e.g., BLAS/OpenMP) keeping process alive
-        os._exit(0)
+
+        return
