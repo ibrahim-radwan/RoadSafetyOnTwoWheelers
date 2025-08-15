@@ -91,7 +91,7 @@ class D455(CameraFeed):
         assert self._start_time is not None, "Start time is not initialized"
         timestamp = end - self._start_time
 
-        # ir_frame = frames.get_infrared_frame()
+        # Only use color stream to reduce bandwidth and CPU
         rgb_frame = frames.get_color_frame()
 
         # ir_data = np.asanyarray(ir_frame.get_data())
@@ -122,15 +122,16 @@ class D455(CameraFeed):
             try:
                 video_frame = self._frame_queue.get(timeout=1)
                 try:
-                    stream_queue.put(video_frame)
+                    # Non-blocking put; drop if downstream is slow to keep latency bounded
+                    stream_queue.put_nowait(video_frame)
                 except Exception as e:
                     if self.logger is not None:
-                        self.logger.error(f"Error sending data: {e}")
-                    break
+                        self.logger.debug(f"Dropping frame: downstream queue busy ({e})")
+                    continue
             except queue.Empty:
                 # No frame available, continue
                 if self.logger is not None:
-                    self.logger.warning("No frame available to send")
+                    self.logger.debug("No frame available to send")
                 continue
             except KeyboardInterrupt:
                 if self.logger is not None:
@@ -155,14 +156,13 @@ class D455(CameraFeed):
 
         # Initialize components in target process
         self._start_time = time.perf_counter()
-        self._frame_queue = queue.Queue()
+        self._frame_queue = queue.Queue(maxsize=2)
 
         self.logger.info("Initializing D455 camera")
         self._pipeline = rs.pipeline()
         self._rs_config = rs.config()
-        self._rs_config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        # Enable only color stream to lower overhead (disable depth and IR)
         self._rs_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        self._rs_config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 30)
         self.logger.info("Starting D455 camera")
         assert self._pipeline is not None, "D455 camera is not initialized"
         self._pipeline.start(self._rs_config)
@@ -185,7 +185,18 @@ class D455(CameraFeed):
 
                 # Update the data and check if the data is okay
                 video_frame = self._read_and_store_frame()
-                self._frame_queue.put(video_frame)
+                try:
+                    self._frame_queue.put_nowait(video_frame)
+                except queue.Full:
+                    # Drop oldest to keep most recent frame for lower latency
+                    try:
+                        _ = self._frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._frame_queue.put_nowait(video_frame)
+                    except Exception:
+                        pass
             except KeyboardInterrupt:
                 self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
