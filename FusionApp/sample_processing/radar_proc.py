@@ -633,11 +633,6 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
     # Initialize timing
     step_start = time.perf_counter()
 
-    # range_azimuth = np.zeros((ANGLE_BINS, adc_params.samples))
-    # num_vec, steering_vec = dsp.gen_steering_vec(
-    #     ANGLE_RANGE, ANGLE_RES, adc_params.tx * adc_params.rx
-    # )
-
     steering_time = time.perf_counter() - step_start
     logger.debug(
         f"    [RADAR_PROFILE] Steering vector generation: {steering_time:.4f}s"
@@ -664,13 +659,6 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
         f"    [RADAR_PROFILE] Static clutter removal: {clutter_removal_time:.4f}s"
     )
 
-    # --- capon beamforming
-    # step_start = time.perf_counter()
-    # beamWeights = np.zeros(
-    #     (adc_params.tx * adc_params.rx, adc_params.samples),
-    #     dtype=np.complex64,
-    # )
-
     if adc_params.tx == 2:
         radar_cube = np.concatenate(
             (radar_cube[0::2, ...], radar_cube[1::2, ...]),
@@ -686,35 +674,19 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
     # This is not used in this method, but kept for compatibility
     # with the original function signature.
     # e.g. for visualization purposes.
-    # radar_cube[:, :, :5] = 0
     range_doppler = np.fft.fft(radar_cube, axis=0)
     range_doppler = np.fft.fftshift(range_doppler, axes=0)
-
-    import scipy
 
     # Take log first (similar to what you do for CFAR)
     range_doppler_log = np.log(
         range_doppler + 1e-8
     )  # Add small epsilon to avoid log(0)
-    # range_doppler_softmax = scipy.special.softmax(range_doppler_log.flatten()).reshape(
-    #     range_doppler.shape
-    # )
-    # range_doppler[:, :, :2] = 1
-    # zs_bin = range_doppler.shape[0]//2
-    # range_doppler[zs_bin:zs_bin+1, :, :] = 1
-    # range_doppler = np.abs(range_doppler_softmax).sum(axis=1)
-    range_doppler = np.abs(range_doppler_log).sum(axis=1)
 
-    # concat_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] Radar cube concatenation: {concat_time:.4f}s")
+    range_doppler = np.abs(range_doppler_log).sum(axis=1)
 
     # Note that when replacing with generic doppler estimation functions, radarCube is interleaved and
     # has doppler at the last dimension.
     capon_start = time.perf_counter()
-    # for i in range(adc_params.samples):
-    #     range_azimuth[:, i], beamWeights[:, i] = dsp.aoa_capon(
-    #         radar_cube[:, :, i].T, steering_vec, magnitude=True
-    #     )
 
     range_azimuth, beamWeights = dsp.aoa_capon_jitted(
         radar_cube, adc_params.tx, adc_params.rx, adc_params.samples
@@ -733,9 +705,6 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
     heatmap_log = np.log2(range_azimuth)
     heatmap_time = time.perf_counter() - step_start
     logger.debug(f"    [RADAR_PROFILE] Heatmap log computation: {heatmap_time:.4f}s")
-
-    # logger.debug(f"Range-Doppler shape: {range_doppler.shape}")
-    # logger.debug(f"Range-Azimuth shape: {range_azimuth.shape}")
 
     if IS_INDOOR:
         AZ_LBOUND = 1.5
@@ -862,28 +831,7 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
         f"    [RADAR_PROFILE] Unit conversion and coordinate transform: {conversion_time:.4f}s"
     )
 
-    # cluster_labels, n_clusters, n_noise = apply_radar_clustering(
-    #     x_pos, y_pos, dopplers, eps=0.2, min_samples=2, velocity_weight=0.0
-    # )
-
     cluster_labels = np.array([])
-    # tracker.update_point_cloud(ranges, azimuths, dopplers, snrs)
-    # targetDescr, tNum = tracker.step()
-
-    # print(f"[DEBUG] EKF tracking step completed with {tNum} targets")
-
-    # x_pos = np.array([])
-    # y_pos = np.array([])
-    # velocities = np.array([])
-
-    # for t, tid in zip(targetDescr, range(int(tNum[0]))):
-    #     x, y, x_vel, y_vel = t.S[:4]
-    #     x = -x
-    #     # z_pos = 0
-    #     velocity = np.sqrt(x_vel**2 + y_vel**2)
-    #     x_pos = np.append(x_pos, x)
-    #     y_pos = np.append(y_pos, y)
-    #     velocities = np.append(velocities, velocity)
 
     # Profile logging every 10 frames
     if openradar_pd_process_frame.frame_count % 10 == 0:

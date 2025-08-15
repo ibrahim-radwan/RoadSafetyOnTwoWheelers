@@ -11,6 +11,7 @@ from radar.dca1000_awr2243 import DCA1000Frame
 from typing import Dict, Any, Optional
 import time
 import logging
+import os
 from config_params import CFGS
 from sample_processing.radar_params import ADCParams
 from sample_processing.radar_proc import (
@@ -198,6 +199,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
         while not stop_event.is_set():
             try:
                 item = input_queue.get(timeout=1)
+                # Support STOP sentinel for immediate shutdown
+                if isinstance(item, dict) and item.get("STOP"):
+                    break
                 if isinstance(item, DCA1000Frame):
                     # Process frame
                     results = self._analyse_frame(item)
@@ -220,3 +224,5 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 stop_event.set()  # Stop on critical error
 
         self.logger.info("RadarHeatmapAnalyser stopped")
+
+        return

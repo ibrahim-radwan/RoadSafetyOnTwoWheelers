@@ -16,6 +16,18 @@ import queue
 import logging
 
 from mmwave import dsp
+
+# Ensure Qt platform and GL settings are compatible on embedded/Linux (e.g., Jetson)
+if os.name != "nt":
+    os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("QT_DEBUG_PLUGINS", "0")
+    # Prevent Qt xcb plugin from attempting GLX/EGL integrations on systems without them
+    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+    # Silence XInput2 warnings on Jetson/Xorg configurations lacking XI2
+    os.environ.setdefault("QT_XCB_NO_XI2", "1")
+
 from PyQt5.QtWidgets import QApplication
 
 from engine.fusion_factory import FusionFactory
@@ -270,12 +282,20 @@ class ReplayFusionApp:
             self.stop_event.set()
 
         finally:
-            # Clean shutdown
+            # Clean shutdown with extended grace period before force
             print("Shutting down...")
-            fusion_process.join(timeout=5)
-
+            total_wait = 0
+            while fusion_process.is_alive() and total_wait < 20:
+                fusion_process.join(timeout=2)
+                total_wait += 2
             if fusion_process.is_alive():
+                print("Fusion process still alive, terminating...")
                 fusion_process.terminate()
+                fusion_process.join(timeout=5)
+            if fusion_process.is_alive():
+                print("Fusion process did not terminate, killing...")
+                fusion_process.kill()
+                fusion_process.join()
 
             # Clean up manager
             self.manager.shutdown()
@@ -394,12 +414,20 @@ class ReplayFusionApp:
             self.stop_event.set()
 
         finally:
-            # Clean shutdown
+            # Clean shutdown with extended grace period before force
             print("Shutting down...")
-            fusion_process.join(timeout=5)
-
+            total_wait = 0
+            while fusion_process.is_alive() and total_wait < 20:
+                fusion_process.join(timeout=2)
+                total_wait += 2
             if fusion_process.is_alive():
+                print("Fusion process still alive, terminating...")
                 fusion_process.terminate()
+                fusion_process.join(timeout=5)
+            if fusion_process.is_alive():
+                print("Fusion process did not terminate, killing...")
+                fusion_process.kill()
+                fusion_process.join()
 
             # Clean up manager
             self.manager.shutdown()
@@ -414,6 +442,8 @@ def main():
     )
     parser.add_argument(
         "--file-path",
+        "--file",
+        dest="file_path",
         type=str,
         required=True,
         help="Path to recorded radar data directory",
@@ -448,6 +478,8 @@ def main():
         sys.exit(1)
 
     try:
+        # Use spawn start method to avoid inheriting background threads that can block shutdown
+        multiprocessing.set_start_method("spawn", force=True)
         app = ReplayFusionApp(args.file_path, args.config_file)
 
         dsp.precompile_kernels()

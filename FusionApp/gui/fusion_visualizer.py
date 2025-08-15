@@ -13,9 +13,17 @@ import queue
 import numpy as np
 
 # Fix OpenCV Qt plugin conflicts before importing cv2 - only on Linux
-if os.name != 'nt':  # Not Windows
-    os.environ.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
+import pyqtgraph as pg
+
+if os.name != "nt":  # Not Windows
+    os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+    # Prefer software rendering on NVIDIA Jetson to avoid GLX/EGL issues
+    if os.path.exists("/etc/nv_tegra_release"):
+        os.environ.setdefault("QT_OPENGL", "software")
 import cv2
+
+# Configure pyqtgraph defaults (do not force OpenGL here; decide at runtime)
+pg.setConfigOptions(antialias=False, imageAxisOrder="row-major")
 
 from typing import Optional, Callable, Dict, Any, List
 
@@ -31,10 +39,10 @@ from PyQt5.QtWidgets import (
     QGridLayout,
 )
 from PyQt5.QtGui import QPixmap, QImage
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QRectF
+from PyQt5.QtGui import QOpenGLContext, QSurfaceFormat, QOffscreenSurface
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
+# Matplotlib removed from visualizer rendering; pyqtgraph is used for speed
 
 from config_params import CFGS
 from utils import setup_logger
@@ -87,13 +95,25 @@ class FusionVisualizer(QWidget):
         self._last_log_time = time.time()
         self._plot_updates = 0
 
+        # Visualizer profiling accumulators
+        self._profile_enabled = True
+        self._profile_step = 30  # frames per report (align with camera profile)
+        self._profile_count = 0
+        self._prof_sum_total = 0.0
+        self._prof_sum_get_data = 0.0
+        self._prof_sum_status = 0.0
+        self._prof_sum_camera = 0.0
+        self._prof_sum_rd = 0.0
+        self._prof_sum_ra = 0.0
+        self._prof_sum_pc = 0.0
+
         # Setup UI
         self._setup_ui()
 
-        # Start update timer at 30 FPS (33ms)
+        # Start update timer at ~50 FPS (20ms)
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_display)
-        self.timer.start(20)  # 30 FPS
+        self.timer.start(20)
 
         self.logger.info(f"FusionVisualizer initialized in {mode} mode")
 
@@ -111,40 +131,85 @@ class FusionVisualizer(QWidget):
         # Create main layout
         main_layout = QVBoxLayout()
 
-        # Setup plots
+        # Choose rendering backend and then setup plots and widgets
+        self._configure_pyqtgraph_backend()
         self._setup_plots()
 
         # Create 2x2 grid layout for all modes
         plots_layout = QGridLayout()
         plots_layout.addWidget(self.camera_widget, 0, 0)  # Upper-left: Camera/Video
         plots_layout.addWidget(
-            self.point_cloud_canvas, 0, 1
+            self.point_cloud_widget, 0, 1
         )  # Upper-right: Point cloud
         plots_layout.addWidget(
-            self.range_doppler_canvas, 1, 0
+            self.range_doppler_widget, 1, 0
         )  # Lower-left: Range-Doppler
         plots_layout.addWidget(
-            self.range_azimuth_canvas, 1, 1
+            self.range_azimuth_widget, 1, 1
         )  # Lower-right: Range-Azimuth
 
         # Set equal row and column stretch factors for 50/50 split
-        plots_layout.setRowStretch(0, 1)  # First row gets 50% of height
-        plots_layout.setRowStretch(1, 1)  # Second row gets 50% of height
-        plots_layout.setColumnStretch(0, 1)  # First column gets 50% of width
-        plots_layout.setColumnStretch(1, 1)  # Second column gets 50% of width
+        plots_layout.setRowStretch(0, 1)
+        plots_layout.setRowStretch(1, 1)
+        plots_layout.setColumnStretch(0, 1)
+        plots_layout.setColumnStretch(1, 1)
 
         # Add plots layout with stretch factor so it takes most of the space
-        main_layout.addLayout(plots_layout, 1)  # stretch factor of 1
+        main_layout.addLayout(plots_layout, 1)
 
         # Setup controls
         self._setup_controls()
-        # Add controls layout with no stretch factor and fixed height
-        main_layout.addLayout(self.controls_layout, 0)  # stretch factor of 0
+        main_layout.addLayout(self.controls_layout)
 
+        # Finalize
         self.setLayout(main_layout)
 
+    def _configure_pyqtgraph_backend(self) -> None:
+        """Decide whether to enable OpenGL acceleration for pyqtgraph.
+
+        On systems like NVIDIA Jetson, the XCB plugin may not have GLX/EGL,
+        which causes QOpenGLWidget context creation to fail. We detect this
+        at runtime and fall back to software rendering by default.
+        """
+        try:
+            # Allow user override via env var
+            force_software = os.environ.get("PG_FORCE_SOFTWARE", "0") == "1"
+            if force_software:
+                pg.setConfigOptions(useOpenGL=False)
+                self.logger.info("pyqtgraph OpenGL disabled by PG_FORCE_SOFTWARE=1")
+                return
+
+            # Try creating an offscreen OpenGL context to verify availability
+            fmt = QSurfaceFormat()
+            fmt.setRenderableType(QSurfaceFormat.OpenGLES)
+            ctx = QOpenGLContext()
+            ctx.setFormat(fmt)
+
+            surface = QOffscreenSurface()
+            surface.setFormat(fmt)
+            surface.create()
+
+            gl_ok = ctx.create() and ctx.isValid() and ctx.makeCurrent(surface)
+
+            if gl_ok:
+                pg.setConfigOptions(useOpenGL=True)
+                self.logger.info("pyqtgraph OpenGL enabled (context valid)")
+                ctx.doneCurrent()
+            else:
+                pg.setConfigOptions(useOpenGL=False)
+                self.logger.warning(
+                    "pyqtgraph OpenGL not available; using software rendering"
+                )
+        except Exception as e:
+            # Any failure → fall back to software
+            pg.setConfigOptions(useOpenGL=False)
+            if hasattr(self, "logger"):
+                self.logger.warning(
+                    f"Failed to init OpenGL context; falling back to software: {e}"
+                )
+
     def _setup_plots(self):
-        """Setup matplotlib figures and camera display"""
+        """Setup camera display and pyqtgraph plots"""
         # Camera/Video widget - always present
         self.camera_widget = QLabel()
         self.camera_widget.setMinimumSize(400, 400)
@@ -152,38 +217,6 @@ class FusionVisualizer(QWidget):
         self.camera_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.camera_widget.setText("No video stream available")
         self.camera_widget.setScaledContents(True)
-
-        # Range-Doppler plot
-        self.rd_figure = Figure(figsize=(6, 6))
-        self.rd_ax = self.rd_figure.add_subplot(111)
-        self.rd_ax.set_title("Range-Doppler Heatmap")
-        self.rd_ax.set_xlabel("Doppler (m/s)")
-        self.rd_ax.set_ylabel("Range (m)")
-        self.range_doppler_canvas = FigureCanvas(self.rd_figure)
-
-        # Range-Azimuth plot
-        self.ra_figure = Figure(figsize=(6, 6))
-        self.ra_ax = self.ra_figure.add_subplot(111)
-        self.ra_ax.set_title("Range-Azimuth Heatmap")
-        self.ra_ax.set_xlabel("Azimuth (degrees)")
-        self.ra_ax.set_ylabel("Range (m)")
-        self.range_azimuth_canvas = FigureCanvas(self.ra_figure)
-
-        # Point Cloud plot (2D or 3D)
-        self.pc_figure = Figure(figsize=(6, 6))
-        if self.use_3d:
-            self.pc_ax = self.pc_figure.add_subplot(111, projection="3d")
-            self.pc_ax.set_title("3D Point Cloud")
-            self.pc_ax.set_xlabel("X (m)")
-            self.pc_ax.set_ylabel("Y (m)")
-            if hasattr(self.pc_ax, "set_zlabel"):
-                self.pc_ax.set_zlabel("Z (m)")  # type: ignore
-        else:
-            self.pc_ax = self.pc_figure.add_subplot(111)
-            self.pc_ax.set_title("2D Point Cloud")
-            self.pc_ax.set_xlabel("X (m)")
-            self.pc_ax.set_ylabel("Y (m)")
-        self.point_cloud_canvas = FigureCanvas(self.pc_figure)
 
         # Calculate max range for point cloud axis limits
         if self.adc_params:
@@ -203,18 +236,40 @@ class FusionVisualizer(QWidget):
                 "No ADC params provided, using default max range: 10.0 m"
             )
 
-        # Initialize plot references
-        self.rd_im = None
-        self.ra_im = None
-        self.pc_scatter = None
-        self.rd_cbar = None
-        self.ra_cbar = None
-        self.pc_cbar = None
+        # Precompute LUT similar to 'jet'
+        try:
+            self._lut_jet = pg.colormap.get("jet").getLookupTable(0.0, 1.0, 256)
+        except Exception:
+            self._lut_jet = None
 
-        # Use tight layout
-        self.rd_figure.tight_layout()
-        self.ra_figure.tight_layout()
-        self.pc_figure.tight_layout()
+        # Range-Doppler plot (pyqtgraph)
+        self.range_doppler_widget = pg.GraphicsLayoutWidget()
+        self.rd_plot = self.range_doppler_widget.addPlot(title="Range-Doppler Heatmap")
+        self.rd_plot.setLabel("bottom", "Doppler (m/s)")
+        self.rd_plot.setLabel("left", "Range (m)")
+        self.rd_image = pg.ImageItem()
+        self.rd_plot.addItem(self.rd_image)
+        self.rd_plot.invertY(False)
+
+        # Range-Azimuth plot (pyqtgraph)
+        self.range_azimuth_widget = pg.GraphicsLayoutWidget()
+        self.ra_plot = self.range_azimuth_widget.addPlot(title="Range-Azimuth Heatmap")
+        self.ra_plot.setLabel("bottom", "Azimuth (degrees)")
+        self.ra_plot.setLabel("left", "Range (m)")
+        self.ra_image = pg.ImageItem()
+        self.ra_plot.addItem(self.ra_image)
+        self.ra_plot.invertY(False)
+
+        # Point Cloud plot (2D, pyqtgraph)
+        self.point_cloud_widget = pg.GraphicsLayoutWidget()
+        title = "3D Point Cloud" if self.use_3d else "2D Point Cloud"
+        self.pc_plot = self.point_cloud_widget.addPlot(title=title)
+        self.pc_plot.setLabel("bottom", "X (m)")
+        self.pc_plot.setLabel("left", "Y (m)")
+        self.pc_scatter_item = pg.ScatterPlotItem(pen=None, size=4)
+        self.pc_plot.addItem(self.pc_scatter_item)
+        self.pc_plot.setXRange(-self.pc_max_range, self.pc_max_range, padding=0)
+        self.pc_plot.setYRange(0, self.pc_max_range, padding=0)
 
     def _setup_controls(self):
         """Setup control buttons and status display"""
@@ -384,13 +439,17 @@ class FusionVisualizer(QWidget):
             return
 
         try:
+            total_t0 = time.perf_counter()
+
             # Get current data
+            get_t0 = time.perf_counter()
             radar_data = (
                 self.radar_data_callback() if self.radar_data_callback else None
             )
             camera_data = (
                 self.camera_data_callback() if self.camera_data_callback else None
             )
+            t_get_data = time.perf_counter() - get_t0
 
             # Set extents if needed
             rd_extents = [-5, 5, 0, 10]
@@ -403,14 +462,33 @@ class FusionVisualizer(QWidget):
                     pass
 
             # Update status for replay mode
+            status_dt = 0.0
             if self.mode == "replay":
+                st_t0 = time.perf_counter()
                 self._update_playback_status()
+                status_dt = time.perf_counter() - st_t0
 
             # Update displays
+            cam_t0 = time.perf_counter()
             self._update_camera_display(camera_data)
-            self._update_radar_displays(radar_data, rd_extents, ra_extents)
+            t_camera = time.perf_counter() - cam_t0
+
+            rdra_times = self._update_radar_displays(radar_data, rd_extents, ra_extents)
+            t_rd = rdra_times.get("rd", 0.0)
+            t_ra = rdra_times.get("ra", 0.0)
+            t_pc = rdra_times.get("pc", 0.0)
 
             # Performance logging
+            t_total = time.perf_counter() - total_t0
+            self._record_profile(
+                t_total=t_total,
+                t_get=t_get_data,
+                t_status=status_dt,
+                t_camera=t_camera,
+                t_rd=t_rd,
+                t_ra=t_ra,
+                t_pc=t_pc,
+            )
             self._log_performance()
 
         except Exception as e:
@@ -444,160 +522,138 @@ class FusionVisualizer(QWidget):
             self.logger.error(f"Error updating camera display: {e}")
 
     def _update_radar_displays(self, radar_data, rd_extents, ra_extents):
-        """Update all radar plots"""
+        """Update all radar plots. Returns dict of timings for rd/ra/pc."""
+        t_rd = t_ra = t_pc = 0.0
         try:
             # Update Range-Doppler plot
             if radar_data and radar_data.get("range_doppler") is not None:
-                self._update_range_doppler(radar_data["range_doppler"], rd_extents)
+                t_rd = self._update_range_doppler(
+                    radar_data["range_doppler"], rd_extents
+                )
 
             # Update Range-Azimuth plot
             if radar_data and radar_data.get("range_azimuth") is not None:
-                self._update_range_azimuth(radar_data["range_azimuth"], ra_extents)
+                t_ra = self._update_range_azimuth(
+                    radar_data["range_azimuth"], ra_extents
+                )
 
             # Update Point Cloud
             if radar_data and radar_data.get("point_cloud") is not None:
-                self._update_point_cloud(radar_data["point_cloud"])
+                t_pc = self._update_point_cloud(radar_data["point_cloud"])
 
         except Exception as e:
             self.logger.error(f"Error updating radar displays: {e}")
+        return {"rd": t_rd, "ra": t_ra, "pc": t_pc}
 
     def _update_range_doppler(self, rd_data, extents):
-        """Update range-doppler heatmap"""
+        """Update range-doppler heatmap (pyqtgraph). Returns time spent (s)."""
+        t0 = time.perf_counter()
         try:
-            if rd_data is not None and rd_data.size > 0:
+            if rd_data is not None and getattr(rd_data, "size", 0) > 0:
                 # Handle 3D data by summing over virtual antenna axis
                 if rd_data.ndim == 3:
                     rd_data = np.sum(rd_data, axis=1)
 
-                # Convert to dB scale
-                rd_db = 20 * np.log10(np.abs(rd_data) + 1e-10)
-                rd_db = rd_db.T  # Transpose for correct orientation
+                # Convert to dB scale and orient as (rows, cols), origin lower
+                rd_db = 20.0 * np.log10(np.abs(rd_data) + 1e-10)
+                rd_db = rd_db.T
 
-                # Update or create image
-                if self.rd_im is None:
-                    self.rd_ax.set_title("Range-Doppler Heatmap")
-                    self.rd_ax.set_xlabel("Doppler (m/s)")
-                    self.rd_ax.set_ylabel("Range (m)")
-                    self.rd_im = self.rd_ax.imshow(
-                        rd_db, aspect="auto", origin="lower", cmap="jet", extent=extents
-                    )
-                    if self.rd_cbar is None:
-                        self.rd_cbar = self.rd_figure.colorbar(
-                            self.rd_im, ax=self.rd_ax
-                        )
-                        self.rd_cbar.set_label("Magnitude (dB)")
-                else:
-                    self.rd_im.set_array(rd_db)
-                    self.rd_im.set_extent(extents)
-                    self.rd_im.set_clim(vmin=rd_db.min(), vmax=rd_db.max())
+                # Update image with LUT and levels
+                vmin = float(rd_db.min())
+                vmax = float(rd_db.max())
+                self.rd_image.setImage(
+                    rd_db,
+                    autoLevels=False,
+                    levels=(vmin, vmax),
+                    lut=self._lut_jet,
+                )
 
-            self.range_doppler_canvas.draw()
-
+                # Map image to physical extents with a rect
+                x0, x1, y0, y1 = extents[0], extents[1], extents[2], extents[3]
+                self.rd_image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
         except Exception as e:
             self.logger.error(f"Error updating range-doppler plot: {e}")
+        return time.perf_counter() - t0
 
     def _update_range_azimuth(self, ra_data, extents):
-        """Update range-azimuth heatmap"""
+        """Update range-azimuth heatmap (pyqtgraph). Returns time spent (s)."""
+        t0 = time.perf_counter()
         try:
-            if ra_data is not None and ra_data.size > 0:
+            if ra_data is not None and getattr(ra_data, "size", 0) > 0:
                 # Handle 3D data by summing over virtual antenna axis
                 if ra_data.ndim == 3:
                     ra_data = np.sum(ra_data, axis=1)
 
-                # Convert to dB scale
-                ra_db = 20 * np.log10(np.abs(ra_data) + 1e-10)
-                ra_db = ra_db.T  # Transpose for correct orientation
+                # Convert to dB scale and orient as (rows, cols), origin lower
+                ra_db = 20.0 * np.log10(np.abs(ra_data) + 1e-10)
+                ra_db = ra_db.T
 
-                # Update or create image
-                if self.ra_im is None:
-                    self.ra_ax.set_title("Range-Azimuth Heatmap")
-                    self.ra_ax.set_xlabel("Azimuth (degrees)")
-                    self.ra_ax.set_ylabel("Range (m)")
-                    self.ra_im = self.ra_ax.imshow(
-                        ra_db, aspect="auto", origin="lower", cmap="jet", extent=extents
-                    )
-                    if self.ra_cbar is None:
-                        self.ra_cbar = self.ra_figure.colorbar(
-                            self.ra_im, ax=self.ra_ax
-                        )
-                        self.ra_cbar.set_label("Magnitude (dB)")
-                else:
-                    self.ra_im.set_array(ra_db)
-                    self.ra_im.set_extent(extents)
-                    self.ra_im.set_clim(vmin=ra_db.min(), vmax=ra_db.max())
+                # Update image with LUT and levels
+                vmin = float(ra_db.min())
+                vmax = float(ra_db.max())
+                self.ra_image.setImage(
+                    ra_db,
+                    autoLevels=False,
+                    levels=(vmin, vmax),
+                    lut=self._lut_jet,
+                )
 
-            self.range_azimuth_canvas.draw()
-
+                # Map image to physical extents with a rect
+                x0, x1, y0, y1 = extents[0], extents[1], extents[2], extents[3]
+                self.ra_image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
         except Exception as e:
             self.logger.error(f"Error updating range-azimuth plot: {e}")
+        return time.perf_counter() - t0
 
     def _update_point_cloud(self, point_cloud_data):
-        """Update point cloud plot"""
+        """Update point cloud plot (pyqtgraph). Returns time spent (s)."""
+        t0 = time.perf_counter()
         try:
             if point_cloud_data is not None and len(point_cloud_data.get("x", [])) > 0:
-                x_data = point_cloud_data["x"]
-                y_data = point_cloud_data["y"]
-                z_data = point_cloud_data.get("z", []) if self.use_3d else None
+                x_data = np.asarray(point_cloud_data["x"], dtype=float)
+                y_data = np.asarray(point_cloud_data["y"], dtype=float)
 
-                # Validate data consistency
-                if (
-                    self.use_3d
-                    and z_data is not None
-                    and (len(x_data) != len(y_data) or len(x_data) != len(z_data))
-                ):
+                if x_data.shape[0] != y_data.shape[0]:
                     self.logger.warning(
                         "Point cloud coordinate arrays have inconsistent lengths"
                     )
-                    return
-                elif not self.use_3d and len(x_data) != len(y_data):
-                    self.logger.warning(
-                        "Point cloud coordinate arrays have inconsistent lengths"
-                    )
-                    return
+                    return time.perf_counter() - t0
 
-                # Get colors
+                # Colors: use snr or intensity; fallback to index
                 colors = point_cloud_data.get(
                     "snr", point_cloud_data.get("intensity", None)
                 )
                 if colors is None or len(colors) != len(x_data):
-                    colors = np.arange(len(x_data), dtype=np.float64)
+                    colors = np.arange(len(x_data), dtype=float)
+                colors = np.asarray(colors, dtype=float)
 
-                # Update or create scatter plot
-                if self.pc_scatter is not None:
-                    self.pc_scatter.remove()
+                cmin = float(colors.min()) if colors.size else 0.0
+                cmax = float(colors.max()) if colors.size else 1.0
+                if cmax - cmin < 1e-9:
+                    cmax = cmin + 1.0
+                norm = (colors - cmin) / (cmax - cmin)
+                idx = np.clip((norm * 255).astype(np.int32), 0, 255)
 
-                if self.use_3d:
-                    self.pc_scatter = self.pc_ax.scatter(
-                        x_data, y_data, z_data, c=colors, cmap="jet", alpha=0.8
-                    )
-                    self.pc_ax.set_xlim(-self.pc_max_range, self.pc_max_range)
-                    self.pc_ax.set_ylim(0, self.pc_max_range)
-                    if hasattr(self.pc_ax, "set_zlim"):
-                        self.pc_ax.set_zlim(-self.pc_max_range, self.pc_max_range)  # type: ignore
+                if self._lut_jet is not None:
+                    lut = self._lut_jet
+                    # Build per-point brushes
+                    brushes = [
+                        pg.mkBrush(int(lut[i, 0]), int(lut[i, 1]), int(lut[i, 2]), 255)
+                        for i in idx
+                    ]
                 else:
-                    self.pc_scatter = self.pc_ax.scatter(
-                        x_data, y_data, c=colors, cmap="jet", alpha=0.8
-                    )
-                    self.pc_ax.set_xlim(-self.pc_max_range, self.pc_max_range)
-                    self.pc_ax.set_ylim(0, self.pc_max_range)
+                    brushes = pg.mkBrush(0, 200, 255, 255)
 
-                # Create colorbar if needed
-                if self.pc_cbar is None:
-                    self.pc_cbar = self.pc_figure.colorbar(
-                        self.pc_scatter, ax=self.pc_ax
-                    )
-                    self.pc_cbar.set_label("SNR (dB)")
+                self.pc_scatter_item.setData(
+                    x=x_data, y=y_data, brush=brushes, pen=None
+                )
 
-                # Update colorbar limits
-                if colors is not None:
-                    self.pc_scatter.set_clim(
-                        vmin=float(np.min(colors)), vmax=float(np.max(colors))
-                    )
-
-            self.point_cloud_canvas.draw()
-
+                # Keep ranges steady
+                self.pc_plot.setXRange(-self.pc_max_range, self.pc_max_range, padding=0)
+                self.pc_plot.setYRange(0, self.pc_max_range, padding=0)
         except Exception as e:
             self.logger.error(f"Error updating point cloud plot: {e}")
+        return time.perf_counter() - t0
 
     def _update_playback_status(self):
         """Update playback controls based on status"""
@@ -605,28 +661,50 @@ class FusionVisualizer(QWidget):
             try:
                 status = self.status_callback()
                 if status:
-                    # Update progress
+                    # Throttle UI updates to reduce overhead on embedded devices
+                    now = time.perf_counter()
+                    if not hasattr(self, "_last_status_ui"):
+                        self._last_status_ui = {
+                            "t": 0.0,
+                            "state": None,
+                            "current_frame": None,
+                            "total_frames": None,
+                            "progress": None,
+                        }
+
+                    # Only update at most every 50 ms
+                    if now - self._last_status_ui.get("t", 0.0) < 0.05:
+                        return
+
+                    total_frames = int(status.get("total_frames", 0))
+                    current_frame = int(status.get("current_frame", 0))
                     progress = int(status.get("progress_percent", 0))
-                    self.progress_bar.setValue(progress)
-
-                    # Update slider maximum
-                    total_frames = status.get("total_frames", 0)
-                    if total_frames > 0 and self.seek_slider.maximum() != total_frames:
-                        self.seek_slider.setMaximum(total_frames)
-                        self.progress_bar.setMaximum(total_frames)
-
-                    # Update slider position
-                    if not self.seek_slider.isSliderDown():
-                        current_frame = status.get("current_frame", 0)
-                        self.seek_slider.setValue(current_frame)
-                        self.progress_bar.setValue(current_frame)
-
-                    # Update status label
                     state = status.get("state", "UNKNOWN")
-                    current_frame = status.get("current_frame", 0)
-                    self.status_label.setText(
-                        f"{state} - Frame {current_frame}/{total_frames}"
-                    )
+
+                    # Update slider maximum once when it changes
+                    if (
+                        total_frames > 0
+                        and self._last_status_ui.get("total_frames") != total_frames
+                    ):
+                        if self.seek_slider.maximum() != total_frames:
+                            self.seek_slider.setMaximum(total_frames)
+                            self.progress_bar.setMaximum(total_frames)
+
+                    # Update slider position only when not interacting and when changed
+                    if not self.seek_slider.isSliderDown():
+                        if self._last_status_ui.get("current_frame") != current_frame:
+                            self.seek_slider.setValue(current_frame)
+                            self.progress_bar.setValue(current_frame)
+
+                    # Update status label only when changed
+                    if (
+                        self._last_status_ui.get("state") != state
+                        or self._last_status_ui.get("current_frame") != current_frame
+                        or self._last_status_ui.get("total_frames") != total_frames
+                    ):
+                        self.status_label.setText(
+                            f"{state} - Frame {current_frame}/{total_frames}"
+                        )
 
                     # Update button state - but don't override user actions immediately
                     if state == "PLAYING" and not self.is_playing:
@@ -640,6 +718,17 @@ class FusionVisualizer(QWidget):
                         if state == "STOPPED":
                             self.seek_slider.setValue(0)
                             self.progress_bar.setValue(0)
+
+                    # Record last update snapshot and timestamp
+                    self._last_status_ui.update(
+                        {
+                            "t": now,
+                            "state": state,
+                            "current_frame": current_frame,
+                            "total_frames": total_frames,
+                            "progress": progress,
+                        }
+                    )
 
             except Exception as e:
                 self.logger.debug(f"No status update available: {e}")
@@ -719,7 +808,7 @@ class FusionVisualizer(QWidget):
                 self.camera_widget.setPixmap(scaled_pixmap)
             else:
                 self.camera_widget.setText(
-                    f"Camera\n{len(detected_objects)} objects detected"
+                    f"Camera\n{len(detected_objects) if detected_objects else 0} objects detected"
                 )
 
         except Exception as e:
@@ -738,6 +827,66 @@ class FusionVisualizer(QWidget):
             self.logger.debug(f"Visualization FPS: {fps:.2f}")
             self._plot_updates = 0
             self._last_log_time = current_time
+
+    def _record_profile(
+        self,
+        *,
+        t_total: float,
+        t_get: float,
+        t_status: float,
+        t_camera: float,
+        t_rd: float,
+        t_ra: float,
+        t_pc: float,
+    ) -> None:
+        if not self._profile_enabled:
+            return
+        self._profile_count += 1
+        self._prof_sum_total += t_total
+        self._prof_sum_get_data += t_get
+        self._prof_sum_status += t_status
+        self._prof_sum_camera += t_camera
+        self._prof_sum_rd += t_rd
+        self._prof_sum_ra += t_ra
+        self._prof_sum_pc += t_pc
+
+        if self._profile_count % self._profile_step == 0:
+            n = self._profile_step
+            avg_total = self._prof_sum_total / n
+            avg_get = self._prof_sum_get_data / n
+            avg_status = self._prof_sum_status / n
+            avg_camera = self._prof_sum_camera / n
+            avg_rd = self._prof_sum_rd / n
+            avg_ra = self._prof_sum_ra / n
+            avg_pc = self._prof_sum_pc / n
+
+            fps = 1.0 / avg_total if avg_total > 0 else 0.0
+
+            # Percent contributions (can exceed 100% if overlaps, but indicative)
+            def pct(x: float) -> float:
+                return (x / avg_total * 100.0) if avg_total > 0 else 0.0
+
+            self.logger.info(
+                (
+                    f"[VISUALIZER_PROFILE] Average over {n} frames: "
+                    f"total={avg_total:.4f}s ({fps:.2f} FPS), "
+                    f"get_data={avg_get:.4f}s ({pct(avg_get):.0f}%), "
+                    f"status={avg_status:.4f}s ({pct(avg_status):.0f}%), "
+                    f"camera={avg_camera:.4f}s ({pct(avg_camera):.0f}%), "
+                    f"rd={avg_rd:.4f}s ({pct(avg_rd):.0f}%), "
+                    f"ra={avg_ra:.4f}s ({pct(avg_ra):.0f}%), "
+                    f"pc={avg_pc:.4f}s ({pct(avg_pc):.0f}%)"
+                )
+            )
+
+            # Reset sums for the next window
+            self._prof_sum_total = 0.0
+            self._prof_sum_get_data = 0.0
+            self._prof_sum_status = 0.0
+            self._prof_sum_camera = 0.0
+            self._prof_sum_rd = 0.0
+            self._prof_sum_ra = 0.0
+            self._prof_sum_pc = 0.0
 
     def closeEvent(self, a0):
         """Handle window close event"""

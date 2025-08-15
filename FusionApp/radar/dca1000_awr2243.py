@@ -141,13 +141,13 @@ class DCA1000EVM(RadarFeed):
                         f"Sending frame: {dca_frame.timestamp}, messages left in queue: {self._frame_queue.qsize()}"
                     )
 
-                # Send the frame data over the multiprocessing queue
+                # Send the frame data over the multiprocessing queue without blocking
                 try:
-                    stream_queue.put(dca_frame)
+                    stream_queue.put_nowait(dca_frame)
                 except Exception as e:
                     if self.logger is not None:
-                        self.logger.error(f"Error sending data: {e}")
-                    break
+                        self.logger.warning(f"Queue busy/closed, dropping frame: {e}")
+                    time.sleep(0.001)
             except queue.Empty:
                 # No frame available, continue
                 if self.logger is not None:
@@ -248,6 +248,10 @@ class DCA1000EVM(RadarFeed):
                 self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
                 break
+
+        # Ensure sender thread exits
+        if self._send_thread and self._send_thread.is_alive():
+            self._send_thread.join(timeout=2.0)
 
         if self._dca is not None:
             self._dca.fastRead_in_Cpp_thread_stop()
@@ -435,9 +439,11 @@ class DCA1000Recording(RadarFeed):
                     )
                     timeline_diff = abs(current_timeline - last_timeline_position)
 
-                    # Detect seeking (timeline position jumped significantly) or reset to beginning
-                    if timeline_diff > 1.0 or (
-                        current_timeline == 0.0 and last_timeline_position > 1.0
+                    # Detect seeking (backward move, large jump) or reset to beginning
+                    if (
+                        current_timeline < last_timeline_position - 0.05
+                        or timeline_diff > 0.5
+                        or current_timeline == 0.0
                     ):
                         # Timeline jumped or reset - find the correct frame to seek to
                         start_timestamp = SyncStateUtils.get_start_timestamp(
@@ -455,7 +461,7 @@ class DCA1000Recording(RadarFeed):
                                 best_index = i
 
                         self._current_frame_index = best_index
-                        self.logger.info(
+                        self.logger.debug(
                             f"Seeked to frame {best_index} (timestamp: {target_timestamp:.3f}s, timeline: {current_timeline:.3f}s)"
                         )
 
@@ -528,7 +534,14 @@ class DCA1000Recording(RadarFeed):
                     # Read and send the current frame
                     try:
                         frame = self._read_frame_from_file(filepath)
-                        stream_queue.put(frame)
+                        # Avoid blocking if analyzer is shutting down
+                        try:
+                            stream_queue.put_nowait(frame)
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Queue busy/closed, dropping frame: {e}"
+                            )
+                            time.sleep(0.001)
 
                         self.logger.debug(
                             f"Sent frame {self._current_frame_index}: {os.path.basename(filepath)} "
@@ -601,7 +614,7 @@ class DCA1000Recording(RadarFeed):
             )
 
         self._current_frame_index = frame_index
-        self.logger.info(f"Seeked to frame {frame_index}")
+        self.logger.debug(f"Seeked to frame {frame_index}")
 
     def seek_to_time(self, timestamp: float):
         """Seek to a specific timestamp"""
@@ -717,6 +730,16 @@ class DCA1000Recording(RadarFeed):
         if self._send_thread and self._send_thread.is_alive():
             self._send_thread.join(timeout=5.0)
 
+        # Ensure stream_queue feeder exits from this process
+        try:
+            if stream_queue is not None:
+                stream_queue.close()
+                stream_queue.join_thread()
+        except Exception:
+            pass
+
+        return
+
         self.logger.info("Playback stopped")
 
     def _handle_control_command(self, command):
@@ -775,7 +798,7 @@ class DCA1000Recording(RadarFeed):
                         )
                         relative_time = target_timestamp - start_timestamp
                         SyncStateUtils.seek_to_time(self._sync_state, relative_time)
-                        self.logger.info(
+                        self.logger.debug(
                             f"Seeked to timeline position {relative_time:.3f}s (frame {position})"
                         )
                     else:
@@ -785,7 +808,7 @@ class DCA1000Recording(RadarFeed):
                 else:
                     # Legacy mode - seek to frame directly
                     self.seek_to_frame(position)
-                    self.logger.info(f"Seeked to frame {position}")
+                    self.logger.debug(f"Seeked to frame {position}")
                 self._send_status_update()
             except ValueError:
                 self.logger.error(f"Invalid seek position: {position_str}")

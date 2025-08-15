@@ -285,6 +285,32 @@ class FusionEngine:
 
         self.logger.info("FusionEngine stopping...")
 
+        # Proactively signal analysers/feeds to exit immediately
+        stop_sentinel = {"STOP": True}
+        try:
+            if self._radar_stream_queue is not None:
+                self._radar_stream_queue.put_nowait(stop_sentinel)
+        except Exception:
+            pass
+        try:
+            if self._camera_stream_queue is not None:
+                self._camera_stream_queue.put_nowait(stop_sentinel)
+        except Exception:
+            pass
+        # Also notify control queues so feeds that watch control break promptly
+        try:
+            if radar_control_queue is not None:
+                radar_control_queue.put_nowait("stop")
+                radar_control_queue.put_nowait(stop_sentinel)
+        except Exception:
+            pass
+        try:
+            if camera_control_queue is not None:
+                camera_control_queue.put_nowait("stop")
+                camera_control_queue.put_nowait(stop_sentinel)
+        except Exception:
+            pass
+
         # Final process status check
         self.logger.info("Final process status:")
         for i, process in enumerate(processes):
@@ -292,10 +318,51 @@ class FusionEngine:
                 f"Process {i}: PID: {process.pid}, alive: {process.is_alive()}, exit_code: {process.exitcode}"
             )
 
-        # Join all processes
-        for i, process in enumerate(processes):
-            self.logger.info(f"Joining process {i}...")
-            process.join(1)
-            self.logger.info(f"Process {i} joined, exit_code: {process.exitcode}")
+        # Give children a grace period to exit on their own
+        time.sleep(0.5)
+
+        # Attempt to join/terminate/kill all child processes robustly (join analysers first)
+        for i in reversed(range(len(processes))):
+            process = processes[i]
+            try:
+                self.logger.info(f"Joining process {i}...")
+                process.join(timeout=6)
+                if process.is_alive():
+                    self.logger.warning(f"Process {i} still alive after join, terminating...")
+                    process.terminate()
+                    process.join(timeout=4)
+                if process.is_alive():
+                    self.logger.error(f"Process {i} did not terminate, killing...")
+                    process.kill()
+                    process.join()
+                self.logger.info(f"Process {i} joined, exit_code: {process.exitcode}")
+            except Exception as e:
+                self.logger.error(f"Error while shutting down process {i}: {e}")
+
+        # Close internal queues owned by the engine to help GC
+        try:
+            if self._radar_stream_queue is not None:
+                self._radar_stream_queue.close()
+                self._radar_stream_queue.join_thread()
+        except Exception:
+            pass
+        try:
+            if self._camera_stream_queue is not None:
+                self._camera_stream_queue.close()
+                self._camera_stream_queue.join_thread()
+        except Exception:
+            pass
+        try:
+            if control_queue is not None and radar_control_queue is not None:
+                radar_control_queue.close()
+                radar_control_queue.join_thread()
+        except Exception:
+            pass
+        try:
+            if control_queue is not None and camera_control_queue is not None:
+                camera_control_queue.close()
+                camera_control_queue.join_thread()
+        except Exception:
+            pass
 
         self.logger.info("FusionEngine stopped successfully.")
