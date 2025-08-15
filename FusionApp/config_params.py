@@ -21,7 +21,11 @@ class CFGS:
             acm_devices.sort()
             return acm_devices[0], acm_devices[1]
         else:
-            print("WARNING: Could not find enough ttyACM devices. Using defaults.")
+            # Honor suppression flag (e.g., replay mode sets this)
+            if os.environ.get("FUSION_SUPPRESS_TTYACM_WARNING", "0") != "1":
+                logging.getLogger("ConfigParams").warning(
+                    "Could not find enough ttyACM devices. Using defaults."
+                )
             return "/dev/ttyACM0", "/dev/ttyACM1"
 
     # Default logging level

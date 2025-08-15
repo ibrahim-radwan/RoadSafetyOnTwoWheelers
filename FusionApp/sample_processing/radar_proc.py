@@ -468,10 +468,10 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
         logger.debug("[DEBUG] No peaks detected - returning empty results")
 
         # Profile logging every 10 frames
-        if openradar_pd_process_frame.frame_count % 10 == 0:
+        if openradar_pd_process_frame.frame_count % 50 == 0:
             total_time = time.perf_counter() - function_start
             logger.info(
-                f"    [RADAR_PROFILE] TOTAL openradar_pd_process_frame time: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
+                f"AVG Runtime: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
             )
         return {
             "range_doppler": np.array([]),
@@ -554,10 +554,10 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     #     velocities = np.append(velocities, velocity)
 
     # Profile logging every 10 frames
-    if openradar_pd_process_frame.frame_count % 10 == 0:
+    if openradar_pd_process_frame.frame_count % 50 == 0:
         total_time = time.perf_counter() - function_start
         logger.info(
-            f"    [RADAR_PROFILE] TOTAL openradar_pd_process_frame time: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
+            f"AVG Runtime: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
         )
 
     return {
@@ -769,10 +769,10 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
         logger.debug("[DEBUG] No peaks detected - returning empty results")
 
         # Profile logging every 10 frames
-        if openradar_pd_process_frame.frame_count % 10 == 0:
+        if openradar_pd_process_frame.frame_count % 50 == 0:
             total_time = time.perf_counter() - function_start
             logger.info(
-                f"    [RADAR_PROFILE] TOTAL openradar_pd_process_frame time: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
+                f"AVG Runtime: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
             )
         return {
             "range_doppler": np.array([]),
@@ -834,10 +834,10 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
     cluster_labels = np.array([])
 
     # Profile logging every 10 frames
-    if openradar_pd_process_frame.frame_count % 10 == 0:
+    if openradar_pd_process_frame.frame_count % 50 == 0:
         total_time = time.perf_counter() - function_start
         logger.info(
-            f"    [RADAR_PROFILE] TOTAL openradar_pd_process_frame time: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
+            f"AVG Runtime: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
         )
     else:
         total_time = time.perf_counter() - function_start
@@ -861,7 +861,7 @@ def openradar_rt_process_frame(frame, adc_params):
 
     function_start = time.perf_counter()
 
-    # Frame counter for profile logging every 10 frames
+    # Frame counter for profile logging cadence control
     if not hasattr(openradar_rt_process_frame, "frame_count"):
         openradar_rt_process_frame.frame_count = 0
     openradar_rt_process_frame.frame_count += 1
@@ -1121,10 +1121,10 @@ def openradar_rt_process_frame(frame, adc_params):
     )
 
     # Profile logging every 10 frames
-    if openradar_rt_process_frame.frame_count % 10 == 0:
+    if openradar_rt_process_frame.frame_count % 50 == 0:
         total_time = time.perf_counter() - function_start
         logger.info(
-            f"    [RADAR_PROFILE] TOTAL openradar_rt_process_frame time: {total_time:.4f}s (frame {openradar_rt_process_frame.frame_count})"
+            f"AVG Runtime: {total_time:.4f}s (frame {openradar_rt_process_frame.frame_count})"
         )
 
     return {
@@ -1296,10 +1296,9 @@ def pyradar_process_frame(frame, adc_params, doa_method="MUSIC", IS_INDOOR=True)
     clustering_time = time.perf_counter() - step_start
     logger.debug(f"    [RADAR_PROFILE] Clustering (disabled): {clustering_time:.4f}s")
 
-    total_time = time.perf_counter() - function_start
-    logger.info(
-        f"    [RADAR_PROFILE] TOTAL pyradar_process_frame time: {total_time:.4f}s"
-    )
+    # Optional concise profile (disabled by default)
+    # total_time = time.perf_counter() - function_start
+    # logger.info(f"AVG Runtime: {total_time:.4f}s (frame 1)")
 
     return {
         "range_doppler": range_doppler,
