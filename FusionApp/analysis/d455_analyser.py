@@ -188,7 +188,7 @@ class D455Analyser(CameraAnalyser):
                 "GPU/HW acceleration is not available. Object detection is deactivated."
             )
             self.logger.info(
-                f"[YOLO_OPT] cuda_available={self._opt_cuda_available}, cudnn_benchmark={self._opt_cudnn_benchmark}, tf32_enabled={self._opt_tf32_allowed}, matmul_precision_high={self._opt_matmul_precision_set}, imgsz={self._imgsz}"
+                f"AVG Runtime: {0.0:.4f}s (frame {0})"
             )
         else:
             # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
@@ -204,9 +204,7 @@ class D455Analyser(CameraAnalyser):
                         f"TensorRT engine not used ({e}); falling back to PyTorch 'yolov8n.pt'"
                     )
             else:
-                self.logger.info(
-                    "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
-                )
+                self.logger.info("Non-Jetson platform detected; skipping TensorRT and using PyTorch")
             try:
                 if not model_loaded:
                     self._yolo_model = YOLO("yolov8n.pt")
@@ -216,7 +214,7 @@ class D455Analyser(CameraAnalyser):
                 self.logger.error(f"Failed to load YOLO model: {e}")
                 self._analysis_enabled = False
 
-            # Log device and optimization info
+            # Log device and optimization info (keep minimal)
             if self._analysis_enabled and model_loaded:
                 try:
                     name = torch.cuda.get_device_name(0)
@@ -225,9 +223,6 @@ class D455Analyser(CameraAnalyser):
                     )
                 except Exception:
                     pass
-                self.logger.info(
-                    f"[YOLO_OPT] cuda_available={self._opt_cuda_available}, cudnn_benchmark={self._opt_cudnn_benchmark}, tf32_enabled={self._opt_tf32_allowed}, matmul_precision_high={self._opt_matmul_precision_set}, optimizations='default-call', backend={self._backend}"
-                )
 
             # Warm up kernels to reduce first-frame latency
             try:
@@ -241,8 +236,8 @@ class D455Analyser(CameraAnalyser):
         frame_count = 0
         total_analysis_time = 0
         total_processing_time = 0
-        total_queue_wait_time = 0
-        total_output_put_time = 0
+
+        log_interval = 150  # every 150 frames (~5x the previous 30)
 
         while not stop_event.is_set():
             try:
@@ -250,7 +245,6 @@ class D455Analyser(CameraAnalyser):
                 queue_wait_start = time.perf_counter()
                 video_frame = input_queue.get(timeout=1)
                 queue_wait_end = time.perf_counter()
-                queue_wait_time = queue_wait_end - queue_wait_start
                 # Allow immediate shutdown via sentinel
                 if isinstance(video_frame, dict) and video_frame.get("STOP"):
                     break
@@ -262,18 +256,12 @@ class D455Analyser(CameraAnalyser):
                 analysis_end_time = time.perf_counter()
                 analysis_time = analysis_end_time - analysis_start_time
 
-                # Avoid blocking if consumer is stopping
+                # Non-blocking result publish; drop if consumer is busy
                 try:
-                    output_put_start = time.perf_counter()
                     output_queue.put_nowait(D455Results(video_frame, objects))
-                    output_put_end = time.perf_counter()
-                    output_put_time = output_put_end - output_put_start
                 except Full:
-                    self.logger.warning(
-                        "Camera results queue full, dropping result to exit cleanly"
-                    )
-                    output_put_time = 0.0
-                    # Continue without blocking
+                    self.logger.debug("Camera results queue full; dropping result")
+
                 total_end_time = time.perf_counter()
                 total_processing_time_frame = total_end_time - total_start_time
 
@@ -281,27 +269,11 @@ class D455Analyser(CameraAnalyser):
                 frame_count += 1
                 total_analysis_time += analysis_time
                 total_processing_time += total_processing_time_frame
-                total_queue_wait_time += queue_wait_time
-                total_output_put_time += output_put_time
 
-                # Print average statistics every 30 frames at INFO level
-                if frame_count % 30 == 0:
-                    avg_analysis_time = total_analysis_time / frame_count
+                # Print average statistics every log_interval frames at INFO level
+                if frame_count % log_interval == 0:
                     avg_total_time = total_processing_time / frame_count
-                    self.logger.info(
-                        f"[CAMERA_PROFILE] Average over {frame_count} frames: analysis={avg_analysis_time:.4f}s ({1/avg_analysis_time:.2f} FPS), total={avg_total_time:.4f}s ({1/avg_total_time:.2f} FPS)"
-                    )
-                    # Provide additional breakdown at INFO level (user request)
-                    avg_queue_wait = total_queue_wait_time / frame_count
-                    avg_output_put = total_output_put_time / frame_count
-                    self.logger.info(
-                        f"[CAMERA_PROFILE_BREAKDOWN] queue_wait={avg_queue_wait:.4f}s, output_put={avg_output_put:.4f}s"
-                    )
-
-                # Also log individual frame processing
-                self.logger.debug(
-                    f"[CAMERA_PROFILE] Frame {frame_count}: analysis={analysis_time:.4f}s, total={total_processing_time_frame:.4f}s, queue_wait={queue_wait_time:.4f}s, output_put={output_put_time:.4f}s, detected {len(objects)} objects"
-                )
+                    self.logger.info(f"AVG Runtime: {avg_total_time:.4f}s (frame {frame_count})")
 
             except Empty:
                 self.logger.debug("D455Analyser: No frames available, continuing...")
@@ -315,10 +287,9 @@ class D455Analyser(CameraAnalyser):
 
         # Final summary
         if frame_count > 0:
-            avg_analysis_time = total_analysis_time / frame_count
             avg_total_time = total_processing_time / frame_count
             self.logger.info(
-                f"[CAMERA_PROFILE] Final summary: processed {frame_count} frames, avg analysis={avg_analysis_time:.4f}s ({1/avg_analysis_time:.2f} FPS), avg total={avg_total_time:.4f}s ({1/avg_total_time:.2f} FPS)"
+                f"AVG Runtime: {avg_total_time:.4f}s (frame {frame_count})"
             )
 
         self.logger.info("D455Analyser stopped.")

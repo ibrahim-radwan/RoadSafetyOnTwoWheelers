@@ -97,7 +97,7 @@ class FusionVisualizer(QWidget):
 
         # Visualizer profiling accumulators
         self._profile_enabled = True
-        self._profile_step = 30  # frames per report (align with camera profile)
+        self._profile_step = 150  # reduced frequency (5x previous 30)
         self._profile_count = 0
         self._prof_sum_total = 0.0
         self._prof_sum_get_data = 0.0
@@ -853,31 +853,9 @@ class FusionVisualizer(QWidget):
         if self._profile_count % self._profile_step == 0:
             n = self._profile_step
             avg_total = self._prof_sum_total / n
-            avg_get = self._prof_sum_get_data / n
-            avg_status = self._prof_sum_status / n
-            avg_camera = self._prof_sum_camera / n
-            avg_rd = self._prof_sum_rd / n
-            avg_ra = self._prof_sum_ra / n
-            avg_pc = self._prof_sum_pc / n
-
             fps = 1.0 / avg_total if avg_total > 0 else 0.0
-
-            # Percent contributions (can exceed 100% if overlaps, but indicative)
-            def pct(x: float) -> float:
-                return (x / avg_total * 100.0) if avg_total > 0 else 0.0
-
-            self.logger.info(
-                (
-                    f"[VISUALIZER_PROFILE] Average over {n} frames: "
-                    f"total={avg_total:.4f}s ({fps:.2f} FPS), "
-                    f"get_data={avg_get:.4f}s ({pct(avg_get):.0f}%), "
-                    f"status={avg_status:.4f}s ({pct(avg_status):.0f}%), "
-                    f"camera={avg_camera:.4f}s ({pct(avg_camera):.0f}%), "
-                    f"rd={avg_rd:.4f}s ({pct(avg_rd):.0f}%), "
-                    f"ra={avg_ra:.4f}s ({pct(avg_ra):.0f}%), "
-                    f"pc={avg_pc:.4f}s ({pct(avg_pc):.0f}%)"
-                )
-            )
+            # Compact INFO line
+            self.logger.info(f"AVG Runtime: {avg_total:.4f}s (frame {n})")
 
             # Reset sums for the next window
             self._prof_sum_total = 0.0
