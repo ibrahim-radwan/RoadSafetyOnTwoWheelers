@@ -2,6 +2,7 @@ import os
 import time
 import queue
 import multiprocessing
+from multiprocessing import shared_memory
 import logging
 import glob
 import re
@@ -35,25 +36,57 @@ class DCA1000Config:
 
 
 class DCA1000Frame:
-    def __init__(self, timestamp: float, data: ndarray):
+    def __init__(
+        self,
+        timestamp: float,
+        data: ndarray,
+        *,
+        capture_monotonic_ns: int = None,
+        capture_wall_ns: int = None,
+        enqueue_monotonic_ns: int = None,
+    ):
         self.data: ndarray = data
+        # Legacy relative timestamp in seconds (kept for compatibility)
         self.timestamp: float = timestamp
+        # Absolute capture times (monotonic for latency, wall for human logs)
+        self.capture_monotonic_ns: int = (
+            capture_monotonic_ns if capture_monotonic_ns is not None else 0
+        )
+        self.capture_wall_ns: int = (
+            capture_wall_ns if capture_wall_ns is not None else 0
+        )
+        # Time when queued to inter-process queue (monotonic ns)
+        self.enqueue_monotonic_ns: int = (
+            enqueue_monotonic_ns if enqueue_monotonic_ns is not None else 0
+        )
 
 
 class DCA1000EVM(RadarFeed):
-    def __init__(self, dca1000_config: DCA1000Config = DCA1000Config()):
+    def __init__(
+        self,
+        dca1000_config: DCA1000Config = DCA1000Config(),
+        *,
+        prealloc_shm_meta: Optional[dict] = None,
+    ):
         # Store only serializable configuration
         self._config = dca1000_config
         self._dest_dir = dca1000_config.dest_dir
 
         # Initialize these in run() method
         self._start_time: Optional[float] = None
-        self._frame_queue: Optional[queue.Queue] = None
         self._dca: Optional[DCA1000] = None
         self._ADC_PARAMS_l: Optional[dict] = None
         self._last_frame_number = 0
         self.logger = None
-        self._send_thread: Optional[threading.Thread] = None
+        # Shared memory for zero-copy IPC
+        self._shm_blocks: Optional[List[shared_memory.SharedMemory]] = None
+        self._shm_names: Optional[List[str]] = None
+        self._shm_nbytes: Optional[int] = None
+        self._shm_dtype: Optional[str] = None
+        self._shm_shape: Optional[Tuple[int, ...]] = None
+        self._shm_seq: int = 0
+        self._shm_inited: bool = False
+        self._prealloc_shm_meta: Optional[dict] = prealloc_shm_meta
 
         # Recording control
         self._is_recording = False
@@ -67,6 +100,19 @@ class DCA1000EVM(RadarFeed):
             self._dca.fastRead_in_Cpp_thread_stop()
             self._dca.stream_stop()
             self._dca.close()
+        # Cleanup shared memory blocks if created
+        if self._shm_blocks:
+            for shm in self._shm_blocks:
+                try:
+                    shm.close()
+                except Exception:
+                    pass
+                # Only unlink if feed created the SHM (no engine prealloc)
+                if not self._prealloc_shm_meta:
+                    try:
+                        shm.unlink()
+                    except Exception:
+                        pass
         if self.logger is not None:
             self.logger.info("Cleaned up")
 
@@ -109,7 +155,11 @@ class DCA1000EVM(RadarFeed):
             self.logger.debug(f"Bandwidth: {data_buf.nbytes/(end-start)/1e6:.4f} MB/s")
 
         assert self._start_time is not None, "Start time is not initialized"
+        # Legacy relative timestamp (seconds)
         timestamp = end - self._start_time
+        # Absolute capture times (nanoseconds)
+        capture_monotonic_ns = time.perf_counter_ns()
+        capture_wall_ns = time.time_ns()
 
         # Only save frame if recording is enabled
         if self._is_recording:
@@ -125,33 +175,93 @@ class DCA1000EVM(RadarFeed):
             if self.logger:
                 self.logger.debug(f"Saved data to {filepath}")
 
-        return DCA1000Frame(timestamp, data_buf)
+        return DCA1000Frame(
+            timestamp,
+            data_buf,
+            capture_monotonic_ns=capture_monotonic_ns,
+            capture_wall_ns=capture_wall_ns,
+        )
+
+    def _init_shm_if_needed(self, dca_frame) -> bool:
+        """Initialize or attach to shared memory blocks once."""
+        if self._shm_inited:
+            return True
+        try:
+            # Attach to preallocated SHM if provided by engine/app
+            if self._prealloc_shm_meta:
+                names = self._prealloc_shm_meta.get("names")
+                nbytes = int(self._prealloc_shm_meta.get("nbytes"))
+                dtype_str = str(self._prealloc_shm_meta.get("dtype"))
+                shape_tuple = tuple(self._prealloc_shm_meta.get("shape"))
+                self._shm_blocks = [
+                    shared_memory.SharedMemory(name=name) for name in names
+                ]
+                self._shm_names = names
+                self._shm_nbytes = nbytes
+                self._shm_dtype = dtype_str
+                self._shm_shape = shape_tuple
+                self._shm_inited = True
+                if self.logger is not None:
+                    self.logger.info(
+                        f"Attached preallocated radar SHM: names={names}, bytes={nbytes}, dtype={dtype_str}, shape={shape_tuple}"
+                    )
+                return True
+            # No engine-provided SHM: fail as per policy
+            raise RuntimeError("Missing preallocated radar SHM metadata from engine")
+        except Exception as e:
+            if self.logger is not None:
+                self.logger.error(f"Failed to initialize/attach radar SHM: {e}")
+            return False
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
-        assert self._frame_queue is not None, "Frame queue is not initialized"
+        # Producer-consumer thread removed; send directly from capture loop via a small local buffer
         while not stop_event.is_set():
-            # Check for control commands periodically
             self._check_control_commands()
-
-            # Wait for a frame to be available
             try:
-                dca_frame = self._frame_queue.get(timeout=1)
-                if self.logger:
-                    self.logger.debug(
-                        f"Sending frame: {dca_frame.timestamp}, messages left in queue: {self._frame_queue.qsize()}"
-                    )
+                # Read next frame
+                dca_frame = self._read_and_store_frame()
+                # Initialize or attach shared memory on first frame
+                if not self._shm_inited:
+                    if not self._init_shm_if_needed(dca_frame):
+                        continue
+                    # With engine-owned SHM, no need to send SHM_INIT meta
+                    try:
+                        stream_queue.put_nowait({"ADC_PARAMS": self._ADC_PARAMS_l})
+                    except Exception as e2:
+                        if self.logger is not None:
+                            self.logger.warning(
+                                f"ADC_PARAMS meta drop: {type(e2).__name__}: {e2}"
+                            )
 
-                # Send the frame data over the multiprocessing queue without blocking
+                # Copy into alternating SHM slot and send compact metadata
                 try:
-                    stream_queue.put_nowait(dca_frame)
+                    slot = self._shm_seq & 1
+                    mv = memoryview(self._shm_blocks[slot].buf)[: self._shm_nbytes]
+                    mv[:] = dca_frame.data.tobytes()
+                    seq = self._shm_seq
+                    self._shm_seq += 1
+                    meta = {
+                        "RADAR_SHM_FRAME": True,
+                        "slot": slot,
+                        "seq": seq,
+                        "enqueue_monotonic_ns": time.perf_counter_ns(),
+                        "capture_monotonic_ns": getattr(
+                            dca_frame, "capture_monotonic_ns", 0
+                        ),
+                        "frame_timestamp": dca_frame.timestamp,
+                    }
+                    try:
+                        stream_queue.put_nowait(meta)
+                    except Exception as e:
+                        if self.logger is not None:
+                            self.logger.warning(
+                                f"Radar SHM frame meta drop: {type(e).__name__}: {e}"
+                            )
                 except Exception as e:
                     if self.logger is not None:
-                        self.logger.warning(f"Queue busy/closed, dropping frame: {e}")
-                    time.sleep(0.001)
+                        self.logger.warning(f"Radar SHM copy/send failed: {e}")
+                    continue
             except queue.Empty:
-                # No frame available, continue
-                if self.logger is not None:
-                    self.logger.warning("Warning: No frame available to send.")
                 continue
             except KeyboardInterrupt:
                 if self.logger is not None:
@@ -159,7 +269,7 @@ class DCA1000EVM(RadarFeed):
                 stop_event.set()
 
         if self.logger is not None:
-            self.logger.info("Send frame thread stopped")
+            self.logger.info("Sender loop stopped")
 
     def run(
         self,
@@ -185,8 +295,6 @@ class DCA1000EVM(RadarFeed):
             self.logger.info(f"Using existing destination directory: {self._dest_dir}")
 
         self._start_time = time.perf_counter()
-        self._frame_queue = queue.Queue()
-
         self._dca = DCA1000()
 
         self._dca.reset_fpga()
@@ -222,36 +330,23 @@ class DCA1000EVM(RadarFeed):
         self._dca.stream_start()
         self._dca.fastRead_in_Cpp_thread_start()
 
-        # Create and start a thread for sending frames
-        self._send_thread = threading.Thread(
-            target=self._send_frame,
-            name="DCA1000SendThread",
-            args=(
-                stream_queue,
-                stop_event,
-            ),
-        )
-        self._send_thread.start()
+        # Send frames directly (no extra producer thread)
+        self._send_frame(stream_queue, stop_event)
 
-        while not stop_event.is_set():
-            try:
-                # Check for control commands
-                self._check_control_commands()
-
-                # Update the data and check if the data is okay
-                radar_frame = self._read_and_store_frame()
-
-                self._frame_queue.put(radar_frame)
-
-                self._last_frame_number += 1
-            except KeyboardInterrupt:
-                self.logger.info("Keyboard interrupt received, stopping...")
-                stop_event.set()
-                break
-
-        # Ensure sender thread exits
-        if self._send_thread and self._send_thread.is_alive():
-            self._send_thread.join(timeout=2.0)
+        # Cleanup shared memory blocks if allocated
+        if self._shm_blocks:
+            for shm in self._shm_blocks:
+                try:
+                    shm.close()
+                except Exception:
+                    pass
+                try:
+                    shm.unlink()
+                except Exception:
+                    pass
+            self._shm_blocks = None
+            self._shm_names = None
+            self._shm_inited = False
 
         if self._dca is not None:
             self._dca.fastRead_in_Cpp_thread_stop()

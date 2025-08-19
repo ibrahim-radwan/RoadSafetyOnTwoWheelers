@@ -21,9 +21,10 @@ if os.name != "nt":  # Not Windows
     if os.path.exists("/etc/nv_tegra_release"):
         os.environ.setdefault("QT_OPENGL", "software")
 import cv2
+from collections import deque
 
-# Configure pyqtgraph defaults (do not force OpenGL here; decide at runtime)
-pg.setConfigOptions(antialias=False, imageAxisOrder="row-major")
+# Configure pyqtgraph defaults; force software to avoid GLX/EGL issues on Jetson
+pg.setConfigOptions(antialias=False, imageAxisOrder="row-major", useOpenGL=False)
 
 from typing import Optional, Callable, Dict, Any, List
 
@@ -47,6 +48,7 @@ from PyQt5.QtGui import QOpenGLContext, QSurfaceFormat, QOffscreenSurface
 from config_params import CFGS
 from utils import setup_logger
 from camera.d455 import D455Frame
+from multiprocessing import shared_memory
 
 
 class FusionVisualizer(QWidget):
@@ -116,6 +118,23 @@ class FusionVisualizer(QWidget):
         self.timer.start(20)
 
         self.logger.info(f"FusionVisualizer initialized in {mode} mode")
+
+        # Track last processed timestamps to avoid redundant updates
+        self._last_radar_ts = None
+        self._last_camera_ts = None
+        # FPS tracking over a 1-second window
+        self._fps_window_s = 1.0
+        self._cam_times = deque()
+        self._rad_times = deque()
+        self._cam_fps_text = ""
+        # Attach to analyser results SHM if engine passes meta via environment (simple handoff)
+        self._rd_blocks = []
+        self._rd_shape = None
+        self._rd_dtype = None
+        self._ra_blocks = []
+        self._ra_shape = None
+        self._ra_dtype = None
+        self._res_shm_attached = False
 
     def _setup_ui(self):
         """Setup the complete user interface"""
@@ -250,6 +269,9 @@ class FusionVisualizer(QWidget):
         self.rd_image = pg.ImageItem()
         self.rd_plot.addItem(self.rd_image)
         self.rd_plot.invertY(False)
+        # FPS text overlay for radar (top-left)
+        self._rd_fps_item = pg.TextItem(color="w", anchor=(0, 1))
+        self.rd_plot.addItem(self._rd_fps_item)
 
         # Range-Azimuth plot (pyqtgraph)
         self.range_azimuth_widget = pg.GraphicsLayoutWidget()
@@ -468,12 +490,182 @@ class FusionVisualizer(QWidget):
                 self._update_playback_status()
                 status_dt = time.perf_counter() - st_t0
 
-            # Update displays
-            cam_t0 = time.perf_counter()
-            self._update_camera_display(camera_data)
-            t_camera = time.perf_counter() - cam_t0
+            # Update displays only when new frames arrive
+            # Camera update
+            t_camera = 0.0
+            cam_ts = (
+                getattr(camera_data, "timestamp", None)
+                if camera_data is not None
+                else None
+            )
+            if cam_ts is None or cam_ts != self._last_camera_ts:
+                cam_t0 = time.perf_counter()
+                self._update_camera_display(camera_data)
+                t_camera = time.perf_counter() - cam_t0
+                if cam_ts is not None:
+                    self._last_camera_ts = cam_ts
+                # Update camera FPS window and build overlay text
+                now_s = time.perf_counter()
+                self._cam_times.append(now_s)
+                # Drop times older than window
+                while (
+                    self._cam_times and now_s - self._cam_times[0] > self._fps_window_s
+                ):
+                    self._cam_times.popleft()
+                cam_fps = len(self._cam_times) / self._fps_window_s
+                self._cam_fps_text = f"{cam_fps:.1f} FPS"
 
-            rdra_times = self._update_radar_displays(radar_data, rd_extents, ra_extents)
+            # Radar update
+            rdra_times = {"rd": 0.0, "ra": 0.0, "pc": 0.0}
+            radar_ts = None
+            new_radar_frame = False
+            if isinstance(radar_data, dict):
+                radar_ts = radar_data.get("frame_timestamp")
+                new_radar_frame = radar_ts is None or radar_ts != self._last_radar_ts
+            if radar_data is not None and new_radar_frame:
+                # If metadata indicates results are in SHM, attach and read
+                # Handle results SHM init (names/shapes)
+                if isinstance(radar_data, dict) and radar_data.get(
+                    "RADAR_RES_SHM_INIT"
+                ):
+                    try:
+                        if not self._res_shm_attached:
+                            rd = radar_data.get("rd")
+                            ra = radar_data.get("ra")
+                            if rd:
+                                self._rd_blocks = [
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in rd.get("names", [])
+                                ]
+                                self._rd_shape = tuple(rd.get("shape", ()))
+                                self._rd_dtype = rd.get("dtype", "float32")
+                            if ra:
+                                self._ra_blocks = [
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in ra.get("names", [])
+                                ]
+                                self._ra_shape = tuple(ra.get("shape", ()))
+                                self._ra_dtype = ra.get("dtype", "float32")
+                            self._res_shm_attached = True
+                            self.logger.info("Attached results SHM via init meta")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to attach RD/RA SHM via init: {e}")
+                    radar_data = None  # consume init item
+                # Render from SHM frame metadata
+                if isinstance(radar_data, dict) and radar_data.get(
+                    "RADAR_RES_SHM_FRAME"
+                ):
+                    try:
+                        # Lazy attach on first use via environment variables set by engine
+                        if (not self._res_shm_attached) and (
+                            (not self._rd_blocks)
+                            or (self._rd_shape is None)
+                            or (self._ra_shape is None)
+                        ):
+                            rd_names = os.environ.get("RADAR_RD_SHM_NAMES")
+                            ra_names = os.environ.get("RADAR_RA_SHM_NAMES")
+                            rd_shape = os.environ.get("RADAR_RD_SHAPE")
+                            ra_shape = os.environ.get("RADAR_RA_SHAPE")
+                            if rd_names and rd_shape:
+                                self._rd_blocks = [
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in rd_names.split(",")
+                                ]
+                                self._rd_shape = tuple(
+                                    int(x) for x in rd_shape.split(",")
+                                )
+                                self._rd_dtype = "float32"
+                            if ra_names and ra_shape:
+                                self._ra_blocks = [
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in ra_names.split(",")
+                                ]
+                                self._ra_shape = tuple(
+                                    int(x) for x in ra_shape.split(",")
+                                )
+                                self._ra_dtype = "float32"
+                            if self._rd_blocks or self._ra_blocks:
+                                self._res_shm_attached = True
+                        slot = int(radar_data.get("slot", 0)) & 1
+                        rd_data = None
+                        ra_data = None
+                        if (
+                            self._rd_blocks
+                            and self._rd_shape
+                            and slot < len(self._rd_blocks)
+                        ):
+                            try:
+                                expected_elems = int(np.prod(self._rd_shape))
+                                expected_bytes = expected_elems * 4
+                                buf = self._rd_blocks[slot].buf
+                                if len(buf) >= expected_bytes:
+                                    mv = memoryview(buf)[:expected_bytes]
+                                    rd_view = np.frombuffer(
+                                        mv, dtype=np.float32, count=expected_elems
+                                    ).reshape(self._rd_shape)
+                                else:
+                                    rd_view = np.array([], dtype=np.float32)
+                            except Exception:
+                                rd_view = np.array([], dtype=np.float32)
+                            rd_data = rd_view.copy()
+                        if (
+                            self._ra_blocks
+                            and self._ra_shape
+                            and slot < len(self._ra_blocks)
+                        ):
+                            try:
+                                expected_elems = int(np.prod(self._ra_shape))
+                                expected_bytes = expected_elems * 4
+                                buf = self._ra_blocks[slot].buf
+                                if len(buf) >= expected_bytes:
+                                    mv = memoryview(buf)[:expected_bytes]
+                                    ra_view = np.frombuffer(
+                                        mv, dtype=np.float32, count=expected_elems
+                                    ).reshape(self._ra_shape)
+                                else:
+                                    ra_view = np.array([], dtype=np.float32)
+                            except Exception:
+                                ra_view = np.array([], dtype=np.float32)
+                            ra_data = ra_view.copy()
+                        payload = {"range_doppler": rd_data, "range_azimuth": ra_data}
+                        # Pass through point cloud if provided in metadata
+                        if (
+                            isinstance(radar_data, dict)
+                            and radar_data.get("point_cloud") is not None
+                        ):
+                            payload["point_cloud"] = radar_data.get("point_cloud")
+                        rdra_times = self._update_radar_displays(
+                            payload, rd_extents, ra_extents
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to read results from SHM: {e}")
+                        rdra_times = self._update_radar_displays(
+                            radar_data, rd_extents, ra_extents
+                        )
+                else:
+                    rdra_times = self._update_radar_displays(
+                        radar_data, rd_extents, ra_extents
+                    )
+                if radar_ts is not None:
+                    self._last_radar_ts = radar_ts
+                # Update radar FPS window
+                now_s = time.perf_counter()
+                self._rad_times.append(now_s)
+                while (
+                    self._rad_times and now_s - self._rad_times[0] > self._fps_window_s
+                ):
+                    self._rad_times.popleft()
+                rad_fps = len(self._rad_times) / self._fps_window_s
+                # Position and update FPS overlay on RD plot (top-left in data coords)
+                x0, x1, y0, y1 = (
+                    rd_extents[0],
+                    rd_extents[1],
+                    rd_extents[2],
+                    rd_extents[3],
+                )
+                self._rd_fps_item.setText(f"{rad_fps:.1f} FPS")
+                self._rd_fps_item.setPos(x0 + 0.02 * (x1 - x0), y1 - 0.02 * (y1 - y0))
+
             t_rd = rdra_times.get("rd", 0.0)
             t_ra = rdra_times.get("ra", 0.0)
             t_pc = rdra_times.get("pc", 0.0)
@@ -489,6 +681,68 @@ class FusionVisualizer(QWidget):
                 t_ra=t_ra,
                 t_pc=t_pc,
             )
+            # Latency logging (only for new radar frames) using absolute monotonic ns
+            if isinstance(radar_data, dict) and new_radar_frame:
+                # if CFGS.LOG_LEVEL == logging.DEBUG and isinstance(radar_data, dict) and new_radar_frame:
+                now_disp_ns = time.perf_counter_ns()
+                cap_ns = radar_data.get("capture_monotonic_ns")
+                enq_ns = radar_data.get("enqueue_monotonic_ns")
+                ana_recv_ns = radar_data.get("analyser_receive_ns")
+                ana_end_ns = radar_data.get("analyser_end_ns")
+                main_recv_ns = radar_data.get("main_received_ns")
+                if all(
+                    isinstance(v, int) and v > 0
+                    for v in [cap_ns, enq_ns, ana_recv_ns, ana_end_ns, main_recv_ns]
+                ):
+                    e2e_ms = (now_disp_ns - cap_ns) / 1e6
+                    q0_ms = (enq_ns - cap_ns) / 1e6
+                    q1_ms = (ana_recv_ns - enq_ns) / 1e6
+                    ana_ms = (ana_end_ns - ana_recv_ns) / 1e6
+                    q2_ms = (main_recv_ns - ana_end_ns) / 1e6
+                    gui_poll_ms = (now_disp_ns - main_recv_ns) / 1e6
+                    # Extra analyser stats if present
+                    drained = radar_data.get("drained_count")
+                    dropped_total = radar_data.get("total_dropped_frames")
+                    qhint = radar_data.get("input_queue_size_hint")
+                    drain_ns = radar_data.get("drain_ns")
+                    wait_ns = radar_data.get("first_dequeue_wait_ns")
+                    # Log compact line every ~50 updates
+                    if not hasattr(self, "_lat_count"):
+                        self._lat_count = 0
+                    self._lat_count += 1
+                    # if self._lat_count % 50 == 0:
+                    if True:
+                        frame_ts = radar_data.get("frame_timestamp", None)
+                        ts_str = (
+                            f"{frame_ts:.3f}s"
+                            if isinstance(frame_ts, (int, float))
+                            else "NA"
+                        )
+                        # Absolute stage times (seconds, monotonic origin) for cross-frame comparison
+                        cap_s = cap_ns / 1e9
+                        enq_s = enq_ns / 1e9
+                        ana_recv_s = ana_recv_ns / 1e9
+                        ana_end_s = ana_end_ns / 1e9
+                        main_s = main_recv_ns / 1e9
+                        disp_s = now_disp_ns / 1e9
+                        # Optional extras
+                        extras = []
+                        if isinstance(drain_ns, int) and drain_ns > 0:
+                            extras.append(f"drain={drain_ns/1e6:.1f}ms")
+                        if isinstance(wait_ns, int) and wait_ns > 0:
+                            extras.append(f"wait={wait_ns/1e6:.1f}ms")
+                        if isinstance(drained, int):
+                            extras.append(f"drained={drained}")
+                        if isinstance(dropped_total, int):
+                            extras.append(f"dropped_total={dropped_total}")
+                        if isinstance(qhint, int) and qhint >= 0:
+                            extras.append(f"in_q={qhint}")
+                        extras_str = (" | " + " | ".join(extras)) if extras else ""
+                        # Unified pipeline line for cross-frame timing comparison
+                        self.logger.info(
+                            f"PIPE ts={ts_str} | cap={cap_s:.6f} | q_start={enq_s:.6f} | ana_recv={ana_recv_s:.6f} | ana_end={ana_end_s:.6f} | main={main_s:.6f} | disp={disp_s:.6f} | "
+                            f"e2e={e2e_ms:.1f}ms | cap→q={q0_ms:.1f}ms | q→ana={q1_ms:.1f}ms | ana={ana_ms:.1f}ms | ana→main={q2_ms:.1f}ms | main→GUI={gui_poll_ms:.1f}ms | render={((t_rd+t_ra+t_pc)*1000):.1f}ms{extras_str}"
+                        )
             self._log_performance()
 
         except Exception as e:
@@ -789,6 +1043,32 @@ class FusionVisualizer(QWidget):
                 )
             else:
                 cv_image_with_boxes = rgb_image
+
+            # Overlay camera FPS text (top-left)
+            if self._cam_fps_text:
+                try:
+                    cv2.putText(
+                        cv_image_with_boxes,
+                        self._cam_fps_text,
+                        (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 0),
+                        3,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        cv_image_with_boxes,
+                        self._cam_fps_text,
+                        (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                except Exception:
+                    pass
 
             # Convert BGR to RGB for Qt
             rgb_image = cv2.cvtColor(cv_image_with_boxes, cv2.COLOR_BGR2RGB)

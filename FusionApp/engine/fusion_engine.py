@@ -4,6 +4,9 @@ from utils import setup_logger
 
 from typing import Optional
 from multiprocessing import Process, Queue, Event
+import os
+from multiprocessing import shared_memory
+from sample_processing.radar_params import ADCParams
 import queue
 
 
@@ -36,13 +39,13 @@ class FusionEngine:
         self.camera_feed_config = camera_feed_config
         self.camera_analyser_config = camera_analyser_config
 
-        # Initialize queues
-        self._radar_stream_queue: Queue = Queue()
+        # Initialize queues (keep radar queue at 1 to avoid backlog; source drops to latest)
+        self._radar_stream_queue: Queue = Queue(maxsize=1)
         self._camera_stream_queue: Optional[Queue] = None
 
         # Initialize camera queue only if camera config is available
         if self.camera_feed_config is not None:
-            self._camera_stream_queue = Queue()
+            self._camera_stream_queue = Queue(maxsize=2)
 
         # Validate that if camera feed config is provided, analyser config must also be provided
         if (self.camera_feed_config is None) != (self.camera_analyser_config is None):
@@ -63,7 +66,9 @@ class FusionEngine:
             radar_config = DCA1000Config(radar_config_file=radar_config_file)
             if "dest_dir" in config:
                 radar_config.dest_dir = config["dest_dir"]
-            return DCA1000EVM(radar_config)
+            return DCA1000EVM(
+                radar_config, prealloc_shm_meta=config.get("prealloc_shm_meta")
+            )
         elif feed_type == "DCA1000Recording":
             from radar.dca1000_awr2243 import DCA1000Recording, DCA1000Config
 
@@ -81,7 +86,11 @@ class FusionEngine:
         if analyser_type == "RadarHeatmapAnalyser":
             from analysis.radar_heatmap_analyser import RadarHeatmapAnalyser
 
-            return RadarHeatmapAnalyser(config.get("config_file"))
+            return RadarHeatmapAnalyser(
+                config.get("config_file"),
+                prealloc_shm_meta=config.get("prealloc_shm_meta"),
+                prealloc_res_shm_meta=config.get("prealloc_res_shm_meta"),
+            )
         else:
             raise ValueError(f"Unknown radar analyser type: {analyser_type}")
 
@@ -152,6 +161,89 @@ class FusionEngine:
         # Create separate control queues for camera and radar
         radar_control_queue = Queue() if control_queue is not None else None
         camera_control_queue = Queue() if control_queue is not None else None
+
+        # Preallocate shared memory for radar raw frames (engine-owned)
+        prealloc_shm_meta = None
+        prealloc_res_shm_meta = None
+        radar_cfg_file = self.radar_analyser_config.get(
+            "config_file", CFGS.AWR2243_CONFIG_FILE
+        )
+        try:
+            adc = ADCParams(radar_cfg_file)
+            num_elements = adc.chirps * adc.tx * adc.samples * adc.IQ * adc.rx
+            nbytes = num_elements * 2  # int16
+            shm0 = shared_memory.SharedMemory(create=True, size=nbytes)
+            shm1 = shared_memory.SharedMemory(create=True, size=nbytes)
+            prealloc_shm_meta = {
+                "names": [shm0.name, shm1.name],
+                "nbytes": nbytes,
+                "dtype": "int16",
+                "shape": (num_elements,),
+            }
+            # Store for cleanup
+            self._radar_shm_blocks = [shm0, shm1]
+            self.logger.info(
+                f"Preallocated radar SHM in engine: names={prealloc_shm_meta['names']}, bytes={nbytes}, dtype=int16, shape={(num_elements,)}"
+            )
+
+            # Preallocate SHM for radar analyser outputs (range_doppler, range_azimuth)
+            # RD shape ~ (chirps, samples), RA shape ~ (angle_bins, samples) with angle_bins=181 (±90 deg, 1 deg step)
+            angle_bins = (90 * 2) // 1 + 1
+            rd_shape = (adc.chirps, adc.samples)
+            ra_shape = (angle_bins, adc.samples)
+            rd_nbytes = adc.chirps * adc.samples * 4  # float32
+            ra_nbytes = angle_bins * adc.samples * 4  # float32
+            rd0 = shared_memory.SharedMemory(create=True, size=rd_nbytes)
+            rd1 = shared_memory.SharedMemory(create=True, size=rd_nbytes)
+            ra0 = shared_memory.SharedMemory(create=True, size=ra_nbytes)
+            ra1 = shared_memory.SharedMemory(create=True, size=ra_nbytes)
+            prealloc_res_shm_meta = {
+                "rd": {
+                    "names": [rd0.name, rd1.name],
+                    "nbytes": rd_nbytes,
+                    "dtype": "float32",
+                    "shape": rd_shape,
+                },
+                "ra": {
+                    "names": [ra0.name, ra1.name],
+                    "nbytes": ra_nbytes,
+                    "dtype": "float32",
+                    "shape": ra_shape,
+                },
+            }
+            self._radar_res_shm_blocks = {"rd": [rd0, rd1], "ra": [ra0, ra1]}
+            self.logger.info(
+                f"Preallocated radar results SHM: rd={prealloc_res_shm_meta['rd']['names']}, ra={prealloc_res_shm_meta['ra']['names']}"
+            )
+
+            # Pass meta to feed and analyser configs
+            self.radar_feed_config["prealloc_shm_meta"] = prealloc_shm_meta
+            self.radar_analyser_config["prealloc_shm_meta"] = prealloc_shm_meta
+            self.radar_analyser_config["prealloc_res_shm_meta"] = prealloc_res_shm_meta
+
+            # Expose results SHM identifiers to the GUI process via environment variables
+            try:
+                rd_names = ",".join(
+                    [blk.name for blk in self._radar_res_shm_blocks.get("rd", [])]
+                )
+                ra_names = ",".join(
+                    [blk.name for blk in self._radar_res_shm_blocks.get("ra", [])]
+                )
+                if rd_names:
+                    os.environ["RADAR_RD_SHM_NAMES"] = rd_names
+                if ra_names:
+                    os.environ["RADAR_RA_SHM_NAMES"] = ra_names
+                angle_bins = (90 * 2) // 1 + 1
+                os.environ["RADAR_RD_SHAPE"] = f"{adc.chirps},{adc.samples}"
+                os.environ["RADAR_RA_SHAPE"] = f"{angle_bins},{adc.samples}"
+            except Exception:
+                pass
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to preallocate radar SHM in engine (falling back to feed-created): {e}"
+            )
+            self._radar_shm_blocks = []
+            self._radar_res_shm_blocks = {}
 
         # Create instances using configuration in the target process
         self.logger.info("Creating feed and analyzer instances...")
@@ -328,7 +420,9 @@ class FusionEngine:
                 self.logger.info(f"Joining process {i}...")
                 process.join(timeout=6)
                 if process.is_alive():
-                    self.logger.warning(f"Process {i} still alive after join, terminating...")
+                    self.logger.warning(
+                        f"Process {i} still alive after join, terminating..."
+                    )
                     process.terminate()
                     process.join(timeout=4)
                 if process.is_alive():
@@ -362,6 +456,30 @@ class FusionEngine:
             if control_queue is not None and camera_control_queue is not None:
                 camera_control_queue.close()
                 camera_control_queue.join_thread()
+        except Exception:
+            pass
+
+        # Cleanup engine-owned shared memory blocks
+        try:
+            for shm in getattr(self, "_radar_shm_blocks", []) or []:
+                try:
+                    shm.close()
+                except Exception:
+                    pass
+                try:
+                    shm.unlink()
+                except Exception:
+                    pass
+            for group in getattr(self, "_radar_res_shm_blocks", {}).values():
+                for shm in group:
+                    try:
+                        shm.close()
+                    except Exception:
+                        pass
+                    try:
+                        shm.unlink()
+                    except Exception:
+                        pass
         except Exception:
             pass
 
