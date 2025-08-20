@@ -9,12 +9,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find required packages
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 
 # Find ArrayFire
 find_package(ArrayFire QUIET)
 if(ArrayFire_FOUND)
     message(STATUS "ArrayFire found")
     set(ARRAYFIRE_ENABLED ON)
+    # Determine an appropriate ArrayFire target or fall back to variables
+    set(ARRAYFIRE_LINK_TARGET "")
+    if(TARGET ArrayFire::afcpu)
+        set(ARRAYFIRE_LINK_TARGET ArrayFire::afcpu)
+    elseif(TARGET ArrayFire::af)
+        set(ARRAYFIRE_LINK_TARGET ArrayFire::af)
+    elseif(TARGET af)
+        set(ARRAYFIRE_LINK_TARGET af)
+    endif()
 else()
     message(WARNING "ArrayFire not found. Radar analysis features will be disabled.")
     set(ARRAYFIRE_ENABLED OFF)
@@ -55,10 +65,23 @@ add_executable(fusion_replay
 
 # Link libraries
 target_link_libraries(fusion_replay)
+target_link_libraries(fusion_replay Threads::Threads)
 
 # Add ArrayFire if available
 if(ARRAYFIRE_ENABLED AND FFTW_ENABLED)
-    target_link_libraries(fusion_replay ArrayFire::afcpu)  # Use CPU backend by default
+    # Prefer CMake targets first
+    if(ARRAYFIRE_LINK_TARGET)
+        target_link_libraries(fusion_replay ${ARRAYFIRE_LINK_TARGET})
+    elseif(DEFINED ArrayFire_LIBRARIES)
+        target_link_libraries(fusion_replay ${ArrayFire_LIBRARIES})
+    endif()
+
+    # Add include dirs if provided by find_package
+    if(DEFINED ArrayFire_INCLUDE_DIRS)
+        target_include_directories(fusion_replay PRIVATE ${ArrayFire_INCLUDE_DIRS})
+    endif()
+
+    # FFTW linkage and includes
     target_link_libraries(fusion_replay ${FFTW3_LIBRARIES})
     target_include_directories(fusion_replay PRIVATE ${FFTW3_INCLUDE_DIRS})
     target_compile_options(fusion_replay PRIVATE ${FFTW3_CFLAGS_OTHER})
@@ -71,7 +94,19 @@ if(ARRAYFIRE_ENABLED AND FFTW_ENABLED)
         ${RADAR_SOURCES}
     )
     
-    target_link_libraries(test_radar_analysis ArrayFire::afcpu ${FFTW3_LIBRARIES})
+    target_link_libraries(test_radar_analysis Threads::Threads)
+    # Prefer CMake targets first
+    if(ARRAYFIRE_LINK_TARGET)
+        target_link_libraries(test_radar_analysis ${ARRAYFIRE_LINK_TARGET})
+    elseif(DEFINED ArrayFire_LIBRARIES)
+        target_link_libraries(test_radar_analysis ${ArrayFire_LIBRARIES})
+    endif()
+
+    if(DEFINED ArrayFire_INCLUDE_DIRS)
+        target_include_directories(test_radar_analysis PRIVATE ${ArrayFire_INCLUDE_DIRS})
+    endif()
+
+    target_link_libraries(test_radar_analysis ${FFTW3_LIBRARIES})
     target_include_directories(test_radar_analysis PRIVATE ${FFTW3_INCLUDE_DIRS})
     target_compile_options(test_radar_analysis PRIVATE ${FFTW3_CFLAGS_OTHER})
 endif()

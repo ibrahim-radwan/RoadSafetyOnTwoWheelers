@@ -8,6 +8,7 @@
 #include "radar/radardata.hpp"
 #include "radar/recordingfeed.hpp"
 #include "radar/threadsafequeue.hpp"
+#include "radar/radarheatmapanalyser.hpp"
 
 int main(int argc, char* argv[])
 {
@@ -27,7 +28,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    if (config_path.empty())
+    if (config_path.empty() || dest_dir.empty())
     {
         std::cerr << "Usage: " << argv[0]
                   << " --config-file <path> [--dest-dir <directory>]"
@@ -74,10 +75,10 @@ int main(int argc, char* argv[])
                       << " Hz" << std::endl;
 
             // Create thread-safe queues for communication
-            radar::ThreadSafeQueue<std::shared_ptr<radar::RadarFrame>>
-                stream_queue;
+            radar::ThreadSafeQueue<std::shared_ptr<radar::RadarFrame>> stream_queue; // radar_input_queue
             radar::ThreadSafeQueue<std::string> control_queue;
             radar::ThreadSafeQueue<std::string> status_queue;
+            radar::ThreadSafeQueue<radar::AnalysisResult> analysis_output_queue;   // radar_output_queue
 
             // Create stop event
             std::atomic<bool> stop_event{false};
@@ -98,16 +99,40 @@ int main(int argc, char* argv[])
                     }
                 });
 
+            // Initialize analyser
+            radar::RadarHeatmapAnalyser analyser;
+            if (!analyser.initialize(config_path))
+            {
+                std::cerr << "Failed to initialize RadarHeatmapAnalyser" << std::endl;
+                stop_event.store(true);
+                playback_thread.join();
+                return 1;
+            }
+
+            // Start analyser thread: consumes stream_queue, produces analysis_output_queue
+            std::thread analyser_thread(
+                [&]()
+                {
+                    try
+                    {
+                        analyser.run(stream_queue, analysis_output_queue, stop_event);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::cerr << "Analyser error: " << e.what() << std::endl;
+                    }
+                });
+
             // Start automatic playback after a short delay
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             control_queue.push("play");
 
-            // Monitor frames for a few seconds as demonstration
+            // Consume analyser outputs for a few seconds as demonstration
             std::cout
-                << "\nStarting frame monitoring (will run for 10 seconds)..."
+                << "\nStarting analysis monitoring (will run for 10 seconds)..."
                 << std::endl;
             auto start_time = std::chrono::steady_clock::now();
-            int frame_count = 0;
+            int result_count = 0;
 
             while (true)
             {
@@ -120,35 +145,34 @@ int main(int argc, char* argv[])
                     break;  // Stop after 10 seconds
                 }
 
-                // Try to get a frame
-                std::shared_ptr<radar::RadarFrame> frame;
-                if (stream_queue.tryPop(frame))
+                // Try to get an analysis result
+                radar::AnalysisResult result;
+                if (analysis_output_queue.waitAndPop(result, std::chrono::milliseconds(100)))
                 {
-                    frame_count++;
-                    if (frame_count % 10 == 0)
-                    {
-                        std::cout << "Received frame " << frame_count
-                                  << " (timestamp: " << frame->getTimestamp()
-                                  << "s)" << std::endl;
-                    }
+                    result_count++;
+                    std::cout << "Result #" << result_count
+                              << ": frame=" << result.frame_number
+                              << ", time(ms)=" << result.processing_time_ms
+                              << ", bins(r/d/a)=" << result.range_bins << "/"
+                              << result.doppler_bins << "/" << result.azimuth_bins
+                              << ", points=" << result.point_cloud.size()
+                              << std::endl;
                 }
 
-                // Check for status updates
+                // Drain any status updates from the feed
                 std::string status;
                 if (status_queue.tryPop(status))
                 {
                     std::cout << "Status: " << status << std::endl;
                 }
-
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
 
-            std::cout << "\nTotal frames processed: " << frame_count
-                      << std::endl;
+            std::cout << "\nTotal analysis results: " << result_count << std::endl;
 
-            // Stop playback
+            // Stop playback and threads
             std::cout << "Stopping playback..." << std::endl;
             stop_event.store(true);
+            analyser_thread.join();
             playback_thread.join();
 
             std::cout << "Playback completed successfully!" << std::endl;

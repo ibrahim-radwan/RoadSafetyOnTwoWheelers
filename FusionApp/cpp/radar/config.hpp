@@ -7,22 +7,43 @@
 namespace radar
 {
 
-struct AdcParams
+class AdcParams
 {
-    double startFreq = 0.0;
-    double idleTime = 0.0;
-    double adc_valid_start_time = 0.0;
-    double rampEndTime = 0.0;
-    double freq_slope = 0.0;
-    double txStartTime = 0.0;
+  public:
+    // Raw parameters (direct from config)
+    double startFreq = 0.0;              // GHz
+    double idleTime = 0.0;               // microseconds
+    double adc_valid_start_time = 0.0;   // microseconds
+    double rampEndTime = 0.0;            // microseconds
+    double freq_slope = 0.0;             // MHz/us
+    double txStartTime = 0.0;            // microseconds
     int samples = 0;
-    int sample_rate = 0;
+    int sample_rate = 0;                 // ksps
     int rx = 0;
     int tx = 0;
     int IQ = 2;
     int bytes = 2;
     int chirps = 0;
-    double frame_periodicity = 0.0;
+    double frame_periodicity = 0.0;      // seconds
+
+    // Derived parameters (computed)
+    double range_resolution = 0.0;       // meters
+    double chirp_bandwidth = 0.0;        // Hz
+    double doppler_resolution = 0.0;     // m/s
+    int max_azimuth = 60;                // degrees
+    double max_range = 0.0;              // meters
+    double max_doppler = 0.0;            // m/s
+    std::vector<double> angle_bins;      // degrees
+    std::vector<double> range_bins;      // meters
+    std::vector<double> range_doppler_extents; // [minDoppler, maxDoppler, minRange, maxRange]
+    std::vector<double> range_azimuth_extents; // [minAz, maxAz, minRange, maxRange]
+
+    AdcParams() = default;
+    explicit AdcParams(const std::string& config_file_path);
+    AdcParams(const AdcParams& other);
+
+    // Compute all derived parameters from the raw fields
+    void finalize();
 
     std::string toString() const;
 };

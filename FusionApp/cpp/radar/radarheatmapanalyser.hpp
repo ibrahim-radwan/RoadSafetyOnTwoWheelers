@@ -29,9 +29,10 @@ public:
     ~RadarHeatmapAnalyser();
 
     // Override base class methods
-    AnalysisResult analyseFrame(const RadarFrame& frame) override;
-    
-    void run(ThreadSafeQueue<RadarFrame>& input_queue,
+    AnalysisResult analyseFrame(const std::shared_ptr<RadarFrame>& frame) override;
+
+    // Single run variant: consume frames from shared_ptr queue for efficiency
+    void run(ThreadSafeQueue<std::shared_ptr<RadarFrame>>& input_queue,
              ThreadSafeQueue<AnalysisResult>& output_queue,
              std::atomic<bool>& stop_flag) override;
 

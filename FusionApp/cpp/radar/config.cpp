@@ -7,16 +7,94 @@
 namespace radar
 {
 
+// --- AdcParams: derived computations and copy constructor ---
+AdcParams::AdcParams(const AdcParams& other) = default;
+
+AdcParams::AdcParams(const std::string& config_file_path)
+{
+    // Build from a temporary RadarConfig to reuse parsing
+    RadarConfig cfg(config_file_path);
+    *this = cfg.getAdcParams();
+    this->finalize();
+}
+
+void AdcParams::finalize()
+{
+    // Compute derived parameters analogous to Python ADCParams
+    // range_resolution and chirp_bandwidth
+    if (samples > 0 && sample_rate > 0)
+    {
+        // Python uses dsp.range_resolution(samples, sample_rate, freq_slope)
+        // Here we approximate bandwidth from sample_rate and freq_slope
+        // chirp_bandwidth (Hz) = freq_slope(MHz/us) * 1e6 * rampEndTime(us) * 1e-6 = freq_slope * rampEndTime (MHz)
+        // Convert to Hz
+        chirp_bandwidth = freq_slope * 1e6 * (rampEndTime * 1e-6);
+
+        // Simple approximation similar to mmwave.dsp: range_resolution ~ c / (2*BW)
+        constexpr double c = 299792458.0;
+        if (chirp_bandwidth > 0)
+        {
+            range_resolution = c / (2.0 * chirp_bandwidth);
+        }
+    }
+
+    // doppler_resolution approximation based on Python signature
+    // dsp.doppler_resolution(chirp_bandwidth, startFreq, rampEndTime, idleTime, chirps, tx)
+    if (chirps > 0 && tx > 0 && (rampEndTime + idleTime) > 0)
+    {
+        // PRI = rampEndTime + idleTime (us) -> seconds
+        const double pri_s = (rampEndTime + idleTime) * 1e-6;
+        const double lambda = (startFreq > 0) ? (299792458.0 / (startFreq * 1e9)) : 0.0;
+        if (lambda > 0)
+        {
+            // v_res ~ lambda / (2 * T_obs) where T_obs = PRI * chirps / tx
+            const double tobs = pri_s * static_cast<double>(chirps) / static_cast<double>(tx);
+            if (tobs > 0)
+            {
+                doppler_resolution = lambda / (2.0 * tobs);
+            }
+        }
+    }
+
+    // angle_bins and range_bins extents
+    angle_bins.clear();
+    if (chirps > 0)
+    {
+        angle_bins.reserve(static_cast<size_t>(chirps));
+        const int bins = chirps;
+        for (int i = 0; i < bins; ++i)
+        {
+            double angle = -90.0 + 180.0 * (static_cast<double>(i) / (bins - 1));
+            angle_bins.push_back(angle);
+        }
+    }
+
+    range_bins.clear();
+    if (samples > 0)
+    {
+        range_bins.reserve(static_cast<size_t>(samples));
+        // Python used 0.0485 multiplier as a placeholder; compute from range_resolution if available
+        const double step = (range_resolution > 0.0) ? range_resolution : 0.0485;
+        for (int i = 0; i < samples; ++i)
+        {
+            range_bins.push_back(i * step);
+        }
+    }
+
+    max_range = samples * ((range_resolution > 0.0) ? range_resolution : 0.0);
+    max_doppler = (chirps * ((doppler_resolution > 0.0) ? doppler_resolution : 0.0)) / 2.0;
+
+    range_doppler_extents = { -max_doppler, max_doppler, 0.0, max_range };
+    range_azimuth_extents = { -static_cast<double>(max_azimuth), static_cast<double>(max_azimuth), 0.0, max_range };
+}
+
 RadarConfig::RadarConfig(const std::string& config_file_path)
     : _config_file_path(config_file_path)
 {
-    // Initialize default values
-    _adc_params.IQ = 2;
-    _adc_params.bytes = 2;
-
     // Parse config file immediately in constructor
     parseConfigFile();
     calculateDerivedParams();
+    _adc_params.finalize();
     validateConfig();
 }
 
@@ -338,7 +416,12 @@ std::string radar::AdcParams::toString() const
            ", " + "IQ=" + std::to_string(IQ) + ", " +
            "bytes=" + std::to_string(bytes) + ", " +
            "chirps=" + std::to_string(chirps) + ", " +
-           "frame_periodicity=" + std::to_string(frame_periodicity) + "}";
+           "frame_periodicity=" + std::to_string(frame_periodicity) + ", " +
+           "range_resolution=" + std::to_string(range_resolution) + ", " +
+           "chirp_bandwidth=" + std::to_string(chirp_bandwidth) + ", " +
+           "doppler_resolution=" + std::to_string(doppler_resolution) + ", " +
+           "max_range=" + std::to_string(max_range) + ", " +
+           "max_doppler=" + std::to_string(max_doppler) + "}";
 }
 
 std::string radar::CfgParams::toString() const

@@ -53,9 +53,8 @@ int main(int argc, char* argv[]) {
         // Test 2: Create dummy radar frame
         std::cout << "\n--- Test 2: Frame Processing ---" << std::endl;
         
-        // Load radar config to get parameters
-        radar::RadarConfig radar_config(config_file);
-        auto adc_params = std::make_shared<radar::AdcParams>(radar_config);
+        // Build ADC parameters directly from config file (includes derived values)
+        auto adc_params = std::make_shared<radar::AdcParams>(config_file);
         
         // Create dummy raw data
         size_t raw_data_size = adc_params->chirps * adc_params->tx * 
@@ -68,7 +67,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Create radar frame
-        radar::RadarFrame test_frame(
+        auto test_frame = std::make_shared<radar::RadarFrame>(
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count(),
             dummy_data,
@@ -76,7 +75,7 @@ int main(int argc, char* argv[]) {
             adc_params
         );
         
-        std::cout << "✓ Created test frame: " << test_frame.toString() << std::endl;
+        std::cout << "✓ Created test frame: " << test_frame->toString() << std::endl;
         
         // Test 3: Analyze frame
         std::cout << "\n--- Test 3: Frame Analysis ---" << std::endl;
@@ -106,13 +105,13 @@ int main(int argc, char* argv[]) {
         // Test 4: Multi-threaded processing
         std::cout << "\n--- Test 4: Multi-threaded Processing ---" << std::endl;
         
-        radar::ThreadSafeQueue<radar::RadarFrame> input_queue;
+        radar::ThreadSafeQueue<std::shared_ptr<radar::RadarFrame>> input_queue;
         radar::ThreadSafeQueue<radar::AnalysisResult> output_queue;
         std::atomic<bool> stop_flag{false};
         
         // Add some test frames to the queue
         for (int i = 0; i < 5; ++i) {
-            radar::RadarFrame frame(
+            auto frame = std::make_shared<radar::RadarFrame>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count() + i,
                 dummy_data,

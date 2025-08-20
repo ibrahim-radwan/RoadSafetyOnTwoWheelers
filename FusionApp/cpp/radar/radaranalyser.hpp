@@ -66,7 +66,7 @@ public:
      * @param frame Input radar frame to analyze
      * @return Analysis results containing heatmaps and point cloud data
      */
-    virtual AnalysisResult analyseFrame(const RadarFrame& frame) = 0;
+    virtual AnalysisResult analyseFrame(const std::shared_ptr<RadarFrame>& frame) = 0;
 
     /**
      * Main processing loop for threaded operation
@@ -75,7 +75,7 @@ public:
      * @param output_queue Queue to send AnalysisResult objects to  
      * @param stop_flag Atomic flag to signal when to stop processing
      */
-    virtual void run(ThreadSafeQueue<RadarFrame>& input_queue,
+    virtual void run(ThreadSafeQueue<std::shared_ptr<RadarFrame>>& input_queue,
                      ThreadSafeQueue<AnalysisResult>& output_queue,
                      std::atomic<bool>& stop_flag) = 0;
 

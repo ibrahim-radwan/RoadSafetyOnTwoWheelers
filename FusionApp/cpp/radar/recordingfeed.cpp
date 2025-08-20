@@ -312,17 +312,8 @@ void DCA1000Recording::scanRecordingFiles()
     {
         total_files++;
 
-        if (!entry.is_regular_file())
+        if (!entry.is_regular_file() || entry.path().extension() != ".bin")
         {
-            std::cout << "  Skipping non-file: "
-                      << entry.path().filename().string() << std::endl;
-            continue;
-        }
-
-        if (entry.path().extension() != ".bin")
-        {
-            std::cout << "  Skipping non-bin file: "
-                      << entry.path().filename().string() << std::endl;
             continue;
         }
 
@@ -337,9 +328,9 @@ void DCA1000Recording::scanRecordingFiles()
             frame_info.emplace_back(entry.path().string(), timestamp,
                                     frame_number);
             parsed_files++;
-            std::cout << "  Parsed: " << filename
-                      << " -> frame=" << frame_number
-                      << ", timestamp=" << timestamp << std::endl;
+            // std::cout << "  Parsed: " << filename
+            //           << " -> frame=" << frame_number
+            //           << ", timestamp=" << timestamp << std::endl;
         }
         else
         {
@@ -377,7 +368,7 @@ void DCA1000Recording::loadRadarConfig(const std::string& config_file_path)
 
     // Extract frame rate - frame_periodicity is in milliseconds
     // Convert to Hz: 1000ms / frame_periodicity_ms = frames per second
-    _frame_rate = 1000.0 / _adc_params->frame_periodicity;
+    _frame_rate = _adc_params->frame_periodicity / 5;
 
     std::cout << "Calculated frame rate: " << _frame_rate
               << " Hz (from frame_periodicity="
@@ -718,11 +709,6 @@ void DCA1000Recording::validateFrameFile(const std::string& filepath)
                                   _adc_params->IQ;
         size_t expected_bytes = expected_samples * _adc_params->bytes;
 
-        std::cout << "  File: "
-                  << std::filesystem::path(filepath).filename().string()
-                  << " - Size: " << file_size
-                  << " bytes (expected: " << expected_bytes << " bytes)";
-
         if (file_size != expected_bytes)
         {
             std::cout << " - SIZE MISMATCH!" << std::endl;
@@ -730,10 +716,6 @@ void DCA1000Recording::validateFrameFile(const std::string& filepath)
                 "Frame file size mismatch: " + filepath + " (got " +
                 std::to_string(file_size) + " bytes, expected " +
                 std::to_string(expected_bytes) + " bytes)");
-        }
-        else
-        {
-            std::cout << " - OK" << std::endl;
         }
     }
 }
