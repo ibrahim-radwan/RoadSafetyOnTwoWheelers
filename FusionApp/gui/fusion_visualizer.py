@@ -72,6 +72,9 @@ class FusionVisualizer(QWidget):
         self.recording_dir = recording_dir
         self.adc_params = adc_params
         self.use_3d = use_3d
+        # Feature gates from environment to isolate crashes
+        self._disable_radar = os.environ.get("DISABLE_RADAR", "0") == "1"
+        self._disable_camera = os.environ.get("DISABLE_CAMERA", "0") == "1"
 
         # Data access callbacks
         self.radar_data_callback: Optional[Callable] = None
@@ -184,48 +187,13 @@ class FusionVisualizer(QWidget):
         self.setLayout(main_layout)
 
     def _configure_pyqtgraph_backend(self) -> None:
-        """Decide whether to enable OpenGL acceleration for pyqtgraph.
-
-        On systems like NVIDIA Jetson, the XCB plugin may not have GLX/EGL,
-        which causes QOpenGLWidget context creation to fail. We detect this
-        at runtime and fall back to software rendering by default.
-        """
+        """Force software rendering; do not attempt any OpenGL context creation."""
         try:
-            # Allow user override via env var
-            force_software = os.environ.get("PG_FORCE_SOFTWARE", "0") == "1"
-            if force_software:
-                pg.setConfigOptions(useOpenGL=False)
-                self.logger.info("pyqtgraph OpenGL disabled by PG_FORCE_SOFTWARE=1")
-                return
-
-            # Try creating an offscreen OpenGL context to verify availability
-            fmt = QSurfaceFormat()
-            fmt.setRenderableType(QSurfaceFormat.OpenGLES)
-            ctx = QOpenGLContext()
-            ctx.setFormat(fmt)
-
-            surface = QOffscreenSurface()
-            surface.setFormat(fmt)
-            surface.create()
-
-            gl_ok = ctx.create() and ctx.isValid() and ctx.makeCurrent(surface)
-
-            if gl_ok:
-                pg.setConfigOptions(useOpenGL=True)
-                self.logger.info("pyqtgraph OpenGL enabled (context valid)")
-                ctx.doneCurrent()
-            else:
-                pg.setConfigOptions(useOpenGL=False)
-                self.logger.warning(
-                    "pyqtgraph OpenGL not available; using software rendering"
-                )
-        except Exception as e:
-            # Any failure → fall back to software
             pg.setConfigOptions(useOpenGL=False)
             if hasattr(self, "logger"):
-                self.logger.warning(
-                    f"Failed to init OpenGL context; falling back to software: {e}"
-                )
+                self.logger.warning("pyqtgraph OpenGL not available; using software rendering")
+        except Exception:
+            pass
 
     def _setup_plots(self):
         """Setup camera display and pyqtgraph plots"""
@@ -347,6 +315,28 @@ class FusionVisualizer(QWidget):
         self.is_playing = False
         self.is_recording = False
 
+    def _skip_rdra(self) -> bool:
+        # Allow disabling RD/RA rendering to isolate crashes
+        return os.environ.get("DISABLE_RDRA", "0") == "1"
+
+    def _safe_levels(self, arr: np.ndarray):
+        try:
+            finite = np.isfinite(arr)
+            if not np.any(finite):
+                return None
+            vals = arr[finite]
+            # Use robust percentiles to avoid outliers
+            vmin = float(np.percentile(vals, 1.0))
+            vmax = float(np.percentile(vals, 99.0))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin >= vmax:
+                vmin = float(np.min(vals))
+                vmax = float(np.max(vals))
+                if vmin >= vmax:
+                    vmax = vmin + 1.0
+            return (vmin, vmax)
+        except Exception:
+            return None
+
     def _configure_controls_for_mode(self):
         """Enable/disable controls based on mode"""
         if self.mode == "live":
@@ -465,12 +455,8 @@ class FusionVisualizer(QWidget):
 
             # Get current data
             get_t0 = time.perf_counter()
-            radar_data = (
-                self.radar_data_callback() if self.radar_data_callback else None
-            )
-            camera_data = (
-                self.camera_data_callback() if self.camera_data_callback else None
-            )
+            radar_data = (self.radar_data_callback() if (self.radar_data_callback and not os.environ.get("DISABLE_RADAR", "0") == "1") else None)
+            camera_data = (self.camera_data_callback() if (self.camera_data_callback and not os.environ.get("DISABLE_CAMERA", "0") == "1") else None)
             t_get_data = time.perf_counter() - get_t0
 
             # Set extents if needed
@@ -494,11 +480,11 @@ class FusionVisualizer(QWidget):
             # Camera update
             t_camera = 0.0
             cam_ts = (
-                getattr(camera_data, "timestamp", None)
+                getattr(getattr(camera_data, "frame", None), "timestamp", None)
                 if camera_data is not None
                 else None
             )
-            if cam_ts is None or cam_ts != self._last_camera_ts:
+            if not os.environ.get("DISABLE_CAMERA", "0") == "1" and (cam_ts is None or cam_ts != self._last_camera_ts):
                 cam_t0 = time.perf_counter()
                 self._update_camera_display(camera_data)
                 t_camera = time.perf_counter() - cam_t0
@@ -522,7 +508,7 @@ class FusionVisualizer(QWidget):
             if isinstance(radar_data, dict):
                 radar_ts = radar_data.get("frame_timestamp")
                 new_radar_frame = radar_ts is None or radar_ts != self._last_radar_ts
-            if radar_data is not None and new_radar_frame:
+            if radar_data is not None and new_radar_frame and not os.environ.get("DISABLE_RADAR", "0") == "1":
                 # If metadata indicates results are in SHM, attach and read
                 # Handle results SHM init (names/shapes)
                 if isinstance(radar_data, dict) and radar_data.get(
@@ -739,7 +725,7 @@ class FusionVisualizer(QWidget):
                             extras.append(f"in_q={qhint}")
                         extras_str = (" | " + " | ".join(extras)) if extras else ""
                         # Unified pipeline line for cross-frame timing comparison
-                        self.logger.info(
+                        self.logger.debug(
                             f"PIPE ts={ts_str} | cap={cap_s:.6f} | q_start={enq_s:.6f} | ana_recv={ana_recv_s:.6f} | ana_end={ana_end_s:.6f} | main={main_s:.6f} | disp={disp_s:.6f} | "
                             f"e2e={e2e_ms:.1f}ms | cap→q={q0_ms:.1f}ms | q→ana={q1_ms:.1f}ms | ana={ana_ms:.1f}ms | ana→main={q2_ms:.1f}ms | main→GUI={gui_poll_ms:.1f}ms | render={((t_rd+t_ra+t_pc)*1000):.1f}ms{extras_str}"
                         )
@@ -803,18 +789,23 @@ class FusionVisualizer(QWidget):
         """Update range-doppler heatmap (pyqtgraph). Returns time spent (s)."""
         t0 = time.perf_counter()
         try:
+            if self._skip_rdra():
+                return time.perf_counter() - t0
             if rd_data is not None and getattr(rd_data, "size", 0) > 0:
                 # Handle 3D data by summing over virtual antenna axis
                 if rd_data.ndim == 3:
                     rd_data = np.sum(rd_data, axis=1)
 
                 # Convert to dB scale and orient as (rows, cols), origin lower
-                rd_db = 20.0 * np.log10(np.abs(rd_data) + 1e-10)
+                rd_db = 20.0 * np.log10(np.abs(rd_data.astype(np.float32, copy=False)) + 1e-10)
+                rd_db = np.nan_to_num(rd_db, nan=0.0, posinf=0.0, neginf=0.0)
                 rd_db = rd_db.T
 
                 # Update image with LUT and levels
-                vmin = float(rd_db.min())
-                vmax = float(rd_db.max())
+                levels = self._safe_levels(rd_db)
+                if levels is None:
+                    return time.perf_counter() - t0
+                vmin, vmax = levels
                 self.rd_image.setImage(
                     rd_db,
                     autoLevels=False,
@@ -833,18 +824,23 @@ class FusionVisualizer(QWidget):
         """Update range-azimuth heatmap (pyqtgraph). Returns time spent (s)."""
         t0 = time.perf_counter()
         try:
+            if self._skip_rdra():
+                return time.perf_counter() - t0
             if ra_data is not None and getattr(ra_data, "size", 0) > 0:
                 # Handle 3D data by summing over virtual antenna axis
                 if ra_data.ndim == 3:
                     ra_data = np.sum(ra_data, axis=1)
 
                 # Convert to dB scale and orient as (rows, cols), origin lower
-                ra_db = 20.0 * np.log10(np.abs(ra_data) + 1e-10)
+                ra_db = 20.0 * np.log10(np.abs(ra_data.astype(np.float32, copy=False)) + 1e-10)
+                ra_db = np.nan_to_num(ra_db, nan=0.0, posinf=0.0, neginf=0.0)
                 ra_db = ra_db.T
 
                 # Update image with LUT and levels
-                vmin = float(ra_db.min())
-                vmax = float(ra_db.max())
+                levels = self._safe_levels(ra_db)
+                if levels is None:
+                    return time.perf_counter() - t0
+                vmin, vmax = levels
                 self.ra_image.setImage(
                     ra_db,
                     autoLevels=False,
