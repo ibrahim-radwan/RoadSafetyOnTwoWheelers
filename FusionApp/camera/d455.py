@@ -126,7 +126,9 @@ class D455(CameraFeed):
                     stream_queue.put_nowait(video_frame)
                 except Exception as e:
                     if self.logger is not None:
-                        self.logger.debug(f"Dropping frame: downstream queue busy ({e})")
+                        self.logger.warning(
+                            f"Camera frame drop: downstream queue busy ({type(e).__name__}: {e})"
+                        )
                     continue
             except queue.Empty:
                 # No frame available, continue
@@ -191,6 +193,10 @@ class D455(CameraFeed):
                     # Drop oldest to keep most recent frame for lower latency
                     try:
                         _ = self._frame_queue.get_nowait()
+                        if self.logger is not None:
+                            self.logger.warning(
+                                "Camera frame drop: local queue full, dropped oldest"
+                            )
                     except queue.Empty:
                         pass
                     try:

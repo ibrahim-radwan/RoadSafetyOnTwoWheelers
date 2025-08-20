@@ -46,8 +46,8 @@ class LiveFusionApp:
     def __init__(self):
         self.logger = setup_logger("LiveFusionApp")
         self.stop_event = Event()
-        self.radar_results_queue = Queue()
-        self.camera_results_queue = Queue()
+        self.radar_results_queue = Queue(maxsize=3)
+        self.camera_results_queue = Queue(maxsize=2)
         # Add control queue for recording control
         self.control_queue = Queue()
 
@@ -135,11 +135,15 @@ class LiveFusionApp:
                         try:
                             while True:
                                 radar_result = self.radar_results_queue.get_nowait()
+                                if isinstance(radar_result, dict):
+                                    radar_result["main_received_ns"] = (
+                                        time.perf_counter_ns()
+                                    )
                                 self._current_radar_data = radar_result
                         except queue.Empty:
                             pass
 
-                        time.sleep(0.01)  # Small sleep to prevent busy waiting
+                        time.sleep(0.005)  # Faster polling to reduce backpressure
 
                 except Exception as e:
                     self.logger.error(f"Error in data processor: {e}")
@@ -252,6 +256,10 @@ class LiveFusionApp:
                         try:
                             while True:
                                 radar_result = self.radar_results_queue.get_nowait()
+                                if isinstance(radar_result, dict):
+                                    radar_result["main_received_ns"] = (
+                                        time.perf_counter_ns()
+                                    )
                                 self._current_radar_data = radar_result
                         except queue.Empty:
                             pass
