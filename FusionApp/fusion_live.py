@@ -14,6 +14,7 @@ import queue
 import argparse
 import fpga_udp
 from mmwave import dsp
+import atexit
 
 # Fix Qt platform plugin issues with OpenCV - only on Linux
 if os.name != "nt":  # Not Windows
@@ -35,16 +36,36 @@ from engine.fusion_factory import FusionFactory
 from gui.fusion_visualizer import FusionVisualizer
 from sample_processing.radar_params import ADCParams
 from config_params import CFGS
-from utils import setup_logger
+from utils import setup_logger, disable_shm_resource_tracker
 
 
 # Module-level logger for main function
 logger = setup_logger("fusion_live")
 
 
+# Ensure the radar is always powered down on interpreter exit (safety net)
+def _cleanup_awr2243():
+    try:
+        fpga_udp.AWR2243_sensorStop()
+    except Exception:
+        pass
+    try:
+        fpga_udp.AWR2243_poweroff()
+    except Exception:
+        pass
+
+
+atexit.register(_cleanup_awr2243)
+
+
 class LiveFusionApp:
     def __init__(self):
         self.logger = setup_logger("LiveFusionApp")
+        # Avoid resource_tracker noise in the main/GUI process; engine owns SHM unlink
+        try:
+            disable_shm_resource_tracker(self.logger)
+        except Exception:
+            pass
         self.stop_event = Event()
         self.radar_results_queue = Queue(maxsize=3)
         self.camera_results_queue = Queue(maxsize=2)
@@ -102,8 +123,10 @@ class LiveFusionApp:
             )
 
             # Set up data callbacks
-            visualizer.set_radar_data_callback(lambda: self._current_radar_data)
-            visualizer.set_camera_data_callback(lambda: self._current_camera_data)
+            visualizer.set_radar_data_callback(
+                lambda: self._current_radar_data)
+            visualizer.set_camera_data_callback(
+                lambda: self._current_camera_data)
 
             # Set up record callback - now actually controls recording
             def record_callback(command):
@@ -143,7 +166,8 @@ class LiveFusionApp:
                         except queue.Empty:
                             pass
 
-                        time.sleep(0.005)  # Faster polling to reduce backpressure
+                        # Faster polling to reduce backpressure
+                        time.sleep(0.005)
 
                 except Exception as e:
                     self.logger.error(f"Error in data processor: {e}")
@@ -170,6 +194,16 @@ class LiveFusionApp:
 
             # Give processes time to clean up
             time.sleep(1)
+
+            # Ensure AWR2243 is stopped and powered off (live mode)
+            try:
+                fpga_udp.AWR2243_sensorStop()
+            except Exception:
+                pass
+            try:
+                fpga_udp.AWR2243_poweroff()
+            except Exception:
+                pass
 
             # Try graceful shutdown first
             if fusion_process.is_alive():
@@ -231,7 +265,8 @@ class LiveFusionApp:
             )
 
             # Set up data callbacks
-            visualizer.set_radar_data_callback(lambda: self._current_radar_data)
+            visualizer.set_radar_data_callback(
+                lambda: self._current_radar_data)
             visualizer.set_camera_data_callback(lambda: None)  # No camera data
 
             # Set up record callback - now actually controls recording
@@ -292,6 +327,7 @@ class LiveFusionApp:
             # Give processes time to clean up
             time.sleep(1)
 
+            fpga_udp.AWR2243_sensorStop()
             fpga_udp.AWR2243_poweroff()
 
             # Try graceful shutdown first
@@ -334,12 +370,18 @@ def main():
     args = parser.parse_args()
 
     try:
+        # Disable tracker early in the main interpreter as well
+        try:
+            disable_shm_resource_tracker(logger)
+        except Exception:
+            pass
         app = LiveFusionApp()
 
         # initialize AWR2243 radar as it only works in main process
         ret = fpga_udp.AWR2243_init(CFGS.AWR2243_CONFIG_FILE)
         if ret != 0:
-            logger.error("Failed to initialize AWR2243 radar with return code: %d", ret)
+            logger.error(
+                "Failed to initialize AWR2243 radar with return code: %d", ret)
             sys.exit(0)
 
         fpga_udp.AWR2243_setFrameCfg(0)
@@ -347,7 +389,8 @@ def main():
         ret = fpga_udp.AWR2243_sensorStart()
 
         if ret != 0:
-            logger.error("Failed to start AWR2243 sensor with return code: %d", ret)
+            logger.error(
+                "Failed to start AWR2243 sensor with return code: %d", ret)
             sys.exit(0)
 
         # time.sleep(1)  # Allow time for radar to start: removed as precompile takes a while
@@ -364,4 +407,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # Hard-exit to avoid late aborts in C extensions during interpreter teardown
+        os._exit(0)

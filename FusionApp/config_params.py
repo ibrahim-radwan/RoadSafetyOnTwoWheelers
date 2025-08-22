@@ -38,7 +38,8 @@ class CFGS:
     AWR_CLI_BR = 115200
     AWR_DATA_BR = 921600
 
-    AWR1843_CONFIG_FILE = os.path.join(os.getcwd(), "config_files/profile_3d_5m.cfg")
+    AWR1843_CONFIG_FILE = os.path.join(
+        os.getcwd(), "config_files/profile_3d_5m.cfg")
     AWR2243_CONFIG_FILE = os.path.join(
         os.getcwd(), "config_files/AWR2243_180m_35cm_64_2_256.txt"
     )

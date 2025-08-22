@@ -1,5 +1,11 @@
+from utils import setup_logger
+from config_params import CFGS
+from engine.interfaces import CameraAnalyser
+import torch
+from ultralytics import YOLO
 import multiprocessing
 import os
+import sys
 import numpy as np
 
 # NumPy 2.x compatibility for libs that still reference deprecated aliases
@@ -13,12 +19,6 @@ import logging
 
 # Disable Ultralytics auto-install attempts
 os.environ.setdefault("ULTRALYTICS_REQUIREMENTS", "0")
-from ultralytics import YOLO
-import torch
-
-from engine.interfaces import CameraAnalyser
-from config_params import CFGS
-from utils import setup_logger
 
 
 def _running_on_jetson() -> bool:
@@ -54,7 +54,8 @@ class Rectangle:
         self.confidence = confidence
 
         # Map YOLO class IDs to names
-        self.class_names = {0: "person", 1: "bicycle", 2: "car", 3: "motorcycle"}
+        self.class_names = {0: "person",
+                            1: "bicycle", 2: "car", 3: "motorcycle"}
 
         self.object_type = self.class_names.get(class_id, "unknown")
 
@@ -126,7 +127,8 @@ class D455Analyser(CameraAnalyser):
                         box_width = int(x2 - x1)
                         box_height = int(y2 - y1)
                         objects.append(
-                            Rectangle(x, y, box_width, box_height, class_id, confidence)
+                            Rectangle(x, y, box_width, box_height,
+                                      class_id, confidence)
                         )
 
             end_time = time.perf_counter()
@@ -150,6 +152,13 @@ class D455Analyser(CameraAnalyser):
         # Set up logger in the child process
         self.logger = setup_logger("D455Analyser")
         self.logger.info("Starting D455Analyser...")
+
+        # Avoid hang on process exit if consumer stops reading the queue.
+        # This prevents waiting for the queue's feeder thread during interpreter shutdown.
+        try:
+            output_queue.cancel_join_thread()
+        except Exception:
+            pass
 
         # Configure PyTorch/YOLO runtime for Jetson and check acceleration
         try:
@@ -204,7 +213,8 @@ class D455Analyser(CameraAnalyser):
                         f"TensorRT engine not used ({e}); falling back to PyTorch 'yolov8n.pt'"
                     )
             else:
-                self.logger.info("Non-Jetson platform detected; skipping TensorRT and using PyTorch")
+                self.logger.info(
+                    "Non-Jetson platform detected; skipping TensorRT and using PyTorch")
             try:
                 if not model_loaded:
                     self._yolo_model = YOLO("yolov8n.pt")
@@ -260,7 +270,8 @@ class D455Analyser(CameraAnalyser):
                 try:
                     output_queue.put_nowait(D455Results(video_frame, objects))
                 except Full:
-                    self.logger.debug("Camera results queue full; dropping result")
+                    self.logger.debug(
+                        "Camera results queue full; dropping result")
 
                 total_end_time = time.perf_counter()
                 total_processing_time_frame = total_end_time - total_start_time
@@ -273,10 +284,12 @@ class D455Analyser(CameraAnalyser):
                 # Print average statistics every log_interval frames at INFO level
                 if frame_count % log_interval == 0:
                     avg_total_time = total_processing_time / frame_count
-                    self.logger.info(f"AVG Runtime: {avg_total_time:.4f}s (frame {frame_count})")
+                    self.logger.info(
+                        f"AVG Runtime: {avg_total_time:.4f}s (frame {frame_count})")
 
             except Empty:
-                self.logger.debug("D455Analyser: No frames available, continuing...")
+                self.logger.debug(
+                    "D455Analyser: No frames available, continuing...")
                 continue
             except KeyboardInterrupt:
                 self.logger.info("Keyboard interrupt received, stopping...")
@@ -294,4 +307,4 @@ class D455Analyser(CameraAnalyser):
 
         self.logger.info("D455Analyser stopped.")
 
-        return
+        sys.exit(0)
