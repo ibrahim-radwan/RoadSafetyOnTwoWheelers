@@ -21,7 +21,7 @@ from sample_processing.radar_proc import (
     openradar_rt_process_frame,
     custom_process_frame,
 )
-from utils import setup_logger
+from utils import setup_logger, disable_shm_resource_tracker
 from multiprocessing import shared_memory
 
 from engine.interfaces import RadarAnalyser
@@ -179,6 +179,20 @@ class RadarHeatmapAnalyser(RadarAnalyser):
         """Main processing loop"""
         # Initialize logger and ADC parameters in the target process
         self.logger = setup_logger("RadarHeatmapAnalyser")
+        # Keep resource_tracker from touching SHM in this child
+        try:
+            disable_shm_resource_tracker(self.logger)
+        except Exception:
+            pass
+
+        # Prevent hang on process exit if consumer stops reading our queue
+        try:
+            output_queue.cancel_join_thread()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    "cancel_join_thread unavailable or failed: %s", e
+                )
 
         # Initialize ADC parameters from provided config file or default
         config_to_use = (
@@ -214,7 +228,14 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     f"Attached preallocated radar SHM: names={names}, nbytes={self._shm_nbytes}, dtype={self._shm_dtype}, shape={self._shm_shape}"
                 )
             except Exception as e:
-                self.logger.error(f"Failed to attach preallocated radar SHM: {e}")
+                self.logger.error(
+                    f"Failed to attach preallocated radar SHM: {e}")
+                # If engine demanded SHM path, fail fast: we cannot function without raw SHM
+                try:
+                    stop_event.set()
+                except Exception:
+                    self.logger.error("Failed to set stop_event")
+                return
 
         # Attach to preallocated results SHM (rd/ra)
         if self._prealloc_res_shm_meta:
@@ -269,10 +290,15 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     }
                     # output_queue available later; stash for first loop send
                     self._pending_res_init = init_msg
-                except Exception:
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            "Failed building RADAR_RES_SHM_INIT meta: %s", e
+                        )
                     self._pending_res_init = None
             except Exception as e:
-                self.logger.error(f"Failed to attach preallocated results SHM: {e}")
+                self.logger.error(
+                    f"Failed to attach preallocated results SHM: {e}")
                 self._pending_res_init = None
         else:
             self._pending_res_init = None
@@ -287,13 +313,14 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 )
             else:
                 preloaded_item = first_item
-        except Exception as e:
+        except Empty as e:
             self.logger.warning(f"No ADC_PARAMS received from queue: {e}")
 
         self.logger.info(
             f"Initialized with {self.adc_params.tx} TX, {self.adc_params.rx} RX antennas"
         )
-        self.logger.info(f"Range Resolution: {self.adc_params.range_resolution:.4f} m")
+        self.logger.info(
+            f"Range Resolution: {self.adc_params.range_resolution:.4f} m")
         self.logger.info(
             f"Doppler Resolution: {self.adc_params.doppler_resolution:.4f} m/s"
         )
@@ -360,15 +387,18 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         )
                         dca_frame_data = shm_view.copy()
                     except Exception as e:
-                        self.logger.warning(f"Failed to read SHM slot {slot}: {e}")
+                        self.logger.warning(
+                            f"Failed to read SHM slot {slot}: {e}")
                         continue
 
                     # Construct frame object with propagated timestamps
                     latest_frame = DCA1000Frame(
                         timestamp=item.get("frame_timestamp", 0.0),
                         data=dca_frame_data,
-                        capture_monotonic_ns=int(item.get("capture_monotonic_ns", 0)),
-                        enqueue_monotonic_ns=int(item.get("enqueue_monotonic_ns", 0)),
+                        capture_monotonic_ns=int(
+                            item.get("capture_monotonic_ns", 0)),
+                        enqueue_monotonic_ns=int(
+                            item.get("enqueue_monotonic_ns", 0)),
                     )
 
                     # Analyse
@@ -393,12 +423,41 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                             ):
                                 try:
                                     rd_out = rd_out.reshape(self._rd_shape)
-                                except Exception:
-                                    pass
-                            mv_rd = memoryview(self._rd_blocks[slot_res].buf)
-                            mv_rd[: rd_out.nbytes] = rd_out.tobytes()
-                            shm_written = True
-                            results.pop("range_doppler", None)
+                                except Exception as e:
+                                    if self.logger:
+                                        self.logger.error(
+                                            "RD reshape to %s failed: %s",
+                                            self._rd_shape,
+                                            e,
+                                        )
+                            # Guard: ensure we don't overflow the SHM slot
+                            try:
+                                rd_expected_nbytes = (
+                                    int(np.prod(self._rd_shape))
+                                    * np.dtype(self._rd_dtype or "float32").itemsize
+                                )
+                            except Exception:
+                                rd_expected_nbytes = rd_out.nbytes
+                            if rd_out.nbytes != rd_expected_nbytes:
+                                if self.logger:
+                                    self.logger.error(
+                                        "RD size mismatch (have %d bytes, expected %d); skipping RD SHM write",
+                                        rd_out.nbytes,
+                                        rd_expected_nbytes,
+                                    )
+                            else:
+                                mv_rd = memoryview(
+                                    self._rd_blocks[slot_res].buf)
+                                mv_rd[: rd_out.nbytes] = rd_out.tobytes()
+                                try:
+                                    mv_rd.release()
+                                except Exception as e:
+                                    if self.logger:
+                                        self.logger.error(
+                                            "RD memoryview release failed: %s", e
+                                        )
+                                shm_written = True
+                                results.pop("range_doppler", None)
                         # Range-Azimuth
                         if (
                             self._ra_blocks
@@ -413,16 +472,46 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                             ):
                                 try:
                                     ra_out = ra_out.reshape(self._ra_shape)
-                                except Exception:
-                                    pass
-                            mv_ra = memoryview(self._ra_blocks[slot_res].buf)
-                            mv_ra[: ra_out.nbytes] = ra_out.tobytes()
-                            shm_written = True
-                            results.pop("range_azimuth", None)
+                                except Exception as e:
+                                    if self.logger:
+                                        self.logger.error(
+                                            "RA reshape to %s failed: %s",
+                                            self._ra_shape,
+                                            e,
+                                        )
+                            # Guard: ensure we don't overflow the SHM slot
+                            try:
+                                ra_expected_nbytes = (
+                                    int(np.prod(self._ra_shape))
+                                    * np.dtype(self._ra_dtype or "float32").itemsize
+                                )
+                            except Exception:
+                                ra_expected_nbytes = ra_out.nbytes
+                            if ra_out.nbytes != ra_expected_nbytes:
+                                if self.logger:
+                                    self.logger.error(
+                                        "RA size mismatch (have %d bytes, expected %d); skipping RA SHM write",
+                                        ra_out.nbytes,
+                                        ra_expected_nbytes,
+                                    )
+                            else:
+                                mv_ra = memoryview(
+                                    self._ra_blocks[slot_res].buf)
+                                mv_ra[: ra_out.nbytes] = ra_out.tobytes()
+                                try:
+                                    mv_ra.release()
+                                except Exception as e:
+                                    if self.logger:
+                                        self.logger.error(
+                                            "RA memoryview release failed: %s", e
+                                        )
+                                shm_written = True
+                                results.pop("range_azimuth", None)
                         if shm_written:
                             self._res_seq += 1
                     except Exception as e:
-                        self.logger.warning(f"Failed to write results to SHM: {e}")
+                        self.logger.error(
+                            f"Failed to write results to SHM: {e}")
 
                     # Best-effort queue size hint
                     try:
@@ -478,13 +567,15 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         try:
                             output_queue.put_nowait(meta)
                         except Full:
-                            self.logger.warning("Output queue full, skipping frame")
+                            self.logger.warning(
+                                "Output queue full, skipping frame")
                         continue
                     else:
                         try:
                             output_queue.put_nowait(results)
                         except Full:
-                            self.logger.warning("Output queue full, skipping frame")
+                            self.logger.warning(
+                                "Output queue full, skipping frame")
                         continue
                 if isinstance(item, DCA1000Frame):
                     # Do not drop further in analyser; process the first frame we dequeued
@@ -529,7 +620,8 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         output_queue.put_nowait(results)
                     except Full:
                         # Queue might be full, skip this frame
-                        self.logger.warning("Output queue full, skipping frame")
+                        self.logger.warning(
+                            "Output queue full, skipping frame")
                         pass
                 else:
                     # Ignore unrelated items to avoid log spam
@@ -552,8 +644,33 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             for shm in self._shm_blocks:
                 try:
                     shm.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            "SHM close failed for raw block (%s): %s", shm.name, e
+                        )
             self._shm_blocks = []
+
+        # Detach from results SHM blocks if attached
+        if self._rd_blocks:
+            for shm in self._rd_blocks:
+                try:
+                    shm.close()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            "SHM close failed for RD block (%s): %s", shm.name, e
+                        )
+            self._rd_blocks = []
+        if self._ra_blocks:
+            for shm in self._ra_blocks:
+                try:
+                    shm.close()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            "SHM close failed for RA block (%s): %s", shm.name, e
+                        )
+            self._ra_blocks = []
 
         return

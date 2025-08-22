@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import queue
 from typing import Optional
@@ -137,7 +138,8 @@ class D455(CameraFeed):
                 continue
             except KeyboardInterrupt:
                 if self.logger is not None:
-                    self.logger.info("Keyboard interrupt received, stopping...")
+                    self.logger.info(
+                        "Keyboard interrupt received, stopping...")
                 stop_event.set()
 
         if self.logger is not None:
@@ -153,6 +155,13 @@ class D455(CameraFeed):
         self.logger = setup_logger("D455")
         self.logger.info("Starting...")
 
+        # Avoid hang on process exit if consumer stops reading the queue.
+        # This prevents waiting for the queue's feeder thread during interpreter shutdown.
+        try:
+            stream_queue.cancel_join_thread()
+        except Exception:
+            pass
+
         # Store control queue reference
         self._control_queue = control_queue
 
@@ -164,7 +173,8 @@ class D455(CameraFeed):
         self._pipeline = rs.pipeline()
         self._rs_config = rs.config()
         # Enable only color stream to lower overhead (disable depth and IR)
-        self._rs_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        self._rs_config.enable_stream(
+            rs.stream.color, 640, 480, rs.format.bgr8, 30)
         self.logger.info("Starting D455 camera")
         assert self._pipeline is not None, "D455 camera is not initialized"
         self._pipeline.start(self._rs_config)
@@ -211,3 +221,5 @@ class D455(CameraFeed):
             self._pipeline.stop()
 
         self.logger.info("Stopped")
+
+        sys.exit(0)

@@ -8,6 +8,7 @@ import os
 from multiprocessing import shared_memory
 from sample_processing.radar_params import ADCParams
 import queue
+from utils import disable_shm_resource_tracker
 
 
 class FusionEngine:
@@ -62,7 +63,8 @@ class FusionEngine:
             from radar.dca1000_awr2243 import DCA1000EVM, DCA1000Config
 
             # Pass radar_config_file like the old working version
-            radar_config_file = config.get("config_file", CFGS.AWR2243_CONFIG_FILE)
+            radar_config_file = config.get(
+                "config_file", CFGS.AWR2243_CONFIG_FILE)
             radar_config = DCA1000Config(radar_config_file=radar_config_file)
             if "dest_dir" in config:
                 radar_config.dest_dir = config["dest_dir"]
@@ -73,7 +75,8 @@ class FusionEngine:
             from radar.dca1000_awr2243 import DCA1000Recording, DCA1000Config
 
             # Pass radar_config_file for recording mode too
-            radar_config_file = config.get("config_file", CFGS.AWR2243_CONFIG_FILE)
+            radar_config_file = config.get(
+                "config_file", CFGS.AWR2243_CONFIG_FILE)
             radar_config = DCA1000Config(radar_config_file=radar_config_file)
             radar_config.dest_dir = config["dest_dir"]
             return DCA1000Recording(radar_config, sync_state=sync_state)
@@ -146,6 +149,11 @@ class FusionEngine:
             status_queue: Optional queue for status updates (replay mode)
         """
         self.logger = setup_logger("FusionEngine")
+        # Disable resource_tracker for shared_memory in engine process (owner-managed)
+        try:
+            disable_shm_resource_tracker(self.logger)
+        except Exception:
+            pass
 
         if stop_event is None:
             stop_event = Event()
@@ -224,10 +232,12 @@ class FusionEngine:
             # Expose results SHM identifiers to the GUI process via environment variables
             try:
                 rd_names = ",".join(
-                    [blk.name for blk in self._radar_res_shm_blocks.get("rd", [])]
+                    [blk.name for blk in self._radar_res_shm_blocks.get(
+                        "rd", [])]
                 )
                 ra_names = ",".join(
-                    [blk.name for blk in self._radar_res_shm_blocks.get("ra", [])]
+                    [blk.name for blk in self._radar_res_shm_blocks.get(
+                        "ra", [])]
                 )
                 if rd_names:
                     os.environ["RADAR_RD_SHM_NAMES"] = rd_names
@@ -236,10 +246,13 @@ class FusionEngine:
                 angle_bins = (90 * 2) // 1 + 1
                 os.environ["RADAR_RD_SHAPE"] = f"{adc.chirps},{adc.samples}"
                 os.environ["RADAR_RA_SHAPE"] = f"{angle_bins},{adc.samples}"
-            except Exception:
-                pass
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(
+                        f"Failed to export RD/RA SHM env vars for GUI attach: {e}"
+                    )
         except Exception as e:
-            self.logger.warning(
+            self.logger.error(
                 f"Failed to preallocate radar SHM in engine (falling back to feed-created): {e}"
             )
             self._radar_shm_blocks = []
@@ -249,7 +262,8 @@ class FusionEngine:
         self.logger.info("Creating feed and analyzer instances...")
         try:
             radar_feed = self._create_radar_feed(self.radar_feed_config)
-            radar_analyser = self._create_radar_analyser(self.radar_analyser_config)
+            radar_analyser = self._create_radar_analyser(
+                self.radar_analyser_config)
 
             camera_feed = None
             camera_analyser = None
@@ -262,7 +276,8 @@ class FusionEngine:
                     self.camera_analyser_config
                 )
 
-            self.logger.info("Feed and analyzer instances created successfully")
+            self.logger.info(
+                "Feed and analyzer instances created successfully")
         except Exception as e:
             self.logger.error(f"Failed to create feed/analyzer instances: {e}")
             raise
@@ -354,15 +369,18 @@ class FusionEngine:
                     if radar_control_queue is not None:
                         try:
                             radar_control_queue.put(command)
-                            self.logger.debug(f"Forwarded command to radar: {command}")
+                            self.logger.debug(
+                                f"Forwarded command to radar: {command}")
                         except Exception as e:
-                            self.logger.error(f"Error forwarding command to radar: {e}")
+                            self.logger.error(
+                                f"Error forwarding command to radar: {e}")
 
                     # Forward command to camera
                     if camera_control_queue is not None:
                         try:
                             camera_control_queue.put(command)
-                            self.logger.debug(f"Forwarded command to camera: {command}")
+                            self.logger.debug(
+                                f"Forwarded command to camera: {command}")
                         except Exception as e:
                             self.logger.error(
                                 f"Error forwarding command to camera: {e}"
@@ -377,31 +395,30 @@ class FusionEngine:
 
         self.logger.info("FusionEngine stopping...")
 
-        # Proactively signal analysers/feeds to exit immediately
-        stop_sentinel = {"STOP": True}
-        try:
-            if self._radar_stream_queue is not None:
-                self._radar_stream_queue.put_nowait(stop_sentinel)
-        except Exception:
-            pass
-        try:
-            if self._camera_stream_queue is not None:
-                self._camera_stream_queue.put_nowait(stop_sentinel)
-        except Exception:
-            pass
-        # Also notify control queues so feeds that watch control break promptly
-        try:
-            if radar_control_queue is not None:
-                radar_control_queue.put_nowait("stop")
-                radar_control_queue.put_nowait(stop_sentinel)
-        except Exception:
-            pass
-        try:
-            if camera_control_queue is not None:
-                camera_control_queue.put_nowait("stop")
-                camera_control_queue.put_nowait(stop_sentinel)
-        except Exception:
-            pass
+        # Give children a grace period to exit on their own
+        time.sleep(0.5)
+
+        # Attempt to join/terminate/kill all child processes robustly (join analysers first)
+        for i in reversed(range(len(processes))):
+            process = processes[i]
+            try:
+                if process.is_alive():
+                    self.logger.info(f"Joining process {i}...")
+                    process.join(timeout=3)
+                else:
+                    self.logger.info(f"Process {i} already done.")
+
+                if process.is_alive():
+                    self.logger.error(
+                        f"Process {i} did not terminate, killing...")
+                    process.kill()
+                    process.join()
+
+                self.logger.info(
+                    f"Process {i} joined, exit_code: {process.exitcode}")
+            except Exception as e:
+                self.logger.error(
+                    f"Error while shutting down process {i}: {e}")
 
         # Final process status check
         self.logger.info("Final process status:")
@@ -410,77 +427,80 @@ class FusionEngine:
                 f"Process {i}: PID: {process.pid}, alive: {process.is_alive()}, exit_code: {process.exitcode}"
             )
 
-        # Give children a grace period to exit on their own
-        time.sleep(0.5)
-
-        # Attempt to join/terminate/kill all child processes robustly (join analysers first)
-        for i in reversed(range(len(processes))):
-            process = processes[i]
-            try:
-                self.logger.info(f"Joining process {i}...")
-                process.join(timeout=6)
-                if process.is_alive():
-                    self.logger.warning(
-                        f"Process {i} still alive after join, terminating..."
-                    )
-                    process.terminate()
-                    process.join(timeout=4)
-                if process.is_alive():
-                    self.logger.error(f"Process {i} did not terminate, killing...")
-                    process.kill()
-                    process.join()
-                self.logger.info(f"Process {i} joined, exit_code: {process.exitcode}")
-            except Exception as e:
-                self.logger.error(f"Error while shutting down process {i}: {e}")
-
         # Close internal queues owned by the engine to help GC
         try:
             if self._radar_stream_queue is not None:
                 self._radar_stream_queue.close()
                 self._radar_stream_queue.join_thread()
-        except Exception:
-            pass
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: radar_stream_queue close/join_thread failed: {e}"
+                )
         try:
             if self._camera_stream_queue is not None:
                 self._camera_stream_queue.close()
                 self._camera_stream_queue.join_thread()
-        except Exception:
-            pass
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: camera_stream_queue close/join_thread failed: {e}"
+                )
         try:
             if control_queue is not None and radar_control_queue is not None:
                 radar_control_queue.close()
                 radar_control_queue.join_thread()
-        except Exception:
-            pass
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: radar_control_queue close/join_thread failed: {e}"
+                )
         try:
             if control_queue is not None and camera_control_queue is not None:
                 camera_control_queue.close()
                 camera_control_queue.join_thread()
-        except Exception:
-            pass
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: camera_control_queue close/join_thread failed: {e}"
+                )
 
         # Cleanup engine-owned shared memory blocks
         try:
             for shm in getattr(self, "_radar_shm_blocks", []) or []:
                 try:
                     shm.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            f"Engine: SHM close failed for raw block ({getattr(shm,'name','?')}): {e}"
+                        )
                 try:
                     shm.unlink()
-                except Exception:
-                    pass
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            f"Engine: SHM unlink failed for raw block ({getattr(shm,'name','?')}): {e}"
+                        )
             for group in getattr(self, "_radar_res_shm_blocks", {}).values():
                 for shm in group:
                     try:
                         shm.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.error(
+                                f"Engine: SHM close failed for res block ({getattr(shm,'name','?')}): {e}"
+                            )
                     try:
                         shm.unlink()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.error(
+                                f"Engine: SHM unlink failed for res block ({getattr(shm,'name','?')}): {e}"
+                            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: unexpected error cleaning SHM: {e}")
 
         self.logger.info("FusionEngine stopped successfully.")
