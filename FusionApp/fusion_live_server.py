@@ -118,6 +118,15 @@ class FusionRunner:
             "radar_drops": 0,
         }
 
+        # Recording stats (filesystem-based)
+        self._record_dir: Optional[str] = None
+        self._rec_history: deque = deque()  # entries: (time, cam_total, rad_total, bytes_total)
+        self._rec_cam_total: int = 0
+        self._rec_rad_total: int = 0
+        self._rec_bytes_total: int = 0
+        self._rec_is_recording: bool = False
+        self._rec_start_ts: Optional[float] = None
+
         # Rolling windows (last 60s) for rates/drops
         self._radar_drop_hist: deque = deque()
         self._radar_update_times: deque = deque()
@@ -432,6 +441,25 @@ class FusionRunner:
 
     def send_control(self, command: str) -> None:
         try:
+            # Track recording state and directory for stats if provided
+            if isinstance(command, str):
+                if command.startswith("start_recording"):
+                    try:
+                        rec_dir = None
+                        if ":" in command:
+                            _, rec_dir = command.split(":", 1)
+                            rec_dir = rec_dir.strip()
+                        self._record_dir = rec_dir
+                        self._rec_is_recording = True
+                        self._rec_start_ts = time.time()
+                        self._rec_history.clear()
+                        self._rec_cam_total = 0
+                        self._rec_rad_total = 0
+                    except Exception:
+                        pass
+                elif command == "stop_recording":
+                    self._rec_is_recording = False
+                    self._rec_start_ts = None
             self._control_queue.put_nowait(command)
         except Exception as e:
             self.logger.error(f"Failed to send control command '{command}': {e}")
@@ -453,6 +481,25 @@ class FusionRunner:
 
         camera_updates = self._count_in_window(self._camera_update_times, now, 60.0)
         radar_updates = self._count_in_window(self._radar_update_times, now, 60.0)
+        # Update recording stats from filesystem (5s window)
+        cam_total, rad_total, cam_fps5, rad_fps5, bytes_total, bw_bps5 = self._compute_recording_stats(now)
+
+        # Recording duration
+        if self._rec_is_recording and self._rec_start_ts:
+            rec_dur_s = max(0.0, now - self._rec_start_ts)
+        else:
+            rec_dur_s = 0.0
+
+        def _fmt_hms(sec: float) -> str:
+            try:
+                sec_i = int(sec)
+                h = sec_i // 3600
+                m = (sec_i % 3600) // 60
+                s = sec_i % 60
+                return f"{h:02d}:{m:02d}:{s:02d}"
+            except Exception:
+                return "00:00:00"
+
         stats_copy.update(
             {
                 "camera_frame_ts": self._latest_frame_ts,
@@ -479,9 +526,65 @@ class FusionRunner:
                 # FPS over last 60s
                 "camera_fps_60s": round(camera_updates / 60.0, 2),
                 "radar_fps_60s": round(radar_updates / 60.0, 2),
+                # Recording stats (5s window)
+                "recording_dir": self._record_dir if self._rec_is_recording else None,
+                "camera_frames_total": cam_total if self._rec_is_recording else 0,
+                "radar_frames_total": rad_total if self._rec_is_recording else 0,
+                "camera_write_fps_5s": round(cam_fps5, 2) if self._rec_is_recording else 0.0,
+                "radar_write_fps_5s": round(rad_fps5, 2) if self._rec_is_recording else 0.0,
+                "total_bytes_written": int(bytes_total) if self._rec_is_recording else 0,
+                "avg_bandwidth_5s_bps": float(bw_bps5) if self._rec_is_recording else 0.0,
+                "recording_duration_hms": _fmt_hms(rec_dur_s) if self._rec_is_recording else "00:00:00",
             }
         )
         return stats_copy
+
+    def _compute_recording_stats(self, now_ts: float) -> tuple:
+        try:
+            if not self._rec_is_recording or not self._record_dir:
+                return 0, 0, 0.0, 0.0, 0, 0.0
+            cam_total = 0
+            rad_total = 0
+            bytes_total = 0
+            try:
+                with os.scandir(self._record_dir) as it:
+                    for entry in it:
+                        if not entry.is_file():
+                            continue
+                        name = entry.name.lower()
+                        try:
+                            fsz = entry.stat().st_size
+                        except Exception:
+                            fsz = 0
+                        if name.endswith('.png'):
+                            cam_total += 1
+                            bytes_total += fsz
+                        elif name.endswith('.bin'):
+                            rad_total += 1
+                            bytes_total += fsz
+            except Exception:
+                pass
+            # Update history (keep last 5s)
+            self._rec_history.append((now_ts, cam_total, rad_total, bytes_total))
+            window = 5.0
+            while self._rec_history and now_ts - self._rec_history[0][0] > window:
+                self._rec_history.popleft()
+            if len(self._rec_history) >= 2:
+                t0, c0, r0, b0 = self._rec_history[0]
+                dt = max(1e-6, now_ts - t0)
+                cam_fps = (cam_total - c0) / dt
+                rad_fps = (rad_total - r0) / dt
+                bw_bps = (bytes_total - b0) / dt
+            else:
+                cam_fps = 0.0
+                rad_fps = 0.0
+                bw_bps = 0.0
+            self._rec_cam_total = cam_total
+            self._rec_rad_total = rad_total
+            self._rec_bytes_total = bytes_total
+            return cam_total, rad_total, cam_fps, rad_fps, bytes_total, bw_bps
+        except Exception:
+            return 0, 0, 0.0, 0.0, 0, 0.0
 
     def _prune_windows(self, nowt: float) -> None:
         window = 60.0
@@ -1053,6 +1156,29 @@ INDEX_HTML = """
         container.appendChild(div);
       });
     }
+    function renderTimes(j) {
+      const el = document.getElementById('times');
+      if (!el) return;
+      const items = [];
+      if (j.uptime) items.push('uptime: ' + j.uptime);
+      if (j.start_time) items.push('started: ' + j.start_time);
+      if (typeof j.camera_fps_60s === 'number') items.push('camera FPS: ' + j.camera_fps_60s.toFixed(2));
+      if (typeof j.radar_fps_60s === 'number') items.push('radar FPS: ' + j.radar_fps_60s.toFixed(2));
+      el.textContent = items.join(' | ');
+      // Recording stats
+      try {
+        document.getElementById('rec_dir').textContent = j.recording_dir ? ('dir: ' + j.recording_dir) : 'dir: -';
+        document.getElementById('cam_total').textContent = j.camera_frames_total || 0;
+        document.getElementById('rad_total').textContent = j.radar_frames_total || 0;
+        document.getElementById('cam_fps').textContent = (j.camera_write_fps_5s || 0).toFixed(2);
+        document.getElementById('rad_fps').textContent = (j.radar_write_fps_5s || 0).toFixed(2);
+        const mb = (j.total_bytes_written || 0) / (1024*1024);
+        const mbs = (j.avg_bandwidth_5s_bps || 0) / (1024*1024);
+        document.getElementById('bytes_total').textContent = mb.toFixed(2);
+        document.getElementById('bw_bps').textContent = mbs.toFixed(2);
+        document.getElementById('rec_dur').textContent = j.recording_duration_hms || '00:00:00';
+      } catch(e) {}
+    }
     // Init binds
     function init() {
       refreshStatus();
@@ -1067,7 +1193,7 @@ INDEX_HTML = """
   <body>
     <h2>Fusion Live Server</h2>
     <div class="row">
-      <div class="col panel">
+      <div class="col panel" style="flex:2;">
         <h3>Controls</h3>
         <label><input type="checkbox" id="radar_only"> Radar only</label>
         <button onclick="systemStart()">Start System</button>
@@ -1075,6 +1201,14 @@ INDEX_HTML = """
         <button onclick="systemRetry()">Retry</button>
         <button onclick="startRecord()">Start Recording</button>
         <button onclick="stopRecord()">Stop Recording</button>
+      </div>
+      <div class="col panel" style="flex:1;">
+        <h3>Recording Stats</h3>
+        <div id="rec_dir" class="meta"></div>
+        <div class="meta">Camera frames: <span id="cam_total">0</span> | write FPS(5s): <span id="cam_fps">0.00</span></div>
+        <div class="meta">Radar frames: <span id="rad_total">0</span> | write FPS(5s): <span id="rad_fps">0.00</span></div>
+        <div class="meta">Total data: <span id="bytes_total">0.00</span> MB | Duration: <span id="rec_dur">00:00:00</span></div>
+        <div class="meta">Avg bandwidth(5s): <span id="bw_bps">0.00</span> MB/s</div>
       </div>
     </div>
     <div class="row">
