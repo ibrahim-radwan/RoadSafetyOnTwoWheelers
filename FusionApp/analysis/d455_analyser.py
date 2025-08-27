@@ -54,8 +54,7 @@ class Rectangle:
         self.confidence = confidence
 
         # Map YOLO class IDs to names
-        self.class_names = {0: "person",
-                            1: "bicycle", 2: "car", 3: "motorcycle"}
+        self.class_names = {0: "person", 1: "bicycle", 2: "car", 3: "motorcycle"}
 
         self.object_type = self.class_names.get(class_id, "unknown")
 
@@ -127,8 +126,7 @@ class D455Analyser(CameraAnalyser):
                         box_width = int(x2 - x1)
                         box_height = int(y2 - y1)
                         objects.append(
-                            Rectangle(x, y, box_width, box_height,
-                                      class_id, confidence)
+                            Rectangle(x, y, box_width, box_height, class_id, confidence)
                         )
 
             end_time = time.perf_counter()
@@ -196,9 +194,7 @@ class D455Analyser(CameraAnalyser):
             self.logger.error(
                 "GPU/HW acceleration is not available. Object detection is deactivated."
             )
-            self.logger.info(
-                f"AVG Runtime: {0.0:.4f}s (frame {0})"
-            )
+            self.logger.info(f"AVG Runtime: {0.0:.4f}s (frame {0})")
         else:
             # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
             model_loaded = False
@@ -214,7 +210,8 @@ class D455Analyser(CameraAnalyser):
                     )
             else:
                 self.logger.info(
-                    "Non-Jetson platform detected; skipping TensorRT and using PyTorch")
+                    "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
+                )
             try:
                 if not model_loaded:
                     self._yolo_model = YOLO("yolov8n.pt")
@@ -268,10 +265,15 @@ class D455Analyser(CameraAnalyser):
 
                 # Non-blocking result publish; drop if consumer is busy
                 try:
+                    # Propagate camera diagnostics in the results object if present
+                    try:
+                        video_frame.drops_total = getattr(video_frame, "drops_total", 0)
+                        video_frame.seq = getattr(video_frame, "seq", 0)
+                    except Exception:
+                        pass
                     output_queue.put_nowait(D455Results(video_frame, objects))
                 except Full:
-                    self.logger.debug(
-                        "Camera results queue full; dropping result")
+                    self.logger.debug("Camera results queue full; dropping result")
 
                 total_end_time = time.perf_counter()
                 total_processing_time_frame = total_end_time - total_start_time
@@ -285,11 +287,11 @@ class D455Analyser(CameraAnalyser):
                 if frame_count % log_interval == 0:
                     avg_total_time = total_processing_time / frame_count
                     self.logger.info(
-                        f"AVG Runtime: {avg_total_time:.4f}s (frame {frame_count})")
+                        f"AVG Runtime: {avg_total_time:.4f}s (frame {frame_count})"
+                    )
 
             except Empty:
-                self.logger.debug(
-                    "D455Analyser: No frames available, continuing...")
+                self.logger.debug("D455Analyser: No frames available, continuing...")
                 continue
             except KeyboardInterrupt:
                 self.logger.info("Keyboard interrupt received, stopping...")
