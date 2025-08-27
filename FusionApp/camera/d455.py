@@ -70,7 +70,19 @@ class D455(CameraFeed):
         try:
             while True:
                 command = self._control_queue.get_nowait()
-                if command == "start_recording":
+                # Support dynamic recording dir: start_recording[:<path>]
+                if isinstance(command, str) and command.startswith("start_recording"):
+                    try:
+                        if ":" in command:
+                            _, rec_dir = command.split(":", 1)
+                            rec_dir = rec_dir.strip()
+                            if rec_dir:
+                                self._dest_dir = rec_dir
+                                if self.logger:
+                                    self.logger.info(f"Recording directory set to: {self._dest_dir}")
+                    except Exception:
+                        pass
+                    self._is_recording = True
                     self._is_recording = True
                     if self.logger:
                         self.logger.info("Recording started")
@@ -106,6 +118,12 @@ class D455(CameraFeed):
 
         # Only save frame if recording is enabled
         if self._is_recording:
+            # Ensure directory exists
+            try:
+                if not os.path.exists(self._dest_dir):
+                    os.makedirs(self._dest_dir, exist_ok=True)
+            except Exception:
+                pass
             integer_part = f"{int(timestamp):010d}"
             fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
             frame_number = f"{frames.get_frame_number():012d}"

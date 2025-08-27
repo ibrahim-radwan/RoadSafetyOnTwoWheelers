@@ -1197,7 +1197,15 @@ def start_record():
     global runner
     if runner is None or not runner._running:
         return ("runner not started", 503)
-    runner.send_control("start_recording")
+    # Build timestamped dir under DEST_STORAGE using current time (server process time)
+    try:
+        ts_dir = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
+        recording_dir = os.path.join(CFGS.DEST_STORAGE, ts_dir)
+        os.makedirs(recording_dir, exist_ok=True)
+        runner.send_control(f"start_recording:{recording_dir}")
+    except Exception:
+        # Fallback to simple start if path creation failed
+        runner.send_control("start_recording")
     return ("OK", 200)
 
 
