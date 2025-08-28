@@ -46,6 +46,11 @@ class CFGS:
     # AWR_CONFIG_FILE = os.path.join(os.getcwd(), "config_files/matlab_indoor_sample.cfg")
     DCA_CONFIG_FILE = os.path.join(os.getcwd(), "config_files/cf.json")
 
+    DEST_STORAGE = os.path.join(
+        os.getcwd(),
+        "../../recordings/",
+    )
+
     DEST_DIR = os.path.join(
         os.getcwd(),
         "../../recordings/",

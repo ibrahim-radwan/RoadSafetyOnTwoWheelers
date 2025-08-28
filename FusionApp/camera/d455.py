@@ -27,6 +27,9 @@ class D455Frame:
         # self.ir_image = ir_image
         self.rgb_image = image
         self.timestamp = timestamp
+        # Optional metadata for diagnostics
+        self.seq: int = 0
+        self.drops_total: int = 0
 
 
 class D455(CameraFeed):
@@ -46,6 +49,9 @@ class D455(CameraFeed):
         # Recording control
         self._is_recording = False
         self._control_queue: Optional[multiprocessing.Queue] = None
+        # Diagnostics
+        self._seq_counter: int = 0
+        self._drops_total: int = 0
 
     def __enter__(self):
         return self
@@ -64,7 +70,19 @@ class D455(CameraFeed):
         try:
             while True:
                 command = self._control_queue.get_nowait()
-                if command == "start_recording":
+                # Support dynamic recording dir: start_recording[:<path>]
+                if isinstance(command, str) and command.startswith("start_recording"):
+                    try:
+                        if ":" in command:
+                            _, rec_dir = command.split(":", 1)
+                            rec_dir = rec_dir.strip()
+                            if rec_dir:
+                                self._dest_dir = rec_dir
+                                if self.logger:
+                                    self.logger.info(f"Recording directory set to: {self._dest_dir}")
+                    except Exception:
+                        pass
+                    self._is_recording = True
                     self._is_recording = True
                     if self.logger:
                         self.logger.info("Recording started")
@@ -100,6 +118,12 @@ class D455(CameraFeed):
 
         # Only save frame if recording is enabled
         if self._is_recording:
+            # Ensure directory exists
+            try:
+                if not os.path.exists(self._dest_dir):
+                    os.makedirs(self._dest_dir, exist_ok=True)
+            except Exception:
+                pass
             integer_part = f"{int(timestamp):010d}"
             fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
             frame_number = f"{frames.get_frame_number():012d}"
@@ -130,6 +154,11 @@ class D455(CameraFeed):
                         self.logger.warning(
                             f"Camera frame drop: downstream queue busy ({type(e).__name__}: {e})"
                         )
+                    # Count drops due to downstream queue full/busy
+                    try:
+                        self._drops_total += 1
+                    except Exception:
+                        pass
                     continue
             except queue.Empty:
                 # No frame available, continue
@@ -138,8 +167,7 @@ class D455(CameraFeed):
                 continue
             except KeyboardInterrupt:
                 if self.logger is not None:
-                    self.logger.info(
-                        "Keyboard interrupt received, stopping...")
+                    self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
 
         if self.logger is not None:
@@ -173,8 +201,7 @@ class D455(CameraFeed):
         self._pipeline = rs.pipeline()
         self._rs_config = rs.config()
         # Enable only color stream to lower overhead (disable depth and IR)
-        self._rs_config.enable_stream(
-            rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        self._rs_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
         self.logger.info("Starting D455 camera")
         assert self._pipeline is not None, "D455 camera is not initialized"
         self._pipeline.start(self._rs_config)
@@ -197,6 +224,13 @@ class D455(CameraFeed):
 
                 # Update the data and check if the data is okay
                 video_frame = self._read_and_store_frame()
+                # Attach diagnostics
+                try:
+                    self._seq_counter += 1
+                    video_frame.seq = self._seq_counter
+                    video_frame.drops_total = self._drops_total
+                except Exception:
+                    pass
                 try:
                     self._frame_queue.put_nowait(video_frame)
                 except queue.Full:
@@ -207,6 +241,11 @@ class D455(CameraFeed):
                             self.logger.warning(
                                 "Camera frame drop: local queue full, dropped oldest"
                             )
+                        # Count drop due to local queue full
+                        try:
+                            self._drops_total += 1
+                        except Exception:
+                            pass
                     except queue.Empty:
                         pass
                     try:
