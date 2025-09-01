@@ -480,7 +480,23 @@ class FusionRunner:
                     arr = np.rot90(arr, 1)
                 except Exception:
                     pass
-                return heatmap_to_png(arr)
+                pc = self._latest_point_cloud or {}
+                mr = pc.get("max_range") if isinstance(pc, dict) else None
+                ms = pc.get("max_speed") if isinstance(pc, dict) else None
+                if (
+                    isinstance(mr, (int, float))
+                    and isinstance(ms, (int, float))
+                    and np.isfinite(mr)
+                    and np.isfinite(ms)
+                    and mr > 0
+                    and ms > 0
+                ):
+                    extents = (-float(ms), float(ms), 0.0, float(mr))
+                else:
+                    extents = None
+                return heatmap_to_png(
+                    arr, extents=extents, force_square=True, target_size=(480, 480)
+                )
         except Exception:
             pass
         if isinstance(self._latest_rd, np.ndarray):
@@ -488,7 +504,23 @@ class FusionRunner:
                 arr = np.rot90(self._latest_rd, 1)
             except Exception:
                 arr = self._latest_rd
-            return heatmap_to_png(arr)
+            pc = self._latest_point_cloud or {}
+            mr = pc.get("max_range") if isinstance(pc, dict) else None
+            ms = pc.get("max_speed") if isinstance(pc, dict) else None
+            if (
+                isinstance(mr, (int, float))
+                and isinstance(ms, (int, float))
+                and np.isfinite(mr)
+                and np.isfinite(ms)
+                and mr > 0
+                and ms > 0
+            ):
+                extents = (-float(ms), float(ms), 0.0, float(mr))
+            else:
+                extents = None
+            return heatmap_to_png(
+                arr, extents=extents, force_square=True, target_size=(480, 480)
+            )
         return None
 
     def get_latest_ra_png(self) -> Optional[bytes]:
@@ -504,7 +536,15 @@ class FusionRunner:
                     arr = np.rot90(arr, 1)
                 except Exception:
                     pass
-                return heatmap_to_png(arr)
+                pc = self._latest_point_cloud or {}
+                mr = pc.get("max_range") if isinstance(pc, dict) else None
+                if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
+                    extents = (-90.0, 90.0, 0.0, float(mr))
+                else:
+                    extents = (-90.0, 90.0, 0.0, 10.0)
+                return heatmap_to_png(
+                    arr, extents=extents, force_square=True, target_size=(640, 480)
+                )
         except Exception:
             pass
         if isinstance(self._latest_ra, np.ndarray):
@@ -512,15 +552,33 @@ class FusionRunner:
                 arr = np.rot90(self._latest_ra, 1)
             except Exception:
                 arr = self._latest_ra
-            return heatmap_to_png(arr)
+            pc = self._latest_point_cloud or {}
+            mr = pc.get("max_range") if isinstance(pc, dict) else None
+            if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
+                extents = (-90.0, 90.0, 0.0, float(mr))
+            else:
+                extents = (-90.0, 90.0, 0.0, 10.0)
+            return heatmap_to_png(
+                arr, extents=extents, force_square=True, target_size=(640, 480)
+            )
         return None
 
     def _render_point_cloud_png(
-        self, width: int = 640, height: int = 480
+        self,
+        width: int = 640,
+        height: int = 480,
+        *,
+        cam_pos: tuple = (0.0, -1.0, 2.0),
+        cam_yaw_deg: float = 0.0,
     ) -> Optional[bytes]:
         try:
+            pc = self._latest_point_cloud or {}
             return render_point_cloud_png(
-                self._latest_point_cloud or {}, width=width, height=height
+                pc,
+                width=width,
+                height=height,
+                cam_pos=cam_pos,
+                cam_yaw_deg=cam_yaw_deg,
             )
         except Exception:
             return None

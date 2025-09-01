@@ -158,6 +158,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             "y": y_pos,
             "z": z_pos,
             "intensity": snrs,  # Use SNR as intensity
+            # Provide max range/speed for downstream renderers
+            "max_range": getattr(self.adc_params, "max_range", None),
+            "max_speed": getattr(self.adc_params, "max_doppler", None),
         }
 
         processing_time = time.perf_counter() - start_time
@@ -166,6 +169,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             "range_doppler": range_doppler_matrix,
             "range_azimuth": range_azimuth_matrix,
             "point_cloud": point_cloud_data,
+            # Also include at top-level for consumers that don't dive into point_cloud
+            "max_range": getattr(self.adc_params, "max_range", None),
+            "max_speed": getattr(self.adc_params, "max_doppler", None),
             "processing_time": processing_time,
             "frame_timestamp": dca_frame.timestamp,
         }
@@ -190,9 +196,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             output_queue.cancel_join_thread()
         except Exception as e:
             if self.logger:
-                self.logger.error(
-                    "cancel_join_thread unavailable or failed: %s", e
-                )
+                self.logger.error("cancel_join_thread unavailable or failed: %s", e)
 
         # Initialize ADC parameters from provided config file or default
         config_to_use = (
@@ -228,8 +232,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     f"Attached preallocated radar SHM: names={names}, nbytes={self._shm_nbytes}, dtype={self._shm_dtype}, shape={self._shm_shape}"
                 )
             except Exception as e:
-                self.logger.error(
-                    f"Failed to attach preallocated radar SHM: {e}")
+                self.logger.error(f"Failed to attach preallocated radar SHM: {e}")
                 # If engine demanded SHM path, fail fast: we cannot function without raw SHM
                 try:
                     stop_event.set()
@@ -297,8 +300,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         )
                     self._pending_res_init = None
             except Exception as e:
-                self.logger.error(
-                    f"Failed to attach preallocated results SHM: {e}")
+                self.logger.error(f"Failed to attach preallocated results SHM: {e}")
                 self._pending_res_init = None
         else:
             self._pending_res_init = None
@@ -319,8 +321,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
         self.logger.info(
             f"Initialized with {self.adc_params.tx} TX, {self.adc_params.rx} RX antennas"
         )
-        self.logger.info(
-            f"Range Resolution: {self.adc_params.range_resolution:.4f} m")
+        self.logger.info(f"Range Resolution: {self.adc_params.range_resolution:.4f} m")
         self.logger.info(
             f"Doppler Resolution: {self.adc_params.doppler_resolution:.4f} m/s"
         )
@@ -387,18 +388,15 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         )
                         dca_frame_data = shm_view.copy()
                     except Exception as e:
-                        self.logger.warning(
-                            f"Failed to read SHM slot {slot}: {e}")
+                        self.logger.warning(f"Failed to read SHM slot {slot}: {e}")
                         continue
 
                     # Construct frame object with propagated timestamps
                     latest_frame = DCA1000Frame(
                         timestamp=item.get("frame_timestamp", 0.0),
                         data=dca_frame_data,
-                        capture_monotonic_ns=int(
-                            item.get("capture_monotonic_ns", 0)),
-                        enqueue_monotonic_ns=int(
-                            item.get("enqueue_monotonic_ns", 0)),
+                        capture_monotonic_ns=int(item.get("capture_monotonic_ns", 0)),
+                        enqueue_monotonic_ns=int(item.get("enqueue_monotonic_ns", 0)),
                     )
 
                     # Analyse
@@ -446,8 +444,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                                         rd_expected_nbytes,
                                     )
                             else:
-                                mv_rd = memoryview(
-                                    self._rd_blocks[slot_res].buf)
+                                mv_rd = memoryview(self._rd_blocks[slot_res].buf)
                                 mv_rd[: rd_out.nbytes] = rd_out.tobytes()
                                 try:
                                     mv_rd.release()
@@ -495,8 +492,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                                         ra_expected_nbytes,
                                     )
                             else:
-                                mv_ra = memoryview(
-                                    self._ra_blocks[slot_res].buf)
+                                mv_ra = memoryview(self._ra_blocks[slot_res].buf)
                                 mv_ra[: ra_out.nbytes] = ra_out.tobytes()
                                 try:
                                     mv_ra.release()
@@ -510,8 +506,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         if shm_written:
                             self._res_seq += 1
                     except Exception as e:
-                        self.logger.error(
-                            f"Failed to write results to SHM: {e}")
+                        self.logger.error(f"Failed to write results to SHM: {e}")
 
                     # Best-effort queue size hint
                     try:
@@ -567,15 +562,13 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         try:
                             output_queue.put_nowait(meta)
                         except Full:
-                            self.logger.warning(
-                                "Output queue full, skipping frame")
+                            self.logger.warning("Output queue full, skipping frame")
                         continue
                     else:
                         try:
                             output_queue.put_nowait(results)
                         except Full:
-                            self.logger.warning(
-                                "Output queue full, skipping frame")
+                            self.logger.warning("Output queue full, skipping frame")
                         continue
                 if isinstance(item, DCA1000Frame):
                     # Do not drop further in analyser; process the first frame we dequeued
@@ -620,8 +613,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         output_queue.put_nowait(results)
                     except Full:
                         # Queue might be full, skip this frame
-                        self.logger.warning(
-                            "Output queue full, skipping frame")
+                        self.logger.warning("Output queue full, skipping frame")
                         pass
                 else:
                     # Ignore unrelated items to avoid log spam

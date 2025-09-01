@@ -88,9 +88,19 @@ class FusionRunner:
         return self._impl.get_latest_ra_png()
 
     def _render_point_cloud_png(
-        self, width: int = 640, height: int = 480
+        self,
+        width: int = 640,
+        height: int = 480,
+        *,
+        cam_pos: tuple = (0.0, -1.0, 2.0),
+        cam_yaw_deg: float = 0.0,
     ) -> Optional[bytes]:
-        return self._impl._render_point_cloud_png(width=width, height=height)
+        return self._impl._render_point_cloud_png(
+            width=width,
+            height=height,
+            cam_pos=cam_pos,
+            cam_yaw_deg=cam_yaw_deg,
+        )
 
     # Expose minimal state needed by routes (back-compat with existing checks)
     @property
@@ -267,8 +277,21 @@ def radar_frame_png():
         png = runner.get_latest_rd_png()
     elif mode == "ra":
         png = runner.get_latest_ra_png()
-    elif mode == "pc":
-        png = runner._render_point_cloud_png(width=640, height=480)
+    elif mode == "pc" or mode == "pc2d" or mode == "pc3d":
+        # Optional camera params via query (algorithm decides presence of z)
+        try:
+            cx = float(request.args.get("cam_x", 0.0))
+            cy = float(request.args.get("cam_y", -1.0))
+            cz = float(request.args.get("cam_z", 2.0))
+            cam_yaw = float(request.args.get("cam_yaw_deg", 0.0))
+        except Exception:
+            cx, cy, cz, cam_yaw = 0.0, -1.0, 2.0, 0.0
+        png = runner._render_point_cloud_png(
+            width=640,
+            height=480,
+            cam_pos=(cx, cy, cz),
+            cam_yaw_deg=cam_yaw,
+        )
     else:
         return ("bad mode", 400)
     if png is None:
