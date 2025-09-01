@@ -1,5 +1,3 @@
-from typing import Optional
-
 from utils import setup_logger
 from config_params import CFGS
 
@@ -36,6 +34,7 @@ def radar_hw_cleanup() -> None:
     """Power down AWR2243 radar hardware safely."""
     try:
         import fpga_udp  # Local import to avoid hard dependency at import time
+
         global _initialized
         if not _initialized:
             return
@@ -51,5 +50,3 @@ def radar_hw_cleanup() -> None:
     except Exception:
         # Module may be unavailable in some environments; ignore.
         pass
-
-

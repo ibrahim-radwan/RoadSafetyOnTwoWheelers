@@ -2,7 +2,7 @@ import os
 import time
 import threading
 from collections import deque
-from typing import Optional, Dict, Any, Generator, List
+from typing import Optional, Dict, Any, Generator
 
 import numpy as np
 import cv2
@@ -10,7 +10,6 @@ import cv2
 from utils import setup_logger
 from engine.fusion_factory import FusionFactory
 from engine.fusion_engine import FusionEngine
-from config_params import CFGS
 
 from render.encoders import encode_jpeg, heatmap_to_png, render_point_cloud_png
 from services.radar_hw import radar_hw_init, radar_hw_cleanup
@@ -96,8 +95,10 @@ class FusionRunner:
         try:
             self._stop_event = threading.Event()
             from multiprocessing import Event as _MPEvent
+
             self._engine_stop_event = _MPEvent()
             from multiprocessing import Queue as _MPQueue
+
             self._radar_results_queue = _MPQueue(maxsize=3)
             self._camera_results_queue = _MPQueue(maxsize=2)
         except Exception:
@@ -105,10 +106,13 @@ class FusionRunner:
 
         fusion_engine: FusionEngine
         fusion_engine = (
-            FusionFactory.create_live_radar_only() if radar_only else FusionFactory.create_live_fusion()
+            FusionFactory.create_live_radar_only()
+            if radar_only
+            else FusionFactory.create_live_fusion()
         )
 
         from multiprocessing import Process
+
         self._engine_process = Process(
             target=fusion_engine.run,
             args=(
@@ -122,9 +126,13 @@ class FusionRunner:
         try:
             ok_hw = radar_hw_init()
             if not ok_hw:
-                self.logger.error("Radar HW init failed; proceeding to start engine anyway")
+                self.logger.error(
+                    "Radar HW init failed; proceeding to start engine anyway"
+                )
             self._engine_process.start()
-            self.logger.info(f"FusionEngine process started: pid={self._engine_process.pid}")
+            self.logger.info(
+                f"FusionEngine process started: pid={self._engine_process.pid}"
+            )
             self._radar_only = bool(radar_only)
         except Exception as e:
             self._failed = True
@@ -211,6 +219,7 @@ class FusionRunner:
 
     def _camera_reader_loop(self) -> None:
         from queue import Empty
+
         while not self._stop_event.is_set():
             try:
                 result = self._camera_results_queue.get(timeout=1)
@@ -238,6 +247,7 @@ class FusionRunner:
     def _radar_reader_loop(self) -> None:
         from queue import Empty
         from multiprocessing import shared_memory
+
         while not self._stop_event.is_set():
             try:
                 item = self._radar_results_queue.get(timeout=1)
@@ -250,13 +260,15 @@ class FusionRunner:
                             self._ra_blocks = []
                             if rd_meta and rd_meta.get("names"):
                                 self._rd_blocks = [
-                                    shared_memory.SharedMemory(name=n) for n in rd_meta["names"]
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in rd_meta["names"]
                                 ]
                                 self._rd_shape = tuple(rd_meta.get("shape", ()))
                                 self._rd_dtype = str(rd_meta.get("dtype", "float32"))
                             if ra_meta and ra_meta.get("names"):
                                 self._ra_blocks = [
-                                    shared_memory.SharedMemory(name=n) for n in ra_meta["names"]
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in ra_meta["names"]
                                 ]
                                 self._ra_shape = tuple(ra_meta.get("shape", ()))
                                 self._ra_dtype = str(ra_meta.get("dtype", "float32"))
@@ -292,7 +304,9 @@ class FusionRunner:
                         if isinstance(item.get("point_cloud"), dict):
                             self._latest_point_cloud = item.get("point_cloud")
                         if "frame_timestamp" in item:
-                            self._latest_radar_ts = float(item.get("frame_timestamp", 0.0))
+                            self._latest_radar_ts = float(
+                                item.get("frame_timestamp", 0.0)
+                            )
                         self._radar_connected = True
                         with self._stats_lock:
                             self._stats["last_radar_update"] = time.time()
@@ -313,6 +327,7 @@ class FusionRunner:
 
     def _engine_monitor_loop(self) -> None:
         import time as _t
+
         while not self._stop_event.is_set():
             try:
                 if self._engine_process is None:
@@ -421,10 +436,14 @@ class FusionRunner:
         frame = self._latest_frame_bgr
         if frame is None:
             return None
-        frame_drawn = self._draw_detections(frame, getattr(self, "_latest_camera_objects", None))
+        frame_drawn = self._draw_detections(
+            frame, getattr(self, "_latest_camera_objects", None)
+        )
         return encode_jpeg(frame_drawn, quality=quality)
 
-    def mjpeg_generator(self, fps_limit: float = 10.0, quality: int = 70) -> Generator[bytes, None, None]:
+    def mjpeg_generator(
+        self, fps_limit: float = 10.0, quality: int = 70
+    ) -> Generator[bytes, None, None]:
         boundary = "frame"
         min_interval = 1.0 / max(fps_limit, 0.1)
         last_sent = 0.0
@@ -453,7 +472,9 @@ class FusionRunner:
             if self._rd_blocks and self._rd_shape and self._last_res_slot is not None:
                 slot = self._last_res_slot & 1
                 np_dtype = np.dtype(self._rd_dtype or "float32")
-                view = np.ndarray(self._rd_shape, dtype=np_dtype, buffer=self._rd_blocks[slot].buf)
+                view = np.ndarray(
+                    self._rd_shape, dtype=np_dtype, buffer=self._rd_blocks[slot].buf
+                )
                 arr = np.array(view, copy=True)
                 try:
                     arr = np.rot90(arr, 1)
@@ -475,7 +496,9 @@ class FusionRunner:
             if self._ra_blocks and self._ra_shape and self._last_res_slot is not None:
                 slot = self._last_res_slot & 1
                 np_dtype = np.dtype(self._ra_dtype or "float32")
-                view = np.ndarray(self._ra_shape, dtype=np_dtype, buffer=self._ra_blocks[slot].buf)
+                view = np.ndarray(
+                    self._ra_shape, dtype=np_dtype, buffer=self._ra_blocks[slot].buf
+                )
                 arr = np.array(view, copy=True)
                 try:
                     arr = np.rot90(arr, 1)
@@ -492,9 +515,13 @@ class FusionRunner:
             return heatmap_to_png(arr)
         return None
 
-    def _render_point_cloud_png(self, width: int = 640, height: int = 480) -> Optional[bytes]:
+    def _render_point_cloud_png(
+        self, width: int = 640, height: int = 480
+    ) -> Optional[bytes]:
         try:
-            return render_point_cloud_png(self._latest_point_cloud or {}, width=width, height=height)
+            return render_point_cloud_png(
+                self._latest_point_cloud or {}, width=width, height=height
+            )
         except Exception:
             return None
 
@@ -512,7 +539,9 @@ class FusionRunner:
 
         camera_updates = self._count_in_window(self._camera_update_times, now, 60.0)
         radar_updates = self._count_in_window(self._radar_update_times, now, 60.0)
-        cam_total, rad_total, cam_fps5, rad_fps5, bytes_total, bw_bps5 = self._compute_recording_stats(now)
+        cam_total, rad_total, cam_fps5, rad_fps5, bytes_total, bw_bps5 = (
+            self._compute_recording_stats(now)
+        )
 
         if self._rec_is_recording and self._rec_start_ts:
             rec_dur_s = max(0.0, now - self._rec_start_ts)
@@ -533,26 +562,44 @@ class FusionRunner:
             {
                 "camera_frame_ts": self._latest_frame_ts,
                 "radar_frame_ts": self._latest_radar_ts,
-                "engine_alive": (bool(self._engine_process.is_alive()) if self._engine_process else False),
+                "engine_alive": (
+                    bool(self._engine_process.is_alive())
+                    if self._engine_process
+                    else False
+                ),
                 "starting": self._starting,
                 "running": self._running,
                 "failed": self._failed,
                 "failure_reason": self._failure_reason,
                 "radar_connected": self._radar_connected,
                 "camera_connected": self._camera_connected,
-                "engine_pid": (self._engine_process.pid if self._engine_process else None),
+                "engine_pid": (
+                    self._engine_process.pid if self._engine_process else None
+                ),
                 "uptime": _fmt_s(uptime_s),
-                "start_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time)),
+                "start_time": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(start_time)
+                ),
                 "camera_fps_60s": round(camera_updates / 60.0, 2),
                 "radar_fps_60s": round(radar_updates / 60.0, 2),
                 "recording_dir": self._record_dir if self._rec_is_recording else None,
                 "camera_frames_total": cam_total if self._rec_is_recording else 0,
                 "radar_frames_total": rad_total if self._rec_is_recording else 0,
-                "camera_write_fps_5s": round(cam_fps5, 2) if self._rec_is_recording else 0.0,
-                "radar_write_fps_5s": round(rad_fps5, 2) if self._rec_is_recording else 0.0,
-                "total_bytes_written": int(bytes_total) if self._rec_is_recording else 0,
-                "avg_bandwidth_5s_bps": float(bw_bps5) if self._rec_is_recording else 0.0,
-                "recording_duration_hms": _fmt_hms(rec_dur_s) if self._rec_is_recording else "00:00:00",
+                "camera_write_fps_5s": (
+                    round(cam_fps5, 2) if self._rec_is_recording else 0.0
+                ),
+                "radar_write_fps_5s": (
+                    round(rad_fps5, 2) if self._rec_is_recording else 0.0
+                ),
+                "total_bytes_written": (
+                    int(bytes_total) if self._rec_is_recording else 0
+                ),
+                "avg_bandwidth_5s_bps": (
+                    float(bw_bps5) if self._rec_is_recording else 0.0
+                ),
+                "recording_duration_hms": (
+                    _fmt_hms(rec_dur_s) if self._rec_is_recording else "00:00:00"
+                ),
             }
         )
         return stats_copy
@@ -574,10 +621,10 @@ class FusionRunner:
                             fsz = entry.stat().st_size
                         except Exception:
                             fsz = 0
-                        if name.endswith('.png'):
+                        if name.endswith(".png"):
                             cam_total += 1
                             bytes_total += fsz
-                        elif name.endswith('.bin'):
+                        elif name.endswith(".bin"):
                             rad_total += 1
                             bytes_total += fsz
             except Exception:
@@ -606,9 +653,14 @@ class FusionRunner:
     def _prune_windows(self, nowt: float) -> None:
         window = 60.0
         try:
-            while self._radar_update_times and nowt - self._radar_update_times[0] > window:
+            while (
+                self._radar_update_times and nowt - self._radar_update_times[0] > window
+            ):
                 self._radar_update_times.popleft()
-            while self._camera_update_times and nowt - self._camera_update_times[0] > window:
+            while (
+                self._camera_update_times
+                and nowt - self._camera_update_times[0] > window
+            ):
                 self._camera_update_times.popleft()
             while self._radar_drop_hist and nowt - self._radar_drop_hist[0][0] > window:
                 self._radar_drop_hist.popleft()
@@ -637,5 +689,3 @@ class FusionRunner:
             return max(0, int(last_val - first_val))
         except Exception:
             return None
-
-

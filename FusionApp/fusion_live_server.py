@@ -14,22 +14,19 @@ Next steps (planned):
 """
 
 import os
-import sys
 import time
 import atexit
 import signal
 import threading
-import queue
 import json
 from typing import Optional, Dict, Any, Generator, List
-from collections import deque
 
-from flask import Flask, Response, jsonify, request, send_file, make_response
+from flask import Flask, Response, jsonify, request, make_response
 from flask import render_template
 
 # Local imports
-from config_params import CFGS
 from utils import setup_logger, disable_shm_resource_tracker
+from config_params import CFGS
 
 from services.radar_hw import radar_hw_cleanup
 from services.fusion_runner import FusionRunner as FusionRunnerService
@@ -37,26 +34,6 @@ from services.process_inspector import get_process_statuses
 
 
 logger = setup_logger("fusion_live_server")
-
-
-def _ensure_jsonable(value):
-    try:
-        import numpy as _np  # local alias
-
-        if isinstance(value, _np.ndarray):
-            return value.tolist()
-        if isinstance(value, _np.generic):
-            try:
-                return value.item()
-            except Exception:
-                pass
-    except Exception:
-        pass
-    if isinstance(value, dict):
-        return {k: _ensure_jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_ensure_jsonable(v) for v in value]
-    return value
 
 
 class FusionRunner:
@@ -129,7 +106,7 @@ class FusionRunner:
         return getattr(self._impl, "_failure_reason", None)
 
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder="templates")
 runner: Optional[FusionRunner] = None
 
 

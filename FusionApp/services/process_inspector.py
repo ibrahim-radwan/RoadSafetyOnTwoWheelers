@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from utils import setup_logger
 
@@ -7,7 +7,9 @@ from utils import setup_logger
 logger = setup_logger("process_inspector")
 
 
-def get_process_statuses(engine_pid: int, radar_only: bool) -> List[Dict[str, Any]]:
+def get_process_statuses(
+    engine_pid: Optional[int], radar_only: bool
+) -> List[Dict[str, Any]]:
     roles = [
         {"label": "WebServer", "pid": os.getpid(), "status": "running"},
         {"label": "FusionEngine", "pid": engine_pid, "status": None},
@@ -70,5 +72,3 @@ def get_process_statuses(engine_pid: int, radar_only: bool) -> List[Dict[str, An
         if r["status"] is None:
             r["status"] = "not_exists"
     return roles
-
-
