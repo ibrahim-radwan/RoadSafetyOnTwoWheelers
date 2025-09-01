@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fusion Live Server</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 12px; }
+    .row { display: flex; gap: 12px; margin-bottom: 12px; }
+    .col { flex: 1; }
+    .panel { border: 1px solid #ccc; padding: 8px; border-radius: 6px; }
+    button { padding: 8px 12px; margin-right: 8px; }
+    img { max-width: 100%; height: auto; }
+    pre { background: #f6f8fa; padding: 8px; overflow: auto; }
+    .proc-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+    .proc { display: inline-block; min-height: 48px; border: 1px solid #bbb; border-radius: 6px; padding: 8px; text-align: center; font-weight: 600; }
+    .proc.white { background: #fff; color: #333; }
+    .proc.red { background: #ffebeb; border-color: #e55; color: #900; }
+    .proc.yellow { background: #fff7db; border-color: #e5c100; color: #8a6d00; }
+    .proc.green { background: #e8ffe8; border-color: #6c6; color: #060; }
+    .meta { font-size: 12px; font-weight: normal; margin-top: 4px; color: #555; }
+    /* rotation via server-side; keep class unused */
+    .rotate-ccw { }
+    .gap { display: inline-block; width: 16px; }
+    #radar_view { display: block; width: 640px; height: 480px; }
+  </style>
+  <script>
+    let streamActive = false;
+    let isRunning = false;
+    async function systemStart() {
+      const ro = document.getElementById('radar_only').checked ? '?radar_only=1' : '';
+      await fetch('/system/start' + ro, { method: 'POST' });
+    }
+    async function systemStop() {
+      await fetch('/system/stop', { method: 'POST' });
+    }
+    async function systemRetry() {
+      await fetch('/system/retry', { method: 'POST' });
+    }
+    async function refreshStatus() {
+      try {
+        const r = await fetch('/status');
+        const j = await r.json();
+        document.getElementById('status').textContent = JSON.stringify(j, null, 2);
+        fetchProcesses();
+        renderTimes(j);
+        try {
+          if (typeof j.running === 'boolean') {
+            isRunning = j.running;
+            if (!isRunning) { if (videoTimer) clearInterval(videoTimer); if (radarTimer) clearInterval(radarTimer); }
+          }
+        } catch(e) {}
+      } catch(e) { console.error(e); }
+    }
+    function setupStatusSSE() {
+      if (!!window.EventSource) {
+        try {
+          const es = new EventSource('/status/stream');
+          es.onmessage = (ev) => {
+            let j = null;
+            try { j = JSON.parse(ev.data); document.getElementById('status').textContent = JSON.stringify(j, null, 2); renderTimes(j); } catch(e) {}
+            // Gate polling based on running state
+            try {
+              if (j && typeof j.running === 'boolean') {
+                if (j.running && !isRunning) {
+                  isRunning = true;
+                  scheduleVideoPoll();
+                  scheduleRadarPoll();
+                } else if (!j.running && isRunning) {
+                  isRunning = false;
+                  if (videoTimer) clearInterval(videoTimer);
+                  if (radarTimer) clearInterval(radarTimer);
+                }
+              }
+            } catch(e) {}
+            // Refresh processes grid every tick
+            fetchProcesses();
+          };
+          es.onerror = (e) => { console.warn('SSE error; falling back to polling'); es.close(); setInterval(refreshStatus, 1000); };
+        } catch(e) { setInterval(refreshStatus, 1000); }
+      } else {
+        setInterval(refreshStatus, 1000);
+      }
+    }
+    async function startRecord() {
+      await fetch('/control/start_record', { method: 'POST' });
+    }
+    async function stopRecord() {
+      await fetch('/control/stop_record', { method: 'POST' });
+    }
+    // Two-viewer polling logic
+    let radarMode = 'rd';
+    let videoTimer = null;
+    let radarTimer = null;
+    let procTimer = null;
+    function scheduleVideoPoll() {
+      if (videoTimer) clearInterval(videoTimer);
+      if (!isRunning) return;
+      const mode = document.querySelector('input[name="video_mode"]:checked').value;
+      if (mode !== 'live') return;
+      const fpsSel = document.getElementById('video_fps');
+      let fps = parseInt(fpsSel.value || '1');
+      fps = Math.max(1, fps);
+      const period = Math.max(50, Math.floor(1000 / fps));
+      videoTimer = setInterval(fetchVideoFrame, period);
+    }
+    function scheduleRadarPoll() {
+      if (radarTimer) clearInterval(radarTimer);
+      if (!isRunning) return;
+      const mode = document.querySelector('input[name="radar_mode"]:checked').value;
+      if (mode !== 'live') return;
+      const fpsSel = document.getElementById('radar_fps');
+      let fps = parseInt(fpsSel.value || '1');
+      fps = Math.max(1, fps);
+      const period = Math.max(50, Math.floor(1000 / fps));
+      radarTimer = setInterval(fetchRadarFrame, period);
+    }
+    async function fetchVideoFrame() {
+      if (!isRunning) return;
+      const el = document.getElementById('video_view');
+      el.src = '/video/frame.jpg?_=' + Date.now();
+    }
+    async function fetchRadarFrame() {
+      if (!isRunning) return;
+      const el = document.getElementById('radar_view');
+      el.src = '/radar/frame.png?mode=' + encodeURIComponent(radarMode) + '&_=' + Date.now();
+    }
+    function bindViewerControls() {
+      // Defaults to 1 fps
+      const vSel = document.getElementById('video_fps');
+      if (vSel) vSel.value = '1';
+      const rSel = document.getElementById('radar_fps');
+      if (rSel) rSel.value = '1';
+      document.querySelectorAll('input[name="video_mode"]').forEach(r => r.addEventListener('change', () => { scheduleVideoPoll(); }));
+      document.querySelectorAll('input[name="radar_mode"]').forEach(r => r.addEventListener('change', () => { scheduleRadarPoll(); }));
+      document.getElementById('video_fps').addEventListener('change', () => { scheduleVideoPoll(); });
+      document.getElementById('radar_fps').addEventListener('change', () => { scheduleRadarPoll(); });
+      document.getElementById('video_next').addEventListener('click', () => { clearInterval(videoTimer); fetchVideoFrame(); });
+      document.getElementById('radar_next').addEventListener('click', () => { clearInterval(radarTimer); fetchRadarFrame(); });
+      document.querySelectorAll('[data-rmode]').forEach(b => b.addEventListener('click', (e) => {
+        const m = e.target.getAttribute('data-rmode');
+        if (m) { radarMode = m; fetchRadarFrame(); scheduleRadarPoll(); }
+      }));
+      // Do not schedule until running becomes true (via SSE/status)
+    }
+    async function fetchProcesses() {
+      try {
+        const r = await fetch('/status/processes');
+        if (!r.ok) { renderProcesses([]); return; }
+        const j = await r.json();
+        renderProcesses(j.process_statuses || []);
+      } catch(e) { renderProcesses([]); }
+    }
+    function renderProcesses(list) {
+      const container = document.getElementById('proc_grid');
+      if (!container) return;
+      container.innerHTML = '';
+      const colorMap = {
+        'not_exists': 'white',
+        'unknown': 'white',
+        'dead': 'red',
+        'sleeping': 'yellow',
+        'running': 'green',
+      };
+      const expected = [
+        'WebServer', 'FusionEngine', 'RadarFeed', 'RadarAnalyser', 'CameraFeed', 'CameraAnalyser'
+      ];
+      const byLabel = {}; (list || []).forEach(p => { if (p && p.label) byLabel[p.label] = p; });
+      expected.forEach(name => {
+        const p = byLabel[name] || { label: name, status: 'not_exists', pid: null };
+        const div = document.createElement('div');
+        const color = colorMap[p.status] || 'white';
+        div.className = 'proc ' + color;
+        div.innerHTML = name + '<div class="meta">' + (p.status || 'not_exists') + (p.pid ? (' · pid ' + p.pid) : '') + '</div>';
+        container.appendChild(div);
+      });
+    }
+    function renderTimes(j) {
+      const el = document.getElementById('times');
+      if (!el) return;
+      const items = [];
+      if (j.uptime) items.push('uptime: ' + j.uptime);
+      if (j.start_time) items.push('started: ' + j.start_time);
+      if (typeof j.camera_fps_60s === 'number') items.push('camera FPS: ' + j.camera_fps_60s.toFixed(2));
+      if (typeof j.radar_fps_60s === 'number') items.push('radar FPS: ' + j.radar_fps_60s.toFixed(2));
+      el.textContent = items.join(' | ');
+      // Recording stats
+      try {
+        document.getElementById('rec_dir').textContent = j.recording_dir ? ('dir: ' + j.recording_dir) : 'dir: -';
+        document.getElementById('cam_total').textContent = j.camera_frames_total || 0;
+        document.getElementById('rad_total').textContent = j.radar_frames_total || 0;
+        document.getElementById('cam_fps').textContent = (j.camera_write_fps_5s || 0).toFixed(2);
+        document.getElementById('rad_fps').textContent = (j.radar_write_fps_5s || 0).toFixed(2);
+        const mb = (j.total_bytes_written || 0) / (1024*1024);
+        const mbs = (j.avg_bandwidth_5s_bps || 0) / (1024*1024);
+        document.getElementById('bytes_total').textContent = mb.toFixed(2);
+        document.getElementById('bw_bps').textContent = mbs.toFixed(2);
+        document.getElementById('rec_dur').textContent = j.recording_duration_hms || '00:00:00';
+      } catch(e) {}
+    }
+    // Init binds
+    function init() {
+      refreshStatus();
+      setupStatusSSE();
+      bindViewerControls();
+      // Ensure processes grid updates even if SSE is delayed
+      procTimer = setInterval(fetchProcesses, 1000);
+    }
+    window.addEventListener('load', init);
+  </script>
+  </head>
+  <body>
+    <h2>Fusion Live Server</h2>
+    <div class="row">
+      <div class="col panel" style="flex:2;">
+        <h3>Controls</h3>
+        <label><input type="checkbox" id="radar_only"> Radar only</label>
+        <button onclick="systemStart()">Start System</button>
+        <button onclick="systemStop()">Stop System</button>
+        <button onclick="systemRetry()">Retry</button>
+        <button onclick="startRecord()">Start Recording</button>
+        <button onclick="stopRecord()">Stop Recording</button>
+      </div>
+      <div class="col panel" style="flex:1;">
+        <h3>Recording Stats</h3>
+        <div id="rec_dir" class="meta"></div>
+        <div class="meta">Camera frames: <span id="cam_total">0</span> | write FPS(5s): <span id="cam_fps">0.00</span></div>
+        <div class="meta">Radar frames: <span id="rad_total">0</span> | write FPS(5s): <span id="rad_fps">0.00</span></div>
+        <div class="meta">Total data: <span id="bytes_total">0.00</span> MB | Duration: <span id="rec_dur">00:00:00</span></div>
+        <div class="meta">Avg bandwidth(5s): <span id="bw_bps">0.00</span> MB/s</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="col panel">
+        <h3>Processes</h3>
+        <div id="proc_grid" class="proc-grid"></div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="col panel">
+        <h3>Video</h3>
+        <div>
+          <label>Mode: </label>
+          <label><input type="radio" name="video_mode" value="live" checked> Live</label>
+          <label>FPS:</label>
+          <select id="video_fps">
+            <option selected>1</option><option>3</option><option>5</option><option>10</option><option>15</option><option>30</option>
+          </select>
+          <span class="gap"></span>
+          <label><input type="radio" name="video_mode" value="manual"> Manual</label>
+          <button id="video_next">Next frame</button>
+        </div>
+        <img id="video_view" alt="Video" />
+      </div>
+      <div class="col panel">
+        <h3>Radar</h3>
+        <div>
+          <label>Mode: </label>
+          <button data-rmode="rd">RD</button>
+          <button data-rmode="ra">RA</button>
+          <button data-rmode="pc">PC</button>
+          <label><input type="radio" name="radar_mode" value="live" checked> Live</label>
+          <label>FPS:</label>
+          <select id="radar_fps">
+            <option selected>1</option><option>2</option><option>5</option><option>10</option>
+          </select>
+          <span class="gap"></span>
+          <label><input type="radio" name="radar_mode" value="manual"> Manual</label>
+          <button id="radar_next">Next frame</button>
+        </div>
+        <img id="radar_view" alt="Radar" />
+      </div>
+    </div>
+    <div class="row">
+      <div class="col panel">
+        <h3>Status</h3>
+        <div id="times" class="meta"></div>
+        <pre id="status">{}</pre>
+      </div>
+    </div>
+  </body>
+  </html>
+
+
