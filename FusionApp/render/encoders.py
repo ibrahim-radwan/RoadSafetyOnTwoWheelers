@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+import io
 from typing import Optional, Dict, Any
 
 
@@ -12,6 +13,509 @@ def encode_jpeg(bgr: np.ndarray, quality: int = 80) -> Optional[bytes]:
         return buf.tobytes()
     except Exception:
         return None
+
+
+def _render_point_cloud_mpl_png(
+    x: np.ndarray,
+    y: np.ndarray,
+    intensity: np.ndarray,
+    width: int,
+    height: int,
+    max_range: Optional[float],
+) -> Optional[bytes]:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import Normalize
+        import matplotlib.cm as cm
+
+        dpi = 100
+        fig_w = max(1.0, width / dpi)
+        fig_h = max(1.0, height / dpi)
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+        ax.set_facecolor("white")
+        ax.grid(False)
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+
+        # Set limits (and reapply every frame to ensure visibility)
+        if (
+            isinstance(max_range, (int, float))
+            and np.isfinite(max_range)
+            and max_range > 0
+        ):
+            ax.set_xlim([-float(max_range), float(max_range)])
+            ax.set_ylim([0.0, float(max_range)])
+        else:
+            if x.size and y.size:
+                xmin, xmax = float(np.min(x)), float(np.max(x))
+                ymin, ymax = float(np.min(y)), float(np.max(y))
+                if xmax - xmin < 1e-6:
+                    pad = 0.5
+                    xmin, xmax = xmin - pad, xmax + pad
+                if ymax - ymin < 1e-6:
+                    pad = 0.5
+                    ymin, ymax = ymin - pad, ymax + pad
+                ax.set_xlim([xmin, xmax])
+                ax.set_ylim([ymin, ymax])
+
+        inten = np.asarray(intensity, dtype=float)
+        finite = np.isfinite(inten)
+        if np.any(finite):
+            vals = inten[finite]
+            vmin = float(np.percentile(vals, 1.0))
+            vmax = float(np.percentile(vals, 99.0))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin >= vmax:
+                vmin = float(np.min(vals))
+                vmax = float(np.max(vals)) if np.max(vals) > vmin else (vmin + 1.0)
+        else:
+            vmin, vmax = 0.0, 1.0
+        norm = Normalize(vmin=vmin, vmax=vmax)
+        cmap = cm.Greys_r
+        colors = cmap(norm(inten)) if inten.size else np.zeros((0, 4))
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or abs(vmax - vmin) < 1e-9:
+            colors = np.tile(np.array([[0.0, 0.0, 0.0, 1.0]]), (inten.size, 1))
+        ax.scatter(x, y, s=6, c=colors, edgecolors="none", linewidths=0)
+
+        fig.tight_layout(pad=0.1)
+        buf = io.BytesIO()
+        fig.savefig(
+            buf, format="png", facecolor="white", bbox_inches="tight", pad_inches=0.1
+        )
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _render_point_cloud_o3d_png(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    intensity: np.ndarray,
+    width: int,
+    height: int,
+    cam_pos: tuple,
+    cam_yaw_deg: float,
+    max_range: Optional[float],
+    two_d: bool = False,
+) -> Optional[bytes]:
+    try:
+        import open3d as o3d
+
+        # Build point cloud (allow empty)
+        if two_d:
+            pts = np.stack([x, y, np.zeros_like(x)], axis=1).astype(np.float32)
+        else:
+            pts = np.stack([x, y, z], axis=1).astype(np.float32)
+        num_pts = pts.shape[0]
+        pcd = None
+        if num_pts > 0:
+            pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+            # Simple, high-contrast coloring: black points on white background
+            colors = np.zeros((num_pts, 3), dtype=np.float64)
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # Offscreen renderer
+        renderer = o3d.visualization.rendering.OffscreenRenderer(width, height)
+        mat = o3d.visualization.rendering.MaterialRecord()
+        mat.shader = "defaultUnlit"
+        try:
+            mat.point_size = 6.0
+        except Exception:
+            pass
+        scene = renderer.scene
+        scene.set_background([1.0, 1.0, 1.0, 1.0])
+        if pcd is not None:
+            scene.add_geometry("pc", pcd, mat)
+
+        # Add 3D axes as line geometry (perspective-projected in 3D mode)
+        # X: [-R, +R], Y: [0, +R], Z: [-R, +R]
+        R_default = 10.0
+        if (
+            isinstance(max_range, (int, float))
+            and np.isfinite(max_range)
+            and max_range > 0
+        ):
+            R = float(max_range)
+        else:
+            # Fallback based on data span
+            span_x = float(np.ptp(x)) if x.size else 0.0
+            span_y = float(np.ptp(y)) if y.size else 0.0
+            span_z = float(np.ptp(z)) if (not two_d and z.size) else 0.0
+            guess = max(span_x, span_y, span_z, R_default)
+            R = guess if guess > 1e-3 else R_default
+        axis_pts = [
+            [-R, 0.0, 0.0],
+            [R, 0.0, 0.0],  # X
+            [0.0, 0.0, 0.0],
+            [0.0, R, 0.0],  # Y (positive only)
+        ]
+        axis_lines = [[0, 1], [2, 3]]
+        axis_colors = [
+            [0.0, 0.0, 0.0],  # X black
+            [
+                0.0,
+                0.0,
+                0.0,
+            ],  # Y black (thin desired; renderer may not support per-line width)
+        ]
+        if not two_d:
+            # Add Z axis for 3D visualization
+            axis_pts += [[0.0, 0.0, -R], [0.0, 0.0, R]]
+            axis_lines += [[4, 5]]
+            axis_colors += [[0.0, 0.0, 0.0]]
+        axes = o3d.geometry.LineSet(
+            points=o3d.utility.Vector3dVector(np.array(axis_pts, dtype=np.float32)),
+            lines=o3d.utility.Vector2iVector(np.array(axis_lines, dtype=np.int32)),
+        )
+        axes.colors = o3d.utility.Vector3dVector(
+            np.array(axis_colors, dtype=np.float32)
+        )
+        mat_axes = o3d.visualization.rendering.MaterialRecord()
+        mat_axes.shader = "unlitLine"
+        try:
+            mat_axes.line_width = 1.0  # Best-effort thinner line
+        except Exception:
+            pass
+        scene.add_geometry("axes", axes, mat_axes)
+
+        # Camera
+        if two_d:
+            # Orthographic top-down on XY: eye at (0, -d, 0), look towards +Y
+            d = (
+                float(max_range) * 1.2
+                if isinstance(max_range, (int, float)) and max_range > 0
+                else 20.0
+            )
+            # Aim at data centroid for better framing
+            cx0 = float(np.median(x)) if x.size else 0.0
+            cy0 = float(np.median(y)) if y.size else 0.0
+            cz0 = 0.0
+            eye = np.array([cx0, cy0 - d, cz0], dtype=np.float32)
+            center = np.array([cx0, cy0, cz0], dtype=np.float32)
+            up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            scene.camera.look_at(center.tolist(), eye.tolist(), up.tolist())
+            # Lock orthographic width to physical extent X in [-R, +R]
+            ortho_width = R * 2.0
+            scene.camera.set_projection(
+                ortho_width,
+                width / max(1, height),
+                0.01,
+                1000.0,
+                o3d.visualization.rendering.Camera.FovType.Orthographic,
+            )
+        else:
+            cxp, cyp, czp = float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])
+            yaw = float(cam_yaw_deg) * (np.pi / 180.0)
+            fwd = np.array([np.sin(yaw), np.cos(yaw), 0.0], dtype=np.float32)
+            eye = np.array([cxp, cyp, czp], dtype=np.float32)
+            # Look at data centroid rather than an infinite ray
+            cx0 = float(np.median(x)) if x.size else 0.0
+            cy0 = float(np.median(y)) if y.size else 0.0
+            cz0 = float(np.median(z)) if z.size else 0.0
+            center = np.array([cx0, cy0, cz0], dtype=np.float32)
+            up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+            far = (
+                float(max_range) * 2.0
+                if isinstance(max_range, (int, float)) and max_range > 0
+                else 50.0
+            )
+            near = 0.01
+            scene.camera.look_at(center.tolist(), eye.tolist(), up.tolist())
+            scene.camera.set_projection(
+                60.0,
+                width / max(1, height),
+                near,
+                far,
+                o3d.visualization.rendering.Camera.FovType.Vertical,
+            )
+
+        img = renderer.render_to_image()
+        if img is None:
+            # Produce empty canvas if rendering yielded nothing
+            blank = np.full((height, width, 3), 255, dtype=np.uint8)
+            try:
+                txt = f"pts={pts.shape[0]}"
+                cv2.putText(
+                    blank,
+                    txt,
+                    (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.rectangle(blank, (20, 20), (width - 20, height - 20), (0, 0, 0), 2)
+            except Exception:
+                pass
+            ok, out = cv2.imencode(".png", blank)
+            return out.tobytes() if ok else None
+        # Convert to numpy and encode
+        np_img = np.asarray(img)
+        if np_img.dtype != np.uint8:
+            np_img = np.clip(np_img * 255.0, 0, 255).astype(np.uint8)
+        if np_img.ndim == 2:
+            np_img = cv2.cvtColor(np_img, cv2.COLOR_GRAY2BGR)
+        elif np_img.shape[2] == 4:
+            np_img = cv2.cvtColor(np_img, cv2.COLOR_RGBA2BGR)
+        elif np_img.shape[2] == 3:
+            np_img = cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR)
+        # Overlay simple debug text and frame; also show axis labels/ranges
+        try:
+            txt = f"pts={pts.shape[0]}"
+            cv2.putText(
+                np_img,
+                txt,
+                (12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            h, w = np_img.shape[:2]
+            margin = 20
+            cv2.rectangle(
+                np_img, (margin, margin), (w - margin, h - margin), (0, 0, 0), 4
+            )
+            # Draw pixel-space axes overlay to guarantee visibility
+            y0 = h - margin  # Y=0 at bottom
+            x0 = w // 2  # X=0 at center
+            cv2.line(np_img, (margin, y0), (w - margin, y0), (0, 0, 0), 3)
+            cv2.line(np_img, (x0, h - margin), (x0, margin), (0, 0, 0), 3)
+            # Strong diagonals for visibility confirmation
+            cv2.line(
+                np_img, (margin, h - margin), (w - margin, margin), (200, 200, 200), 1
+            )
+            cv2.line(
+                np_img, (margin, margin), (w - margin, h - margin), (200, 200, 200), 1
+            )
+            # Axis labels (small)
+            label_scale = 0.6
+            label_th = 2
+            r_txt = f"R={R:.1f}m"
+            cv2.putText(
+                np_img,
+                "X [-R, +R] m",
+                (margin + 8, h - margin - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                label_scale,
+                (0, 0, 0),
+                label_th,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                np_img,
+                "Y [0, +R] m",
+                (margin + 8, margin + 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                label_scale,
+                (0, 0, 0),
+                label_th,
+                cv2.LINE_AA,
+            )
+            # Overlay 2D projection of points to guarantee visibility
+            if x.size and y.size:
+                # Map X in [-R, +R] to [margin, w - margin]
+                sx = (w - 2 * margin) / max(1e-6, (2.0 * R))
+                # Map Y in [0, +R] to [h - margin, margin]
+                sy = (h - 2 * margin) / max(1e-6, R)
+                px = (x + R) * sx + margin
+                py = (R - np.clip(y, 0.0, R)) * sy + margin
+                pts2d = np.stack([px, py], axis=1).astype(np.int32)
+                for p in pts2d:
+                    cx_i = int(np.clip(p[0], margin, w - margin))
+                    cy_i = int(np.clip(p[1], margin, h - margin))
+                    cv2.circle(
+                        np_img, (cx_i, cy_i), 5, (0, 0, 0), -1, lineType=cv2.LINE_AA
+                    )
+            # Big watermark for debug visibility
+            cv2.putText(
+                np_img,
+                "PC",
+                (w - 80, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (0, 0, 0),
+                3,
+                cv2.LINE_AA,
+            )
+        except Exception:
+            pass
+        ok, out = cv2.imencode(".png", np_img)
+        return out.tobytes() if ok else None
+    except Exception:
+        # Always return an empty image on error to avoid 204s with empty plots
+        try:
+            blank = np.full((height, width, 3), 255, dtype=np.uint8)
+            ok, out = cv2.imencode(".png", blank)
+            return out.tobytes() if ok else None
+        except Exception:
+            return None
+
+
+def _render_point_cloud_cv_png(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    intensity: np.ndarray,
+    width: int,
+    height: int,
+    cam_pos: tuple,
+    cam_yaw_deg: float,
+    max_range: Optional[float],
+    two_d: bool = False,
+) -> Optional[bytes]:
+    try:
+        canvas = np.full((int(height), int(width), 3), 255, dtype=np.uint8)
+        h, w = canvas.shape[:2]
+        margin = 20
+        # Border and axes
+        cv2.rectangle(canvas, (margin, margin), (w - margin, h - margin), (0, 0, 0), 2)
+        # Axis labels
+        R = (
+            float(max_range)
+            if isinstance(max_range, (int, float))
+            and np.isfinite(max_range)
+            and max_range > 0
+            else 10.0
+        )
+        cv2.putText(
+            canvas,
+            "X [-R, +R] m",
+            (margin + 8, h - margin - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            "Y [0, +R] m",
+            (margin + 8, margin + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        # Always draw axes in image space
+        y0 = h - margin
+        x0 = w // 2
+        cv2.line(canvas, (margin, y0), (w - margin, y0), (0, 0, 0), 2)
+        cv2.line(canvas, (x0, h - margin), (x0, margin), (0, 0, 0), 2)
+
+        # Colors from intensity (dark for high, light for low)
+        inten = (
+            np.asarray(intensity, dtype=np.float32)
+            if intensity is not None
+            else np.ones_like(x, dtype=np.float32)
+        )
+        if inten.size:
+            vals = inten[np.isfinite(inten)]
+            if vals.size:
+                vmin = float(np.percentile(vals, 1.0))
+                vmax = float(np.percentile(vals, 99.0))
+                if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin >= vmax:
+                    vmin = float(vals.min())
+                    vmax = float(vals.max()) if float(vals.max()) > vmin else vmin + 1.0
+            else:
+                vmin, vmax = 0.0, 1.0
+            norm = np.clip((inten - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
+            gray = 1.0 - (0.86 * norm + 0.08)
+            colors = (gray * 255.0).clip(0, 255).astype(np.uint8)
+        else:
+            colors = np.full_like(x, 0, dtype=np.uint8)
+
+        if two_d:
+            # Map X in [-R, +R] to [margin, w - margin]; Y in [0, +R] to [h - margin, margin]
+            sx = (w - 2 * margin) / max(1e-6, (2.0 * R))
+            sy = (h - 2 * margin) / max(1e-6, R)
+            px = (np.clip(x, -R, R) + R) * sx + margin
+            py = (R - np.clip(y, 0.0, R)) * sy + margin
+            pts2d = (
+                np.stack([px, py], axis=1).astype(np.int32)
+                if px.size
+                else np.zeros((0, 2), dtype=np.int32)
+            )
+        else:
+            # Simple 3D perspective projection with yaw around Z and camera at cam_pos
+            cx, cy, cz = float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])
+            yaw = float(cam_yaw_deg) * (np.pi / 180.0)
+            # Translate
+            X = x - cx
+            Y = y - cy
+            Z = z - cz
+            # Rotate by -yaw around Z
+            cos_y = np.cos(-yaw)
+            sin_y = np.sin(-yaw)
+            Xr = cos_y * X - sin_y * Y
+            Yr = sin_y * X + cos_y * Y
+            Zr = Z
+            # Define camera depth as forward along +Y' -> map to Zc, and Xc=X', Yc=Z (height)
+            Zc = Yr
+            Xc = Xr
+            Yc = Zr
+            # Perspective parameters
+            fov_deg = 60.0
+            fx = 0.5 * w / np.tan(np.deg2rad(fov_deg * 0.5))
+            fy = fx
+            cx_i = w * 0.5
+            cy_i = h * 0.8  # lift horizon higher
+            near = 0.1
+            far = max(10.0, 4.0 * R)
+            valid = np.isfinite(Zc) & (Zc > near) & (Zc < far)
+            Xc = Xc[valid]
+            Yc = Yc[valid]
+            Zc = Zc[valid]
+            colv = (
+                colors[valid]
+                if colors.size == valid.size
+                else np.full_like(Xc, 0, dtype=np.uint8)
+            )
+            if Zc.size:
+                u = fx * (Xc / Zc) + cx_i
+                v = fy * (-Yc / Zc) + cy_i
+                pts2d = np.stack([u, v], axis=1).astype(np.int32)
+                pts2d[:, 0] = np.clip(pts2d[:, 0], margin, w - margin)
+                pts2d[:, 1] = np.clip(pts2d[:, 1], margin, h - margin)
+                colors = colv
+            else:
+                pts2d = np.zeros((0, 2), dtype=np.int32)
+
+        # Draw points
+        for idx in range(pts2d.shape[0]):
+            p = pts2d[idx]
+            c = int(colors[idx]) if idx < len(colors) else 0
+            cv2.circle(
+                canvas, (int(p[0]), int(p[1])), 4, (c, c, c), -1, lineType=cv2.LINE_AA
+            )
+
+        # Debug text
+        cv2.putText(
+            canvas,
+            f"pts={int(x.size)}",
+            (12, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        ok, out = cv2.imencode(".png", canvas)
+        return out.tobytes() if ok else None
+    except Exception:
+        try:
+            blank = np.full((height, width, 3), 255, dtype=np.uint8)
+            ok, out = cv2.imencode(".png", blank)
+            return out.tobytes() if ok else None
+        except Exception:
+            return None
 
 
 def heatmap_to_png(
@@ -106,6 +610,7 @@ def render_point_cloud_png(
     *,
     cam_pos: tuple = (0.0, -1.0, 2.0),
     cam_yaw_deg: float = 0.0,
+    backend: str = "auto",
 ) -> Optional[bytes]:
     try:
         if not isinstance(point_cloud, dict):
@@ -116,10 +621,7 @@ def render_point_cloud_png(
             return None
         x = np.asarray(x).astype(np.float32)
         y = np.asarray(y).astype(np.float32)
-        if x.size == 0 or y.size == 0:
-            img = np.full((height, width, 3), 255, dtype=np.uint8)
-            ok, buf = cv2.imencode(".png", img)
-            return buf.tobytes() if ok else None
+        # Even with zero points we still want to draw axes
 
         # Optional z and intensity
         z_in = point_cloud.get("z")
@@ -148,308 +650,42 @@ def render_point_cloud_png(
         # Decide 2D/3D based on whether algorithm provided z
         use_3d = z_in is not None and np.any(np.isfinite(z))
         finite = finite3d if use_3d else finite2d
-        if not np.any(finite):
-            return None
-        x = x[finite]
-        y = y[finite]
-        z = z[finite]
-        inten = inten[finite]
-
-        img = np.full((height, width, 3), 255, dtype=np.uint8)
-
-        if use_3d:
-            # Perspective projection from camera parameters (yaw around Z, position cam_pos)
-            try:
-                cx, cy, cz = float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])
-            except Exception:
-                cx, cy, cz = 0.0, -1.0, 2.0
-            yaw = float(cam_yaw_deg) * (np.pi / 180.0)
-            c, s = np.cos(-yaw), np.sin(-yaw)  # rotate world into camera yaw frame
-            Rz = np.array(
-                [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32
-            )
-
-            P = np.stack([x - cx, y - cy, z - cz], axis=0)  # shape (3, N)
-            Q = Rz @ P
-            x_cam = Q[0, :]
-            y_cam = Q[1, :]
-            z_cam = Q[2, :]
-
-            # Keep points in front of camera (positive forward along +Y in camera frame)
-            fmask = y_cam > 1e-6
-            if not np.any(fmask):
-                ok, buf = cv2.imencode(".png", img)
-                return buf.tobytes() if ok else None
-            x_cam = x_cam[fmask]
-            y_cam = y_cam[fmask]
-            z_cam = z_cam[fmask]
-            inten_cam = inten[fmask]
-
-            # Perspective projection (pinhole) onto image plane at y=1
-            u = x_cam / y_cam
-            v = z_cam / y_cam
-
-            # Robust scaling to fit into canvas
-            max_abs = float(np.max(np.abs(np.concatenate([u, v])))) if u.size else 1.0
-            if not np.isfinite(max_abs) or max_abs <= 0:
-                max_abs = 1.0
-            scale = 0.45 * float(min(width, height)) / max_abs
-            cx_pix = (width - 1) * 0.5
-            cy_pix = (height - 1) * 0.5
-            px = np.clip((cx_pix + u * scale).astype(np.int32), 0, width - 1)
-            py = np.clip((cy_pix - v * scale).astype(np.int32), 0, height - 1)
-
-            # Intensity to grayscale (high intensity -> dark gray; low -> light gray)
-            inten_f = inten_cam.astype(np.float32)
-            finite_i = np.isfinite(inten_f)
-            if np.any(finite_i):
-                vals = inten_f[finite_i]
-                vmin = float(np.percentile(vals, 1.0))
-                vmax = float(np.percentile(vals, 99.0))
-                if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin >= vmax:
-                    vmin = float(np.min(vals))
-                    vmax = float(np.max(vals))
-                    if vmin >= vmax:
-                        vmax = vmin + 1.0
-                norm = (inten_f - vmin) / (vmax - vmin)
-                norm = np.clip(norm, 0.0, 1.0)
-            else:
-                norm = np.zeros_like(inten_f, dtype=np.float32)
-            # Map: 1.0 -> ~30 (dark), 0.0 -> ~230 (light)
-            gray = (255.0 - (norm * 220.0 + 20.0)).astype(np.int32)
-            gray = np.clip(gray, 0, 255)
-            for xi, yi, gi in zip(px, py, gray):
-                g = int(gi)
-                cv2.circle(img, (int(xi), int(yi)), 2, (g, g, g), -1)
+        if np.any(finite):
+            x = x[finite]
+            y = y[finite]
+            z = z[finite]
+            inten = inten[finite]
         else:
-            # Original 2D rendering path (ignore z)
-            if (
-                isinstance(max_range, (int, float))
-                and np.isfinite(max_range)
-                and max_range > 0
-            ):
-                x_min, x_max = -float(max_range), float(max_range)
-                y_min, y_max = 0.0, float(max_range)
-            else:
-                x_min = float(np.percentile(x, 1.0))
-                x_max = float(np.percentile(x, 99.0))
-                y_min = float(np.percentile(y, 1.0))
-                y_max = float(np.percentile(y, 99.0))
-            if (
-                not np.isfinite(x_min)
-                or not np.isfinite(x_max)
-                or not np.isfinite(y_min)
-                or not np.isfinite(y_max)
-            ):
-                return None
-            if x_max <= x_min:
-                x_max = x_min + 1e-3
-            if y_max <= y_min:
-                y_max = y_min + 1e-3
-            nx = (x - x_min) / (x_max - x_min)
-            ny = (y - y_min) / (y_max - y_min)
-            px = np.clip((nx * (width - 1)).astype(np.int32), 0, width - 1)
-            py = np.clip(((1.0 - ny) * (height - 1)).astype(np.int32), 0, height - 1)
-            for xi, yi in zip(px, py):
-                cv2.circle(img, (int(xi), int(yi)), 2, (0, 180, 0), -1)
+            # Keep arrays empty; renderer will draw axes on white canvas
+            x = x[:0]
+            y = y[:0]
+            z = z[:0]
+            inten = inten[:0]
 
-        try:
-            img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        except Exception:
-            pass
-
-        # Draw axes and ranges after rotation for correct orientation
-        try:
-            h, w = img.shape[:2]
-            base_thickness = max(1, int(round(min(h, w) / 240)))
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            # Make labels half the previous size
-            font_scale = max(0.2, min(0.4, base_thickness * 0.35))
-            margin = max(8, base_thickness * 6)
-
-            if use_3d:
-                # Projected axes through camera perspective
-                axis_len_world = (
-                    max(1.0, float(max_range) * 0.2)
-                    if isinstance(max_range, (int, float)) and max_range > 0
-                    else 2.0
-                )
-                # Build world points for axis endpoints from world origin (0,0,0)
-                axes_world = np.array(
-                    [
-                        [0.0, 0.0, 0.0],
-                        [axis_len_world, 0.0, 0.0],  # +X
-                        [0.0, axis_len_world, 0.0],  # +Y
-                        [0.0, 0.0, axis_len_world],  # +Z
-                    ],
-                    dtype=np.float32,
-                ).T  # shape (3,4)
-                # Transform to camera frame
-                cx, cy, cz = float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2])
-                yaw = float(cam_yaw_deg) * (np.pi / 180.0)
-                c_, s_ = np.cos(-yaw), np.sin(-yaw)
-                Rz = np.array(
-                    [[c_, -s_, 0.0], [s_, c_, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32
-                )
-                Pw = axes_world - np.array([[cx], [cy], [cz]], dtype=np.float32)
-                Pc = Rz @ Pw
-                # Perspective projection
-                y_cam_axis = Pc[1, :]
-                mask = y_cam_axis > 1e-6
-                if np.sum(mask) >= 2:
-                    u = Pc[0, mask] / y_cam_axis[mask]
-                    v = Pc[2, mask] / y_cam_axis[mask]
-                    max_abs = (
-                        float(np.max(np.abs(np.concatenate([u, v])))) if u.size else 1.0
-                    )
-                    if not np.isfinite(max_abs) or max_abs <= 0:
-                        max_abs = 1.0
-                    scale = 0.45 * float(min(width, height)) / max_abs
-                    cx_pix = (width - 1) * 0.5
-                    cy_pix = (height - 1) * 0.5
-                    px_axis = (cx_pix + u * scale).astype(np.int32)
-                    py_axis = (cy_pix - v * scale).astype(np.int32)
-                    # Map back into full list order with fallbacks
-                    pts = [(int(px_axis[0]), int(py_axis[0]))] + [None, None]
-                    if len(px_axis) > 1:
-                        pts[1] = (int(px_axis[1]), int(py_axis[1]))
-                    if len(px_axis) > 2:
-                        pts[2] = (int(px_axis[2]), int(py_axis[2]))
-                    if len(px_axis) > 3:
-                        pts.append((int(px_axis[3]), int(py_axis[3])))
-                    # Draw lines from origin to endpoints if they were projected
-                    origin_pt = pts[0]
-                    if origin_pt and len(pts) >= 4:
-                        if pts[1]:
-                            cv2.arrowedLine(
-                                img,
-                                origin_pt,
-                                pts[1],
-                                (0, 0, 255),
-                                base_thickness,
-                                tipLength=0.2,
-                            )
-                            cv2.putText(
-                                img,
-                                "X",
-                                (pts[1][0] + 4, pts[1][1] + 4),
-                                font,
-                                font_scale,
-                                (0, 0, 255),
-                                base_thickness,
-                            )
-                        if pts[2]:
-                            cv2.arrowedLine(
-                                img,
-                                origin_pt,
-                                pts[2],
-                                (0, 128, 0),
-                                base_thickness,
-                                tipLength=0.2,
-                            )
-                            cv2.putText(
-                                img,
-                                "Y",
-                                (pts[2][0] + 4, pts[2][1] + 4),
-                                font,
-                                font_scale,
-                                (0, 128, 0),
-                                base_thickness,
-                            )
-                        if pts[3]:
-                            cv2.arrowedLine(
-                                img,
-                                origin_pt,
-                                pts[3],
-                                (255, 0, 0),
-                                base_thickness,
-                                tipLength=0.2,
-                            )
-                            cv2.putText(
-                                img,
-                                "Z",
-                                (pts[3][0] + 4, pts[3][1] + 4),
-                                font,
-                                font_scale,
-                                (255, 0, 0),
-                                base_thickness,
-                            )
-
-                # Ranges text
-                try:
-                    x_min = float(np.percentile(x, 1.0))
-                    x_max = float(np.percentile(x, 99.0))
-                    y_min = float(np.percentile(y, 1.0))
-                    y_max = float(np.percentile(y, 99.0))
-                    z_min = float(np.percentile(z, 1.0))
-                    z_max = float(np.percentile(z, 99.0))
-                except Exception:
-                    x_min = x_max = y_min = y_max = z_min = z_max = 0.0
-                text = f"X:[{x_min:.1f},{x_max:.1f}]  Y:[{y_min:.1f},{y_max:.1f}]  Z:[{z_min:.1f},{z_max:.1f}] m"
-                cv2.putText(
-                    img,
-                    text,
-                    (margin, margin + int(16 * font_scale)),
-                    font,
-                    font_scale,
-                    (0, 0, 0),
-                    base_thickness,
-                )
-            else:
-                # Draw X and Y axes and labels (image coordinates: origin top-left)
-                # Center Y-axis at mid X per requirement
-                x0 = w // 2
-                y0 = h - margin
-                x1 = w - margin
-                y1 = margin
-                # X axis
-                cv2.line(img, (margin, y0), (x1, y0), (0, 0, 0), base_thickness)
-                # Y axis through center X (thinner)
-                y_th = max(1, base_thickness // 2)
-                cv2.line(img, (x0, y0), (x0, y1), (0, 0, 0), y_th)
-
-                # Ticks
-                # No ticks for now per requirement
-
-                # Range labels
-                try:
-                    if (
-                        isinstance(max_range, (int, float))
-                        and np.isfinite(max_range)
-                        and max_range > 0
-                    ):
-                        x_min, x_max = -float(max_range), float(max_range)
-                        y_min, y_max = 0.0, float(max_range)
-                    else:
-                        x_min = float(np.percentile(x, 1.0))
-                        x_max = float(np.percentile(x, 99.0))
-                        y_min = float(np.percentile(y, 1.0))
-                        y_max = float(np.percentile(y, 99.0))
-                except Exception:
-                    x_min = x_max = y_min = y_max = 0.0
-                label_x = f"X: [{x_min:.1f}, {x_max:.1f}] m"
-                label_y = f"Y: [{y_min:.1f}, {y_max:.1f}] m"
-                cv2.putText(
-                    img,
-                    label_x,
-                    (x0 + 6, y0 - 6),
-                    font,
-                    font_scale,
-                    (0, 0, 0),
-                    base_thickness,
-                )
-                cv2.putText(
-                    img,
-                    label_y,
-                    (x0 + 6, y1 + int(16 * font_scale)),
-                    font,
-                    font_scale,
-                    (0, 0, 0),
-                    base_thickness,
-                )
-        except Exception:
-            pass
-        ok, buf = cv2.imencode(".png", img)
-        return buf.tobytes() if ok else None
+        # Choose high-quality renderer: Matplotlib for 2D, Open3D for 3D
+        be = (backend or "auto").lower()
+        if not use_3d:
+            # 2D path uses Matplotlib Agg for quality
+            return _render_point_cloud_mpl_png(
+                x,
+                y,
+                inten,
+                width,
+                height,
+                max_range,
+            )
+        # 3D path prefers Open3D
+        return _render_point_cloud_o3d_png(
+            x,
+            y,
+            z,
+            inten,
+            width,
+            height,
+            cam_pos,
+            cam_yaw_deg,
+            max_range,
+            two_d=False,
+        )
     except Exception:
         return None

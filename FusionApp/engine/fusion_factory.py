@@ -20,6 +20,8 @@ class FusionFactory:
     def create_live_fusion(
         camera_config: Optional[D455Config] = None,
         radar_config: Optional[DCA1000Config] = None,
+        *,
+        radar_config_file_override: Optional[str] = None,
     ) -> FusionEngine:
         """
         Create a FusionEngine for live camera + radar mode.
@@ -37,18 +39,26 @@ class FusionFactory:
             "type": "DCA1000EVM",
             "dest_dir": radar_config.dest_dir if radar_config else CFGS.DEST_DIR,
             "config_file": (
-                radar_config.radar_config_file
-                if radar_config
-                else CFGS.AWR2243_CONFIG_FILE
+                radar_config_file_override
+                if radar_config_file_override
+                else (
+                    radar_config.radar_config_file
+                    if radar_config
+                    else CFGS.AWR2243_CONFIG_FILE
+                )
             ),
         }
 
         radar_analyser_config = {
             "type": "RadarHeatmapAnalyser",
             "config_file": (
-                radar_config.radar_config_file
-                if radar_config
-                else CFGS.AWR2243_CONFIG_FILE
+                radar_config_file_override
+                if radar_config_file_override
+                else (
+                    radar_config.radar_config_file
+                    if radar_config
+                    else CFGS.AWR2243_CONFIG_FILE
+                )
             ),
         }
 
@@ -69,6 +79,8 @@ class FusionFactory:
     @staticmethod
     def create_live_radar_only(
         radar_config: Optional[DCA1000Config] = None,
+        *,
+        radar_config_file_override: Optional[str] = None,
     ) -> FusionEngine:
         """
         Create a FusionEngine for live radar-only mode.
@@ -85,18 +97,26 @@ class FusionFactory:
             "type": "DCA1000EVM",
             "dest_dir": radar_config.dest_dir if radar_config else CFGS.DEST_DIR,
             "config_file": (
-                radar_config.radar_config_file
-                if radar_config
-                else CFGS.AWR2243_CONFIG_FILE
+                radar_config_file_override
+                if radar_config_file_override
+                else (
+                    radar_config.radar_config_file
+                    if radar_config
+                    else CFGS.AWR2243_CONFIG_FILE
+                )
             ),
         }
 
         radar_analyser_config = {
             "type": "RadarHeatmapAnalyser",
             "config_file": (
-                radar_config.radar_config_file
-                if radar_config
-                else CFGS.AWR2243_CONFIG_FILE
+                radar_config_file_override
+                if radar_config_file_override
+                else (
+                    radar_config.radar_config_file
+                    if radar_config
+                    else CFGS.AWR2243_CONFIG_FILE
+                )
             ),
         }
 

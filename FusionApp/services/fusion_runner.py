@@ -11,7 +11,7 @@ from utils import setup_logger
 from engine.fusion_factory import FusionFactory
 from engine.fusion_engine import FusionEngine
 
-from render.encoders import encode_jpeg, heatmap_to_png, render_point_cloud_png
+from render.encoders import encode_jpeg, heatmap_to_png
 from services.radar_hw import radar_hw_init, radar_hw_cleanup
 
 
@@ -83,7 +83,7 @@ class FusionRunner:
         self._camera_connected: bool = False
         self._radar_only: bool = False
 
-    def start(self, radar_only: bool = False) -> bool:
+    def start(self, radar_only: bool = False, radar_config_file: Optional[str] = None) -> bool:
         if self._running or self._starting:
             return False
         self._failed = False
@@ -106,9 +106,9 @@ class FusionRunner:
 
         fusion_engine: FusionEngine
         fusion_engine = (
-            FusionFactory.create_live_radar_only()
+            FusionFactory.create_live_radar_only(radar_config_file_override=radar_config_file)
             if radar_only
-            else FusionFactory.create_live_fusion()
+            else FusionFactory.create_live_fusion(radar_config_file_override=radar_config_file)
         )
 
         from multiprocessing import Process
@@ -124,7 +124,12 @@ class FusionRunner:
             ),
         )
         try:
-            ok_hw = radar_hw_init()
+            # Ensure HW init uses the same config file as analyser
+            try:
+                radar_cfg_path = fusion_engine.radar_analyser_config.get("config_file")
+            except Exception:
+                radar_cfg_path = radar_config_file
+            ok_hw = radar_hw_init(radar_cfg_path)
             if not ok_hw:
                 self.logger.error(
                     "Radar HW init failed; proceeding to start engine anyway"
@@ -563,25 +568,32 @@ class FusionRunner:
             )
         return None
 
-    def _render_point_cloud_png(
-        self,
-        width: int = 640,
-        height: int = 480,
-        *,
-        cam_pos: tuple = (0.0, -1.0, 2.0),
-        cam_yaw_deg: float = 0.0,
-    ) -> Optional[bytes]:
+    def get_latest_point_cloud_json(self) -> Optional[Dict[str, Any]]:
         try:
-            pc = self._latest_point_cloud or {}
-            return render_point_cloud_png(
-                pc,
-                width=width,
-                height=height,
-                cam_pos=cam_pos,
-                cam_yaw_deg=cam_yaw_deg,
-            )
+            pc = self._latest_point_cloud or None
+            if not isinstance(pc, dict):
+                return None
+            x = pc.get("x")
+            y = pc.get("y")
+            if x is None or y is None:
+                return None
+            z = pc.get("z")
+            inten = pc.get("intensity", pc.get("snr"))
+            mr = pc.get("max_range")
+            ms = pc.get("max_speed")
+            # Convert to lists for JSON
+            result = {
+                "x": list(map(float, x)) if hasattr(x, "__len__") else [],
+                "y": list(map(float, y)) if hasattr(y, "__len__") else [],
+                "z": list(map(float, z)) if (z is not None and hasattr(z, "__len__")) else None,
+                "intensity": list(map(float, inten)) if (inten is not None and hasattr(inten, "__len__")) else None,
+                "max_range": float(mr) if isinstance(mr, (int, float)) else None,
+                "max_speed": float(ms) if isinstance(ms, (int, float)) else None,
+            }
+            return result
         except Exception:
             return None
+
 
     def get_status(self) -> Dict[str, Any]:
         with self._stats_lock:
