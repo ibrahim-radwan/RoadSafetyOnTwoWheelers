@@ -824,7 +824,7 @@ def openradar_pd_process_frame_optimised(frame, adc_params: ADCParams, IS_INDOOR
     )
 
     x_pos, y_pos = ranges_angles_to_xy(ranges, azimuths)
-    z_pos = np.zeros_like(x_pos)  # Assuming targets are at ground level
+    z_pos = None  # This algorithm does not provide z_pos
     velocities = dopplers
     conversion_time = time.perf_counter() - step_start
     logger.debug(

@@ -1,35 +1,122 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Fusion Live Server</title>
+  <script>
+    window.radar_config_options = {{ radar_config_options | tojson | safe if radar_config_options is defined else '[]' }};
+  </script>
   <style>
-    body { font-family: Arial, sans-serif; margin: 12px; }
-    .row { display: flex; gap: 12px; margin-bottom: 12px; }
-    .col { flex: 1; }
-    .panel { border: 1px solid #ccc; padding: 8px; border-radius: 6px; }
-    button { padding: 8px 12px; margin-right: 8px; }
-    img { max-width: 100%; height: auto; }
-    pre { background: #f6f8fa; padding: 8px; overflow: auto; }
-    .proc-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
-    .proc { display: inline-block; min-height: 48px; border: 1px solid #bbb; border-radius: 6px; padding: 8px; text-align: center; font-weight: 600; }
-    .proc.white { background: #fff; color: #333; }
-    .proc.red { background: #ffebeb; border-color: #e55; color: #900; }
-    .proc.yellow { background: #fff7db; border-color: #e5c100; color: #8a6d00; }
-    .proc.green { background: #e8ffe8; border-color: #6c6; color: #060; }
-    .meta { font-size: 12px; font-weight: normal; margin-top: 4px; color: #555; }
+    body {
+      font-family: Arial, sans-serif;
+      margin: 12px;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .col {
+      flex: 1;
+    }
+
+    .panel {
+      border: 1px solid #ccc;
+      padding: 8px;
+      border-radius: 6px;
+    }
+
+    button {
+      padding: 8px 12px;
+      margin-right: 8px;
+    }
+
+    img {
+      max-width: 100%;
+      height: auto;
+    }
+
+    pre {
+      background: #f6f8fa;
+      padding: 8px;
+      overflow: auto;
+    }
+
+    .proc-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+    }
+
+    .proc {
+      display: inline-block;
+      min-height: 48px;
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      padding: 8px;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .proc.white {
+      background: #fff;
+      color: #333;
+    }
+
+    .proc.red {
+      background: #ffebeb;
+      border-color: #e55;
+      color: #900;
+    }
+
+    .proc.yellow {
+      background: #fff7db;
+      border-color: #e5c100;
+      color: #8a6d00;
+    }
+
+    .proc.green {
+      background: #e8ffe8;
+      border-color: #6c6;
+      color: #060;
+    }
+
+    .meta {
+      font-size: 12px;
+      font-weight: normal;
+      margin-top: 4px;
+      color: #555;
+    }
+
     /* rotation via server-side; keep class unused */
-    .rotate-ccw { }
-    .gap { display: inline-block; width: 16px; }
-    #radar_view { display: block; width: 640px; height: 480px; }
+    .rotate-ccw {}
+
+    .gap {
+      display: inline-block;
+      width: 16px;
+    }
+
+    #radar_view {
+      display: block;
+      width: 640px;
+      height: 480px;
+    }
   </style>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <script>
     let streamActive = false;
     let isRunning = false;
     async function systemStart() {
       const ro = document.getElementById('radar_only').checked ? '?radar_only=1' : '';
-      await fetch('/system/start' + ro, { method: 'POST' });
+      const sep = ro.includes('?') ? '&' : '?';
+      const sel = document.getElementById('radar_cfg_sel');
+      const cfg = sel && sel.value ? ('radar_cfg=' + encodeURIComponent(sel.value)) : '';
+      const url = '/system/start' + ro + (cfg ? (sep + cfg) : '');
+      await fetch(url, { method: 'POST' });
     }
     async function systemStop() {
       await fetch('/system/stop', { method: 'POST' });
@@ -49,8 +136,8 @@
             isRunning = j.running;
             if (!isRunning) { if (videoTimer) clearInterval(videoTimer); if (radarTimer) clearInterval(radarTimer); }
           }
-        } catch(e) {}
-      } catch(e) { console.error(e); }
+        } catch (e) { }
+      } catch (e) { console.error(e); }
     }
     function setupStatusSSE() {
       if (!!window.EventSource) {
@@ -58,7 +145,7 @@
           const es = new EventSource('/status/stream');
           es.onmessage = (ev) => {
             let j = null;
-            try { j = JSON.parse(ev.data); document.getElementById('status').textContent = JSON.stringify(j, null, 2); renderTimes(j); } catch(e) {}
+            try { j = JSON.parse(ev.data); document.getElementById('status').textContent = JSON.stringify(j, null, 2); renderTimes(j); } catch (e) { }
             // Gate polling based on running state
             try {
               if (j && typeof j.running === 'boolean') {
@@ -72,12 +159,12 @@
                   if (radarTimer) clearInterval(radarTimer);
                 }
               }
-            } catch(e) {}
+            } catch (e) { }
             // Refresh processes grid every tick
             fetchProcesses();
           };
           es.onerror = (e) => { console.warn('SSE error; falling back to polling'); es.close(); setInterval(refreshStatus, 1000); };
-        } catch(e) { setInterval(refreshStatus, 1000); }
+        } catch (e) { setInterval(refreshStatus, 1000); }
       } else {
         setInterval(refreshStatus, 1000);
       }
@@ -122,8 +209,13 @@
     }
     async function fetchRadarFrame() {
       if (!isRunning) return;
+      if (radarMode === 'pc2d' || radarMode === 'pc3d') {
+        await renderPlotlyPC(radarMode === 'pc3d');
+        return;
+      }
       const el = document.getElementById('radar_view');
-      el.src = '/radar/frame.png?mode=' + encodeURIComponent(radarMode) + '&_=' + Date.now();
+      const url = '/radar/frame.png?mode=' + encodeURIComponent(radarMode) + '&_=' + Date.now();
+      el.src = url;
     }
     function bindViewerControls() {
       // Defaults to 1 fps
@@ -139,17 +231,136 @@
       document.getElementById('radar_next').addEventListener('click', () => { clearInterval(radarTimer); fetchRadarFrame(); });
       document.querySelectorAll('[data-rmode]').forEach(b => b.addEventListener('click', (e) => {
         const m = e.target.getAttribute('data-rmode');
-        if (m) { radarMode = m; fetchRadarFrame(); scheduleRadarPoll(); }
+        if (m) {
+          radarMode = m;
+          toggleRadarTargets(m);
+          fetchRadarFrame();
+          scheduleRadarPoll();
+        }
       }));
-      // Do not schedule until running becomes true (via SSE/status)
     }
+
+    function toggleRadarTargets(mode) {
+      const img = document.getElementById('radar_view');
+      const div = document.getElementById('radar_plot');
+      if (mode === 'pc2d' || mode === 'pc3d') {
+        img.style.display = 'none';
+        div.style.display = 'block';
+      } else {
+        img.style.display = 'block';
+        div.style.display = 'none';
+      }
+    }
+
+    async function renderPlotlyPC(is3D) {
+      try {
+        const r = await fetch('/radar/pc.json?_=' + Date.now());
+        if (!r.ok) { return; }
+        const j = await r.json();
+        console.log('PC json keys', Object.keys(j || {}));
+        const x = j.x || [];
+        const y = j.y || [];
+        const z = j.z || null;
+        const inten = j.intensity || null;
+        const mr = (typeof j.max_range === 'number' && isFinite(j.max_range) && j.max_range > 0) ? j.max_range : 10.0;
+        const div = document.getElementById('radar_plot');
+        if (typeof Plotly === 'undefined') { div.innerHTML = 'Plotly not loaded'; return; }
+        // Intensity to grayscale (dark for high)
+        let colors;
+        if (inten && inten.length === x.length) {
+          const vals = inten.filter(v => Number.isFinite(v));
+          let vmin = 0, vmax = 1;
+          if (vals.length) {
+            vals.sort((a, b) => a - b);
+            const p = (p) => vals[Math.max(0, Math.min(vals.length - 1, Math.floor(p * (vals.length - 1))))];
+            vmin = p(0.01);
+            vmax = p(0.99);
+            if (!(isFinite(vmin) && isFinite(vmax)) || vmin >= vmax) { vmin = vals[0]; vmax = vals[vals.length - 1] || (vmin + 1); }
+          }
+          colors = inten.map(v => {
+            const t = Math.max(0, Math.min(1, (v - vmin) / (vmax - vmin + 1e-6)));
+            const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
+            return `rgb(${g},${g},${g})`;
+          });
+        } else {
+          colors = 'rgb(0,0,0)';
+        }
+        console.log('PC plot', { n: x.length, is3D, mr });
+        if (!is3D) {
+          const trace = {
+            x: x,
+            y: y,
+            mode: 'markers',
+            type: 'scattergl',
+            marker: { size: 5, color: colors },
+          };
+          const layout = {
+            paper_bgcolor: 'white',
+            plot_bgcolor: 'white',
+            xaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true },
+            yaxis: { range: [0, +mr], tickmode: 'array', tickvals: [0, mr / 2, mr], ticktext: ['0', (mr / 2).toFixed(1), (+mr).toFixed(1)], title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true, scaleanchor: 'x', scaleratio: 1 },
+            margin: { l: 20, r: 20, t: 20, b: 20 },
+            showlegend: false,
+          };
+          Plotly.react(div, [trace], layout, { staticPlot: true, displayModeBar: false });
+        } else {
+          // Build finite arrays only to avoid WebGL NaNs
+          const zFilled = (z && z.length === x.length) ? z : new Array(x.length).fill(0);
+          const fx = []; const fy = []; const fz = [];
+          for (let i = 0; i < x.length; i++) {
+            const xi = x[i]; const yi = y[i]; const zi = zFilled[i];
+            if (isFinite(xi) && isFinite(yi) && isFinite(zi)) { fx.push(xi); fy.push(yi); fz.push(zi); }
+          }
+          console.log('PC3D filtered lengths', { x: fx.length, y: fy.length, z: fz.length });
+          const trace = {
+            x: fx,
+            y: fy,
+            z: fz,
+            mode: 'markers',
+            type: 'scatter3d',
+            marker: { size: 4, color: 'black' },
+            hoverinfo: 'skip',
+            showlegend: false,
+          };
+          // Dummy transparent anchors to force axes to appear even if no points
+          const anchor = {
+            x: [-mr, +mr], y: [0, 0], z: [0, 0], mode: 'markers', type: 'scatter3d',
+            marker: { size: 1, color: 'rgba(0,0,0,0)' }, hoverinfo: 'skip', showlegend: false
+          };
+          // Visible axis guide lines
+          const axisX = { x: [-mr, +mr], y: [0, 0], z: [0, 0], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
+          const axisY = { x: [0, 0], y: [0, +mr], z: [0, 0], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
+          const axisZ = { x: [0, 0], y: [0, 0], z: [-mr, +mr], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
+          // Preserve camera across updates
+          let prevCam = null;
+          try { prevCam = (div._fullLayout && div._fullLayout.scene && div._fullLayout.scene._scene) ? div._fullLayout.scene.camera : (div._fullLayout && div._fullLayout.scene && div._fullLayout.scene.camera); } catch (e) { }
+          const initCam = prevCam || { eye: { x: 0, y: -1, z: 2 } };
+          const layout = {
+            paper_bgcolor: 'white',
+            scene: {
+              xaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              yaxis: { range: [0, +mr], tickmode: 'array', tickvals: [0, mr / 2, mr], ticktext: ['0', (mr / 2).toFixed(1), (+mr).toFixed(1)], title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              zaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'Z (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              camera: initCam,
+              bgcolor: 'white',
+              aspectmode: 'cube',
+            },
+            margin: { l: 0, r: 0, t: 0, b: 0 },
+            showlegend: false,
+            uirevision: 'pc3d',
+          };
+          Plotly.react(div, [trace, axisX, axisY, axisZ, anchor], layout, { staticPlot: false, displayModeBar: false });
+        }
+      } catch (e) { console.error(e); }
+    }
+    // Do not schedule until running becomes true (via SSE/status)
     async function fetchProcesses() {
       try {
         const r = await fetch('/status/processes');
         if (!r.ok) { renderProcesses([]); return; }
         const j = await r.json();
         renderProcesses(j.process_statuses || []);
-      } catch(e) { renderProcesses([]); }
+      } catch (e) { renderProcesses([]); }
     }
     function renderProcesses(list) {
       const container = document.getElementById('proc_grid');
@@ -191,12 +402,12 @@
         document.getElementById('rad_total').textContent = j.radar_frames_total || 0;
         document.getElementById('cam_fps').textContent = (j.camera_write_fps_5s || 0).toFixed(2);
         document.getElementById('rad_fps').textContent = (j.radar_write_fps_5s || 0).toFixed(2);
-        const mb = (j.total_bytes_written || 0) / (1024*1024);
-        const mbs = (j.avg_bandwidth_5s_bps || 0) / (1024*1024);
+        const mb = (j.total_bytes_written || 0) / (1024 * 1024);
+        const mbs = (j.avg_bandwidth_5s_bps || 0) / (1024 * 1024);
         document.getElementById('bytes_total').textContent = mb.toFixed(2);
         document.getElementById('bw_bps').textContent = mbs.toFixed(2);
         document.getElementById('rec_dur').textContent = j.recording_duration_hms || '00:00:00';
-      } catch(e) {}
+      } catch (e) { }
     }
     // Init binds
     function init() {
@@ -208,77 +419,135 @@
     }
     window.addEventListener('load', init);
   </script>
-  </head>
-  <body>
-    <h2>Fusion Live Server</h2>
-    <div class="row">
-      <div class="col panel" style="flex:2;">
-        <h3>Controls</h3>
-        <label><input type="checkbox" id="radar_only"> Radar only</label>
-        <button onclick="systemStart()">Start System</button>
-        <button onclick="systemStop()">Stop System</button>
-        <button onclick="systemRetry()">Retry</button>
-        <button onclick="startRecord()">Start Recording</button>
-        <button onclick="stopRecord()">Stop Recording</button>
-      </div>
-      <div class="col panel" style="flex:1;">
-        <h3>Recording Stats</h3>
-        <div id="rec_dir" class="meta"></div>
-        <div class="meta">Camera frames: <span id="cam_total">0</span> | write FPS(5s): <span id="cam_fps">0.00</span></div>
-        <div class="meta">Radar frames: <span id="rad_total">0</span> | write FPS(5s): <span id="rad_fps">0.00</span></div>
-        <div class="meta">Total data: <span id="bytes_total">0.00</span> MB | Duration: <span id="rec_dur">00:00:00</span></div>
-        <div class="meta">Avg bandwidth(5s): <span id="bw_bps">0.00</span> MB/s</div>
-      </div>
-    </div>
-    <div class="row">
-      <div class="col panel">
-        <h3>Processes</h3>
-        <div id="proc_grid" class="proc-grid"></div>
-      </div>
-    </div>
-    <div class="row">
-      <div class="col panel">
-        <h3>Video</h3>
-        <div>
-          <label>Mode: </label>
-          <label><input type="radio" name="video_mode" value="live" checked> Live</label>
-          <label>FPS:</label>
-          <select id="video_fps">
-            <option selected>1</option><option>3</option><option>5</option><option>10</option><option>15</option><option>30</option>
-          </select>
-          <span class="gap"></span>
-          <label><input type="radio" name="video_mode" value="manual"> Manual</label>
-          <button id="video_next">Next frame</button>
-        </div>
-        <img id="video_view" alt="Video" />
-      </div>
-      <div class="col panel">
-        <h3>Radar</h3>
-        <div>
-          <label>Mode: </label>
-          <button data-rmode="rd">RD</button>
-          <button data-rmode="ra">RA</button>
-          <button data-rmode="pc">PC</button>
-          <label><input type="radio" name="radar_mode" value="live" checked> Live</label>
-          <label>FPS:</label>
-          <select id="radar_fps">
-            <option selected>1</option><option>2</option><option>5</option><option>10</option>
-          </select>
-          <span class="gap"></span>
-          <label><input type="radio" name="radar_mode" value="manual"> Manual</label>
-          <button id="radar_next">Next frame</button>
-        </div>
-        <img id="radar_view" alt="Radar" />
-      </div>
-    </div>
-    <div class="row">
-      <div class="col panel">
-        <h3>Status</h3>
-        <div id="times" class="meta"></div>
-        <pre id="status">{}</pre>
-      </div>
-    </div>
-  </body>
-  </html>
+  <script>
+    // Auto-apply on change (only when not running)
+    (function bindAutoApply() {
+      const sel = document.getElementById('radar_cfg_sel');
+      if (!sel) return;
+      async function apply(val) {
+        try {
+          if (isRunning) return; // guarded by disabled state too
+          const ro = document.getElementById('radar_only').checked ? '?radar_only=1' : '';
+          const sep = ro.includes('?') ? '&' : '?';
+          const url = '/system/start' + ro + sep + 'radar_cfg=' + encodeURIComponent(val || sel.value || '');
+          await fetch(url, { method: 'POST' });
+        } catch (e) { console.error(e); }
+      }
+      sel.addEventListener('change', () => apply(sel.value));
+    })();
+    // Disable config control while running
+    (function gateCfgByRunning() {
+      function setState(running) {
+        const sel = document.getElementById('radar_cfg_sel');
+        if (sel) sel.disabled = !!running;
+      }
+      setState(isRunning);
+      const _oldRenderTimes = window.renderTimes;
+      window.renderTimes = function (j) {
+        try { if (j && typeof j.running === 'boolean') setState(j.running); } catch (e) { }
+        if (typeof _oldRenderTimes === 'function') return _oldRenderTimes(j);
+      };
+    })();
+  </script>
+</head>
 
+<body>
+  <h2>Fusion Live Server</h2>
+  <div class="row">
+    <div class="col panel" style="flex:2;">
+      <h3>Controls</h3>
+      <label><input type="checkbox" id="radar_only"> Radar only</label>
+      <button onclick="systemStart()">Start System</button>
+      <button onclick="systemStop()">Stop System</button>
+      <button onclick="systemRetry()">Retry</button>
+      <button onclick="startRecord()">Start Recording</button>
+      <button onclick="stopRecord()">Stop Recording</button>
+      <div style="margin-top:8px;">
+        <label>Radar Config:</label>
+        <select id="radar_cfg_sel">
+          {% if radar_config_options %}
+          {% for o in radar_config_options %}
+          <option value="{{ o.path }}" {% if o.mode=='2D' and ('10m' in (o.label|lower)) %}selected{% endif %}>{{
+            o.label }}</option>
+          {% endfor %}
+          {% endif %}
+        </select>
+        <span class="meta">(only when not running)</span>
+      </div>
+    </div>
+    <div class="col panel" style="flex:1;">
+      <h3>Recording Stats</h3>
+      <div id="rec_dir" class="meta"></div>
+      <div class="meta">Camera frames: <span id="cam_total">0</span> | write FPS(5s): <span id="cam_fps">0.00</span>
+      </div>
+      <div class="meta">Radar frames: <span id="rad_total">0</span> | write FPS(5s): <span id="rad_fps">0.00</span>
+      </div>
+      <div class="meta">Total data: <span id="bytes_total">0.00</span> MB | Duration: <span id="rec_dur">00:00:00</span>
+      </div>
+      <div class="meta">Avg bandwidth(5s): <span id="bw_bps">0.00</span> MB/s</div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col panel">
+      <h3>Processes</h3>
+      <div id="proc_grid" class="proc-grid"></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col panel">
+      <h3>Video</h3>
+      <div>
+        <label>Mode: </label>
+        <label><input type="radio" name="video_mode" value="live" checked> Live</label>
+        <label>FPS:</label>
+        <select id="video_fps">
+          <option selected>1</option>
+          <option>3</option>
+          <option>5</option>
+          <option>10</option>
+          <option>15</option>
+          <option>30</option>
+        </select>
+        <span class="gap"></span>
+        <label><input type="radio" name="video_mode" value="manual"> Manual</label>
+        <button id="video_next">Next frame</button>
+      </div>
+      <img id="video_view" alt="Video" />
+    </div>
+    <div class="col panel">
+      <h3>Radar</h3>
+      <div>
+        <label>Mode: </label>
+        <button data-rmode="rd">RD</button>
+        <button data-rmode="ra">RA</button>
+        <button data-rmode="pc2d">PC-2D</button>
+        <button data-rmode="pc3d">PC-3D</button>
+        <label><input type="radio" name="radar_mode" value="live" checked> Live</label>
+        <label>FPS:</label>
+        <select id="radar_fps">
+          <option selected>1</option>
+          <option>2</option>
+          <option>5</option>
+          <option>10</option>
+        </select>
+        <span class="gap"></span>
+        <label><input type="radio" name="radar_mode" value="manual"> Manual</label>
+        <button id="radar_next">Next frame</button>
+      </div>
+      <div style="margin:8px 0;">
 
+      </div>
+      <img id="radar_view" alt="Radar" />
+      <div id="radar_plot" style="width:640px;height:480px;display:none;"></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col panel">
+      <h3>Status</h3>
+      <div id="times" class="meta"></div>
+      <pre id="status">{}</pre>
+    </div>
+  </div>
+</body>
+
+</html>

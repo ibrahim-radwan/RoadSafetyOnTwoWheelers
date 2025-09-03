@@ -48,8 +48,12 @@ class FusionRunner:
         # Provide attributes accessed by routes via properties
         pass
 
-    def start(self, radar_only: bool = False) -> bool:
-        return self._impl.start(radar_only=radar_only)
+    def start(
+        self, radar_only: bool = False, radar_config_file: Optional[str] = None
+    ) -> bool:
+        return self._impl.start(
+            radar_only=radar_only, radar_config_file=radar_config_file
+        )
 
     def stop(self) -> None:
         self._impl.stop()
@@ -87,11 +91,10 @@ class FusionRunner:
     def get_latest_ra_png(self) -> Optional[bytes]:
         return self._impl.get_latest_ra_png()
 
-    def _render_point_cloud_png(
-        self, width: int = 640, height: int = 480
-    ) -> Optional[bytes]:
-        return self._impl._render_point_cloud_png(width=width, height=height)
+    def get_latest_point_cloud_json(self) -> Optional[Dict[str, Any]]:
+        return self._impl.get_latest_point_cloud_json()
 
+    
     # Expose minimal state needed by routes (back-compat with existing checks)
     @property
     def _running(self) -> bool:
@@ -112,7 +115,35 @@ runner: Optional[FusionRunner] = None
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Build config options for radar configs
+    try:
+        from config_params import CFGS
+
+        base_dir = getattr(CFGS, "AWR2243_CONFIG_DIR", "")
+        names = getattr(CFGS, "AWR2243_CONFIG_FILE_NAMES", {})
+        options = []
+        for mode in ("2D", "3D"):
+            for fname in names.get(mode, []) or []:
+                # Extract distance like '10m' from filename parts
+                parts = fname.split("_")
+                dist = None
+                for p in parts:
+                    if p.endswith("m"):
+                        dist = p
+                        break
+                label = f"{mode} - {dist}" if dist else f"{mode} - {fname}"
+                options.append(
+                    {
+                        "mode": mode,
+                        "name": fname,
+                        "path": base_dir + fname,
+                        "label": label,
+                    }
+                )
+    except Exception:
+        options = []
+    # Pass options as JSON for client-side population
+    return render_template("index.html", radar_config_options=options)
 
 
 @app.route("/status")
@@ -138,7 +169,9 @@ def system_start():
     if runner is None:
         return ("runner not initialized", 503)
     radar_only = bool(request.args.get("radar_only", "0") in ("1", "true", "True"))
-    ok = runner.start(radar_only=radar_only)
+    # Optional radar config file selection (only when not running)
+    radar_cfg = request.args.get("radar_cfg")
+    ok = runner.start(radar_only=radar_only, radar_config_file=radar_cfg)
     if not ok and (runner._running or runner._starting):
         return ("already running or starting", 409)
     return (
@@ -251,6 +284,18 @@ def radar_range_azimuth_png():
     return resp
 
 
+@app.route("/radar/pc.json")
+def radar_point_cloud_json():
+    global runner
+    if runner is None or not runner._running:
+        return ("runner not started", 503)
+    data = runner.get_latest_point_cloud_json()
+    if data is None:
+        return jsonify({})
+    # Ensure z semantics: missing -> None; present but empty -> []
+    return jsonify(data)
+
+
 @app.route("/results/detections")
 def results_detections():
     # Deprecated per UI; keep for backward compatibility with 204
@@ -267,8 +312,9 @@ def radar_frame_png():
         png = runner.get_latest_rd_png()
     elif mode == "ra":
         png = runner.get_latest_ra_png()
-    elif mode == "pc":
-        png = runner._render_point_cloud_png(width=640, height=480)
+    elif mode == "pc" or mode == "pc2d" or mode == "pc3d":
+        # Deprecated server-side PC rendering removed; serve JSON/Plotly on the client.
+        return ("use /radar/pc.json", 410)
     else:
         return ("bad mode", 400)
     if png is None:
@@ -276,6 +322,10 @@ def radar_frame_png():
     resp = make_response(png)
     resp.headers["Content-Type"] = "image/png"
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    try:
+        logger.info(f"PC reply bytes={len(png)}")
+    except Exception:
+        pass
     return resp
 
 

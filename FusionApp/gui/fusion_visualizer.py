@@ -43,8 +43,7 @@ import cv2
 from collections import deque
 
 # Configure pyqtgraph defaults; force software to avoid GLX/EGL issues on Jetson
-pg.setConfigOptions(
-    antialias=False, imageAxisOrder="row-major", useOpenGL=False)
+pg.setConfigOptions(antialias=False, imageAxisOrder="row-major", useOpenGL=False)
 
 
 # Matplotlib removed from visualizer rendering; pyqtgraph is used for speed
@@ -192,7 +191,8 @@ class FusionVisualizer(QWidget):
             pg.setConfigOptions(useOpenGL=False)
             if hasattr(self, "logger"):
                 self.logger.warning(
-                    "pyqtgraph OpenGL not available; using software rendering")
+                    "pyqtgraph OpenGL not available; using software rendering"
+                )
         except Exception:
             pass
 
@@ -226,33 +226,48 @@ class FusionVisualizer(QWidget):
 
         # Precompute LUT similar to 'jet'
         try:
-            self._lut_jet = pg.colormap.get(
-                "jet").getLookupTable(0.0, 1.0, 256)
+            self._lut_jet = pg.colormap.get("jet").getLookupTable(0.0, 1.0, 256)
         except Exception:
             self._lut_jet = None
 
         # Range-Doppler plot (pyqtgraph)
         self.range_doppler_widget = pg.GraphicsLayoutWidget()
-        self.rd_plot = self.range_doppler_widget.addPlot(
-            title="Range-Doppler Heatmap")
+        try:
+            self.range_doppler_widget.setMinimumSize(400, 400)
+        except Exception:
+            pass
+        self.rd_plot = self.range_doppler_widget.addPlot(title="Range-Doppler Heatmap")
         self.rd_plot.setLabel("bottom", "Doppler (m/s)")
         self.rd_plot.setLabel("left", "Range (m)")
         self.rd_image = pg.ImageItem()
         self.rd_plot.addItem(self.rd_image)
         self.rd_plot.invertY(False)
+        try:
+            vb = self.rd_plot.getViewBox()
+            vb.setAspectLocked(lock=True, ratio=1)
+        except Exception:
+            pass
         # FPS text overlay for radar (top-left)
         self._rd_fps_item = pg.TextItem(color="w", anchor=(0, 1))
         self.rd_plot.addItem(self._rd_fps_item)
 
         # Range-Azimuth plot (pyqtgraph)
         self.range_azimuth_widget = pg.GraphicsLayoutWidget()
-        self.ra_plot = self.range_azimuth_widget.addPlot(
-            title="Range-Azimuth Heatmap")
+        try:
+            self.range_azimuth_widget.setMinimumSize(400, 400)
+        except Exception:
+            pass
+        self.ra_plot = self.range_azimuth_widget.addPlot(title="Range-Azimuth Heatmap")
         self.ra_plot.setLabel("bottom", "Azimuth (degrees)")
         self.ra_plot.setLabel("left", "Range (m)")
         self.ra_image = pg.ImageItem()
         self.ra_plot.addItem(self.ra_image)
         self.ra_plot.invertY(False)
+        try:
+            vb = self.ra_plot.getViewBox()
+            vb.setAspectLocked(lock=True, ratio=1)
+        except Exception:
+            pass
 
         # Point Cloud plot (2D, pyqtgraph)
         self.point_cloud_widget = pg.GraphicsLayoutWidget()
@@ -262,8 +277,7 @@ class FusionVisualizer(QWidget):
         self.pc_plot.setLabel("left", "Y (m)")
         self.pc_scatter_item = pg.ScatterPlotItem(pen=None, size=4)
         self.pc_plot.addItem(self.pc_scatter_item)
-        self.pc_plot.setXRange(-self.pc_max_range,
-                               self.pc_max_range, padding=0)
+        self.pc_plot.setXRange(-self.pc_max_range, self.pc_max_range, padding=0)
         self.pc_plot.setYRange(0, self.pc_max_range, padding=0)
 
     def _setup_controls(self):
@@ -460,10 +474,22 @@ class FusionVisualizer(QWidget):
 
             # Get current data
             get_t0 = time.perf_counter()
-            radar_data = (self.radar_data_callback() if (
-                self.radar_data_callback and not os.environ.get("DISABLE_RADAR", "0") == "1") else None)
-            camera_data = (self.camera_data_callback() if (
-                self.camera_data_callback and not os.environ.get("DISABLE_CAMERA", "0") == "1") else None)
+            radar_data = (
+                self.radar_data_callback()
+                if (
+                    self.radar_data_callback
+                    and not os.environ.get("DISABLE_RADAR", "0") == "1"
+                )
+                else None
+            )
+            camera_data = (
+                self.camera_data_callback()
+                if (
+                    self.camera_data_callback
+                    and not os.environ.get("DISABLE_CAMERA", "0") == "1"
+                )
+                else None
+            )
             t_get_data = time.perf_counter() - get_t0
 
             # Set extents if needed
@@ -491,7 +517,9 @@ class FusionVisualizer(QWidget):
                 if camera_data is not None
                 else None
             )
-            if not os.environ.get("DISABLE_CAMERA", "0") == "1" and (cam_ts is None or cam_ts != self._last_camera_ts):
+            if not os.environ.get("DISABLE_CAMERA", "0") == "1" and (
+                cam_ts is None or cam_ts != self._last_camera_ts
+            ):
                 cam_t0 = time.perf_counter()
                 self._update_camera_display(camera_data)
                 t_camera = time.perf_counter() - cam_t0
@@ -502,8 +530,7 @@ class FusionVisualizer(QWidget):
                 self._cam_times.append(now_s)
                 # Drop times older than window
                 while (
-                    self._cam_times and now_s -
-                        self._cam_times[0] > self._fps_window_s
+                    self._cam_times and now_s - self._cam_times[0] > self._fps_window_s
                 ):
                     self._cam_times.popleft()
                 cam_fps = len(self._cam_times) / self._fps_window_s
@@ -516,7 +543,11 @@ class FusionVisualizer(QWidget):
             if isinstance(radar_data, dict):
                 radar_ts = radar_data.get("frame_timestamp")
                 new_radar_frame = radar_ts is None or radar_ts != self._last_radar_ts
-            if radar_data is not None and new_radar_frame and not os.environ.get("DISABLE_RADAR", "0") == "1":
+            if (
+                radar_data is not None
+                and new_radar_frame
+                and not os.environ.get("DISABLE_RADAR", "0") == "1"
+            ):
                 # If metadata indicates results are in SHM, attach and read
                 # Handle results SHM init (names/shapes)
                 if isinstance(radar_data, dict) and radar_data.get(
@@ -543,11 +574,9 @@ class FusionVisualizer(QWidget):
                                 self._ra_shape = tuple(ra.get("shape", ()))
                                 self._ra_dtype = ra.get("dtype", "float32")
                             self._res_shm_attached = True
-                            self.logger.info(
-                                "Attached results SHM via init meta")
+                            self.logger.info("Attached results SHM via init meta")
                     except Exception as e:
-                        self.logger.warning(
-                            f"Failed to attach RD/RA SHM via init: {e}")
+                        self.logger.warning(f"Failed to attach RD/RA SHM via init: {e}")
                     radar_data = None  # consume init item
                 # Render from SHM frame metadata
                 if isinstance(radar_data, dict) and radar_data.get(
@@ -606,7 +635,8 @@ class FusionVisualizer(QWidget):
                                     mv.release()
                                 except Exception as e:
                                     self.logger.error(
-                                        f"Failed to release memoryview: {e}")
+                                        f"Failed to release memoryview: {e}"
+                                    )
                             else:
                                 rd_view = np.array([], dtype=np.float32)
                             rd_data = rd_view.copy()
@@ -628,27 +658,25 @@ class FusionVisualizer(QWidget):
                                         mv.release()
                                     except Exception as e:
                                         self.logger.error(
-                                            f"Failed to release memoryview: {e}")
+                                            f"Failed to release memoryview: {e}"
+                                        )
                                 else:
                                     ra_view = np.array([], dtype=np.float32)
                             except Exception:
                                 ra_view = np.array([], dtype=np.float32)
                             ra_data = ra_view.copy()
-                        payload = {"range_doppler": rd_data,
-                                   "range_azimuth": ra_data}
+                        payload = {"range_doppler": rd_data, "range_azimuth": ra_data}
                         # Pass through point cloud if provided in metadata
                         if (
                             isinstance(radar_data, dict)
                             and radar_data.get("point_cloud") is not None
                         ):
-                            payload["point_cloud"] = radar_data.get(
-                                "point_cloud")
+                            payload["point_cloud"] = radar_data.get("point_cloud")
                         rdra_times = self._update_radar_displays(
                             payload, rd_extents, ra_extents
                         )
                     except Exception as e:
-                        self.logger.warning(
-                            f"Failed to read results from SHM: {e}")
+                        self.logger.warning(f"Failed to read results from SHM: {e}")
                         rdra_times = self._update_radar_displays(
                             radar_data, rd_extents, ra_extents
                         )
@@ -662,8 +690,7 @@ class FusionVisualizer(QWidget):
                 now_s = time.perf_counter()
                 self._rad_times.append(now_s)
                 while (
-                    self._rad_times and now_s -
-                        self._rad_times[0] > self._fps_window_s
+                    self._rad_times and now_s - self._rad_times[0] > self._fps_window_s
                 ):
                     self._rad_times.popleft()
                 rad_fps = len(self._rad_times) / self._fps_window_s
@@ -675,8 +702,7 @@ class FusionVisualizer(QWidget):
                     rd_extents[3],
                 )
                 self._rd_fps_item.setText(f"{rad_fps:.1f} FPS")
-                self._rd_fps_item.setPos(
-                    x0 + 0.02 * (x1 - x0), y1 - 0.02 * (y1 - y0))
+                self._rd_fps_item.setPos(x0 + 0.02 * (x1 - x0), y1 - 0.02 * (y1 - y0))
 
             t_rd = rdra_times.get("rd", 0.0)
             t_ra = rdra_times.get("ra", 0.0)
@@ -749,8 +775,7 @@ class FusionVisualizer(QWidget):
                             extras.append(f"dropped_total={dropped_total}")
                         if isinstance(qhint, int) and qhint >= 0:
                             extras.append(f"in_q={qhint}")
-                        extras_str = (" | " + " | ".join(extras)
-                                      ) if extras else ""
+                        extras_str = (" | " + " | ".join(extras)) if extras else ""
                         # Unified pipeline line for cross-frame timing comparison
                         self.logger.debug(
                             f"PIPE ts={ts_str} | cap={cap_s:.6f} | q_start={enq_s:.6f} | ana_recv={ana_recv_s:.6f} | ana_end={ana_end_s:.6f} | main={main_s:.6f} | disp={disp_s:.6f} | "
@@ -824,9 +849,9 @@ class FusionVisualizer(QWidget):
                     rd_data = np.sum(rd_data, axis=1)
 
                 # Convert to dB scale and orient as (rows, cols), origin lower
-                rd_db = 20.0 * \
-                    np.log10(np.abs(rd_data.astype(
-                        np.float32, copy=False)) + 1e-10)
+                rd_db = 20.0 * np.log10(
+                    np.abs(rd_data.astype(np.float32, copy=False)) + 1e-10
+                )
                 rd_db = np.nan_to_num(rd_db, nan=0.0, posinf=0.0, neginf=0.0)
                 rd_db = rd_db.T
 
@@ -861,9 +886,9 @@ class FusionVisualizer(QWidget):
                     ra_data = np.sum(ra_data, axis=1)
 
                 # Convert to dB scale and orient as (rows, cols), origin lower
-                ra_db = 20.0 * \
-                    np.log10(np.abs(ra_data.astype(
-                        np.float32, copy=False)) + 1e-10)
+                ra_db = 20.0 * np.log10(
+                    np.abs(ra_data.astype(np.float32, copy=False)) + 1e-10
+                )
                 ra_db = np.nan_to_num(ra_db, nan=0.0, posinf=0.0, neginf=0.0)
                 ra_db = ra_db.T
 
@@ -919,8 +944,7 @@ class FusionVisualizer(QWidget):
                     lut = self._lut_jet
                     # Build per-point brushes
                     brushes = [
-                        pg.mkBrush(int(lut[i, 0]), int(
-                            lut[i, 1]), int(lut[i, 2]), 255)
+                        pg.mkBrush(int(lut[i, 0]), int(lut[i, 1]), int(lut[i, 2]), 255)
                         for i in idx
                     ]
                 else:
@@ -931,8 +955,7 @@ class FusionVisualizer(QWidget):
                 )
 
                 # Keep ranges steady
-                self.pc_plot.setXRange(-self.pc_max_range,
-                                       self.pc_max_range, padding=0)
+                self.pc_plot.setXRange(-self.pc_max_range, self.pc_max_range, padding=0)
                 self.pc_plot.setYRange(0, self.pc_max_range, padding=0)
         except Exception as e:
             self.logger.error(f"Error updating point cloud plot: {e}")
@@ -1028,8 +1051,7 @@ class FusionVisualizer(QWidget):
         png_files = glob.glob(pattern)
 
         if not png_files:
-            self.logger.info(
-                f"No PNG files found in directory: {self.recording_dir}")
+            self.logger.info(f"No PNG files found in directory: {self.recording_dir}")
             return
 
         # Parse filenames
@@ -1051,8 +1073,7 @@ class FusionVisualizer(QWidget):
         png_info.sort(key=lambda x: x[1])
         self._png_files = png_info
 
-        self.logger.info(
-            f"Found {len(self._png_files)} PNG files for video playback")
+        self.logger.info(f"Found {len(self._png_files)} PNG files for video playback")
 
     def _display_camera_frame(
         self, camera_frame, detected_objects: Optional[List[Any]] = None
@@ -1268,8 +1289,7 @@ class FusionVisualizer(QWidget):
                 elif isinstance(obj, dict):
                     # Dictionary format
                     x, y = int(obj.get("x", 0)), int(obj.get("y", 0))
-                    width, height = int(obj.get("width", 0)), int(
-                        obj.get("height", 0))
+                    width, height = int(obj.get("width", 0)), int(obj.get("height", 0))
                     x2, y2 = x + width, y + height
                     class_id = obj.get("class_id", 0)
                     object_type = class_names.get(class_id, "unknown")
@@ -1286,8 +1306,7 @@ class FusionVisualizer(QWidget):
 
                 # Draw label with object type and confidence
                 label = f"{object_type}: {confidence:.2f}"
-                label_size = cv2.getTextSize(
-                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
 
                 # Draw label background
                 cv2.rectangle(
@@ -1310,8 +1329,7 @@ class FusionVisualizer(QWidget):
                 )
 
             except Exception as e:
-                self.logger.error(
-                    f"Error drawing bounding box for object {obj}: {e}")
+                self.logger.error(f"Error drawing bounding box for object {obj}: {e}")
                 continue
 
         return image_with_boxes

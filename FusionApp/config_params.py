@@ -38,8 +38,24 @@ class CFGS:
     AWR_CLI_BR = 115200
     AWR_DATA_BR = 921600
 
-    AWR1843_CONFIG_FILE = os.path.join(
-        os.getcwd(), "config_files/profile_3d_5m.cfg")
+    AWR2243_CONFIG_FILE_NAMES = {
+        "2D": [
+            "AWR2243_10m_4cm_64_2_256.txt",
+            "AWR2243_24m_5cm_128_2_256.txt",
+            "AWR2243_87m_17cm_64_2_256.txt",
+            "AWR2243_180m_70cm_64_2_512.txt",
+        ],
+        "3D": [
+            "AWR2243_10m_4cm_64_3_256.txt",
+            "AWR2243_24m_5cm_64_3_512.txt",
+            "AWR2243_87m_17cm_64_3_256.txt",
+            "AWR2243_180m_70cm_64_3_512.txt",
+        ],
+    }
+
+    AWR2243_CONFIG_DIR = os.path.join(os.getcwd(), "config_files/")
+
+    AWR1843_CONFIG_FILE = os.path.join(os.getcwd(), "config_files/profile_3d_5m.cfg")
     AWR2243_CONFIG_FILE = os.path.join(
         os.getcwd(), "config_files/AWR2243_180m_35cm_64_2_256.txt"
     )

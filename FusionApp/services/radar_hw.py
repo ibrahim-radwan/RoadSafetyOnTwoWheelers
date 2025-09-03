@@ -6,13 +6,20 @@ logger = setup_logger("radar_hw")
 _initialized = False
 
 
-def radar_hw_init() -> bool:
-    """Initialize AWR2243 radar hardware and precompile DSP kernels."""
+def radar_hw_init(config_file: str = None) -> bool:
+    """Initialize AWR2243 radar hardware and precompile DSP kernels.
+
+    Args:
+        config_file: Optional override for AWR2243 radar config file. If None,
+            falls back to CFGS.AWR2243_CONFIG_FILE.
+    """
     try:
         import fpga_udp  # Local import to avoid hard dependency at import time
         from mmwave import dsp
 
-        ret = fpga_udp.AWR2243_init(CFGS.AWR2243_CONFIG_FILE)
+        cfg = config_file or CFGS.AWR2243_CONFIG_FILE
+        logger.info(f"Initializing AWR2243 with config: {cfg}")
+        ret = fpga_udp.AWR2243_init(cfg)
         if ret != 0:
             logger.error("Failed to initialize AWR2243 radar: %d", ret)
             return False
