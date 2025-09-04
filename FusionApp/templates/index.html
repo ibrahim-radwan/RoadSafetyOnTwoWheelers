@@ -180,6 +180,7 @@
     let videoTimer = null;
     let radarTimer = null;
     let procTimer = null;
+    let pc3dInitialized = false; // preserve 3D camera across frames
     function scheduleVideoPoll() {
       if (videoTimer) clearInterval(videoTimer);
       if (!isRunning) return;
@@ -265,63 +266,95 @@
         const mr = (typeof j.max_range === 'number' && isFinite(j.max_range) && j.max_range > 0) ? j.max_range : 10.0;
         const div = document.getElementById('radar_plot');
         if (typeof Plotly === 'undefined') { div.innerHTML = 'Plotly not loaded'; return; }
-        // Intensity to grayscale (dark for high)
-        let colors;
-        if (inten && inten.length === x.length) {
-          const vals = inten.filter(v => Number.isFinite(v));
-          let vmin = 0, vmax = 1;
-          if (vals.length) {
-            vals.sort((a, b) => a - b);
-            const p = (p) => vals[Math.max(0, Math.min(vals.length - 1, Math.floor(p * (vals.length - 1))))];
-            vmin = p(0.01);
-            vmax = p(0.99);
-            if (!(isFinite(vmin) && isFinite(vmax)) || vmin >= vmax) { vmin = vals[0]; vmax = vals[vals.length - 1] || (vmin + 1); }
+        // Build filtered point arrays (ensure x/y[/z] and intensity stay aligned)
+        const fx = []; const fy = []; const fz = [];
+        const fint = [];
+        const hasZ = Array.isArray(z) && z.length === x.length;
+        const hasI = Array.isArray(inten);
+        for (let i = 0; i < x.length; i++) {
+          const xi = x[i];
+          const yi = y[i];
+          const zi = hasZ ? z[i] : 0;
+          const iv = hasI ? inten[i] : null;
+          if (!is3D) {
+            if (isFinite(xi) && isFinite(yi)) { fx.push(xi); fy.push(yi); if (hasI) fint.push(iv); }
+          } else {
+            if (isFinite(xi) && isFinite(yi) && isFinite(zi)) { fx.push(xi); fy.push(yi); fz.push(zi); if (hasI) fint.push(iv); }
           }
-          colors = inten.map(v => {
+        }
+        // Prepare numeric color mapping (use all finite intensities present, not just filtered set)
+        let vmin = 0, vmax = 1;
+        const finiteValsAll = (hasI ? inten : []).filter(v => Number.isFinite(v));
+        const haveIntensity = finiteValsAll.length > 0;
+        if (haveIntensity) {
+          vmin = Math.min(...finiteValsAll);
+          vmax = Math.max(...finiteValsAll);
+          if (!(isFinite(vmin) && isFinite(vmax)) || vmin >= vmax) { vmax = vmin + 1; }
+        }
+        console.log('PC plot', { n: fx.length, is3D, mr, vmin, vmax });
+        // Build explicit grayscale colors for robust rendering in both modes
+        let colorsArr = 'rgb(0,0,0)';
+        if (haveIntensity) {
+          colorsArr = fint.map(v => {
             const t = Math.max(0, Math.min(1, (v - vmin) / (vmax - vmin + 1e-6)));
             const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
             return `rgb(${g},${g},${g})`;
           });
-        } else {
-          colors = 'rgb(0,0,0)';
         }
-        console.log('PC plot', { n: x.length, is3D, mr });
         if (!is3D) {
-          const trace = {
-            x: x,
-            y: y,
-            mode: 'markers',
-            type: 'scattergl',
-            marker: { size: 5, color: colors },
-          };
+          const traces = [];
+          if (haveIntensity && fx.length > 0) {
+            const bins = 6;
+            const bxDef = []; const byDef = [];
+            for (let b = 0; b < bins; b++) {
+              const b0 = vmin + (b / bins) * (vmax - vmin);
+              const b1 = vmin + ((b + 1) / bins) * (vmax - vmin) + 1e-9;
+              const bx = []; const by = [];
+              for (let i = 0; i < fx.length; i++) {
+                const iv = fint[i];
+                if (!Number.isFinite(iv)) { bxDef.push(fx[i]); byDef.push(fy[i]); continue; }
+                if (iv >= b0 && iv < b1) { bx.push(fx[i]); by.push(fy[i]); }
+              }
+              const t = (b + 0.5) / bins;
+              const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
+              traces.push({ x: bx, y: by, mode: 'markers', type: 'scattergl', marker: { size: 3, color: `rgb(${g},${g},${g})` }, hoverinfo: 'skip', showlegend: false });
+            }
+            if (bxDef.length) { traces.push({ x: bxDef, y: byDef, mode: 'markers', type: 'scattergl', marker: { size: 3, color: 'rgb(160,160,160)' }, hoverinfo: 'skip', showlegend: false }); }
+          } else {
+            traces.push({ x: fx, y: fy, mode: 'markers', type: 'scattergl', marker: { size: 3, color: 'rgb(0,0,0)' }, hoverinfo: 'skip', showlegend: false });
+          }
           const layout = {
             paper_bgcolor: 'white',
             plot_bgcolor: 'white',
-            xaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true },
-            yaxis: { range: [0, +mr], tickmode: 'array', tickvals: [0, mr / 2, mr], ticktext: ['0', (mr / 2).toFixed(1), (+mr).toFixed(1)], title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true, scaleanchor: 'x', scaleratio: 1 },
+            xaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true },
+            yaxis: { range: [0, +mr], tickmode: 'linear', tick0: 0, dtick: mr / 10, title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true, scaleanchor: 'x', scaleratio: 1 },
             margin: { l: 20, r: 20, t: 20, b: 20 },
             showlegend: false,
           };
-          Plotly.react(div, [trace], layout, { staticPlot: true, displayModeBar: false });
+          Plotly.react(div, traces, layout, { staticPlot: true, displayModeBar: false });
         } else {
-          // Build finite arrays only to avoid WebGL NaNs
-          const zFilled = (z && z.length === x.length) ? z : new Array(x.length).fill(0);
-          const fx = []; const fy = []; const fz = [];
-          for (let i = 0; i < x.length; i++) {
-            const xi = x[i]; const yi = y[i]; const zi = zFilled[i];
-            if (isFinite(xi) && isFinite(yi) && isFinite(zi)) { fx.push(xi); fy.push(yi); fz.push(zi); }
-          }
           console.log('PC3D filtered lengths', { x: fx.length, y: fy.length, z: fz.length });
-          const trace = {
-            x: fx,
-            y: fy,
-            z: fz,
-            mode: 'markers',
-            type: 'scatter3d',
-            marker: { size: 4, color: 'black' },
-            hoverinfo: 'skip',
-            showlegend: false,
-          };
+          const traces = [];
+          if (haveIntensity && fx.length > 0) {
+            const bins = 6;
+            const bxDef = []; const byDef = []; const bzDef = [];
+            for (let b = 0; b < bins; b++) {
+              const b0 = vmin + (b / bins) * (vmax - vmin);
+              const b1 = vmin + ((b + 1) / bins) * (vmax - vmin) + 1e-9;
+              const bx = []; const by = []; const bz = [];
+              for (let i = 0; i < fx.length; i++) {
+                const iv = fint[i];
+                if (!Number.isFinite(iv)) { bxDef.push(fx[i]); byDef.push(fy[i]); bzDef.push(fz[i]); continue; }
+                if (iv >= b0 && iv < b1) { bx.push(fx[i]); by.push(fy[i]); bz.push(fz[i]); }
+              }
+              const t = (b + 0.5) / bins;
+              const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
+              traces.push({ x: bx, y: by, z: bz, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: `rgb(${g},${g},${g})` }, hoverinfo: 'skip', showlegend: false });
+            }
+            if (bxDef.length) { traces.push({ x: bxDef, y: byDef, z: bzDef, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: 'rgb(160,160,160)' }, hoverinfo: 'skip', showlegend: false }); }
+          } else {
+            traces.push({ x: fx, y: fy, z: fz, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: 'rgb(0,0,0)' }, hoverinfo: 'skip', showlegend: false });
+          }
           // Dummy transparent anchors to force axes to appear even if no points
           const anchor = {
             x: [-mr, +mr], y: [0, 0], z: [0, 0], mode: 'markers', type: 'scatter3d',
@@ -331,25 +364,32 @@
           const axisX = { x: [-mr, +mr], y: [0, 0], z: [0, 0], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
           const axisY = { x: [0, 0], y: [0, +mr], z: [0, 0], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
           const axisZ = { x: [0, 0], y: [0, 0], z: [-mr, +mr], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
-          // Preserve camera across updates
+          // Capture current camera to preserve user interactions
           let prevCam = null;
-          try { prevCam = (div._fullLayout && div._fullLayout.scene && div._fullLayout.scene._scene) ? div._fullLayout.scene.camera : (div._fullLayout && div._fullLayout.scene && div._fullLayout.scene.camera); } catch (e) { }
-          const initCam = prevCam || { eye: { x: 0, y: -1, z: 2 } };
+          try { prevCam = (div && div._fullLayout && div._fullLayout.scene) ? div._fullLayout.scene.camera : null; } catch (e) { prevCam = null; }
           const layout = {
             paper_bgcolor: 'white',
             scene: {
-              xaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
-              yaxis: { range: [0, +mr], tickmode: 'array', tickvals: [0, mr / 2, mr], ticktext: ['0', (mr / 2).toFixed(1), (+mr).toFixed(1)], title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
-              zaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'Z (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
-              camera: initCam,
+              xaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              yaxis: { range: [0, +mr], tickmode: 'linear', tick0: 0, dtick: mr / 10, title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              zaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'Z (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
               bgcolor: 'white',
-              aspectmode: 'cube',
+              aspectmode: 'manual',
+              aspectratio: { x: 2, y: 1, z: 1 },
             },
             margin: { l: 0, r: 0, t: 0, b: 0 },
             showlegend: false,
             uirevision: 'pc3d',
+            dragmode: 'orbit',
           };
-          Plotly.react(div, [trace, axisX, axisY, axisZ, anchor], layout, { staticPlot: false, displayModeBar: false });
+          // Apply previous camera if available; else set initial on first render
+          if (prevCam) {
+            layout.scene.camera = prevCam;
+          } else if (!pc3dInitialized) {
+            layout.scene.camera = { eye: { x: 0, y: -1, z: 2 } };
+          }
+          Plotly.react(div, traces.concat([axisX, axisY, axisZ, anchor]), layout, { staticPlot: false, displayModeBar: false, scrollZoom: true });
+          pc3dInitialized = true;
         }
       } catch (e) { console.error(e); }
     }
