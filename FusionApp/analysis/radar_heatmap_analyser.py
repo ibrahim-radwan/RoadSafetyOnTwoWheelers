@@ -16,9 +16,9 @@ from config_params import CFGS
 from sample_processing.radar_params import ADCParams
 from sample_processing.radar_proc import (
     openradar_pd_process_frame,
-    openradar_pd_process_frame_optimised,
+    process_2D_radar_frame,
     pyradar_process_frame,
-    openradar_rt_process_frame,
+    process_3D_radar_frame,
     custom_process_frame,
 )
 from utils import setup_logger, disable_shm_resource_tracker
@@ -131,10 +131,13 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             )
 
         # result = openradar_pd_process_frame(frame, self.adc_params, IS_INDOOR=True)
-        result = openradar_pd_process_frame_optimised(
-            frame, self.adc_params, IS_INDOOR=True
-        )
-        # result = openradar_rt_process_frame(frame, self.adc_params)
+        # Choose 2D vs 3D pipeline based on number of TX antennas
+        if int(getattr(self.adc_params, "tx", 0)) == 2:
+            result = process_2D_radar_frame(frame, self.adc_params, IS_INDOOR=True)
+        elif int(getattr(self.adc_params, "tx", 0)) == 3:
+            result = process_3D_radar_frame(frame, self.adc_params)
+        else:
+            raise RuntimeError(f"Unsupported adc_params.tx={getattr(self.adc_params, 'tx', None)}; expected 2 or 3")
 
         # frame = frame.reshape(frame.shape[0], frame.shape[1] * frame.shape[2], -1)
         # result = pyradar_process_frame(frame, self.adc_params, doa_method="MUSIC", IS_INDOOR=False)
