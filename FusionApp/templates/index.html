@@ -180,6 +180,8 @@
     let videoTimer = null;
     let radarTimer = null;
     let procTimer = null;
+    let pc3dInitialized = false; // preserve 3D camera across frames
+    let pc3dResetOnNext = false; // force reset camera when switching to 3D
     function scheduleVideoPoll() {
       if (videoTimer) clearInterval(videoTimer);
       if (!isRunning) return;
@@ -233,6 +235,7 @@
         const m = e.target.getAttribute('data-rmode');
         if (m) {
           radarMode = m;
+          if (m === 'pc3d') { pc3dResetOnNext = true; pc3dInitialized = false; }
           toggleRadarTargets(m);
           fetchRadarFrame();
           scheduleRadarPoll();
@@ -262,66 +265,106 @@
         const y = j.y || [];
         const z = j.z || null;
         const inten = j.intensity || null;
-        const mr = (typeof j.max_range === 'number' && isFinite(j.max_range) && j.max_range > 0) ? j.max_range : 10.0;
+        // Round up max range to two significant digits so mr/10 has at most one decimal
+        function roundUpTwoSig(v) {
+          if (!(typeof v === 'number') || !isFinite(v) || v <= 0) return 10.0;
+          const e = Math.floor(Math.log10(v));
+          const pow = Math.pow(10, e - 1);
+          return Math.ceil(v / pow) * pow;
+        }
+        const mrRaw = (typeof j.max_range === 'number' && isFinite(j.max_range) && j.max_range > 0) ? j.max_range : 10.0;
+        const mr = roundUpTwoSig(mrRaw);
         const div = document.getElementById('radar_plot');
         if (typeof Plotly === 'undefined') { div.innerHTML = 'Plotly not loaded'; return; }
-        // Intensity to grayscale (dark for high)
-        let colors;
-        if (inten && inten.length === x.length) {
-          const vals = inten.filter(v => Number.isFinite(v));
-          let vmin = 0, vmax = 1;
-          if (vals.length) {
-            vals.sort((a, b) => a - b);
-            const p = (p) => vals[Math.max(0, Math.min(vals.length - 1, Math.floor(p * (vals.length - 1))))];
-            vmin = p(0.01);
-            vmax = p(0.99);
-            if (!(isFinite(vmin) && isFinite(vmax)) || vmin >= vmax) { vmin = vals[0]; vmax = vals[vals.length - 1] || (vmin + 1); }
+        // Build filtered point arrays (ensure x/y[/z] and intensity stay aligned)
+        const fx = []; const fy = []; const fz = [];
+        const fint = [];
+        const hasZ = Array.isArray(z) && z.length === x.length;
+        const hasI = Array.isArray(inten);
+        for (let i = 0; i < x.length; i++) {
+          const xi = x[i];
+          const yi = y[i];
+          const zi = hasZ ? z[i] : 0;
+          const iv = hasI ? inten[i] : null;
+          if (!is3D) {
+            if (isFinite(xi) && isFinite(yi)) { fx.push(xi); fy.push(yi); if (hasI) fint.push(iv); }
+          } else {
+            if (isFinite(xi) && isFinite(yi) && isFinite(zi)) { fx.push(xi); fy.push(yi); fz.push(zi); if (hasI) fint.push(iv); }
           }
-          colors = inten.map(v => {
+        }
+        // Prepare numeric color mapping (use all finite intensities present, not just filtered set)
+        let vmin = 0, vmax = 1;
+        const finiteValsAll = (hasI ? inten : []).filter(v => Number.isFinite(v));
+        const haveIntensity = finiteValsAll.length > 0;
+        if (haveIntensity) {
+          vmin = Math.min(...finiteValsAll);
+          vmax = Math.max(...finiteValsAll);
+          if (!(isFinite(vmin) && isFinite(vmax)) || vmin >= vmax) { vmax = vmin + 1; }
+        }
+        console.log('PC plot', { n: fx.length, is3D, mr, vmin, vmax });
+        // Build explicit grayscale colors for robust rendering in both modes
+        let colorsArr = 'rgb(0,0,0)';
+        if (haveIntensity) {
+          colorsArr = fint.map(v => {
             const t = Math.max(0, Math.min(1, (v - vmin) / (vmax - vmin + 1e-6)));
             const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
             return `rgb(${g},${g},${g})`;
           });
-        } else {
-          colors = 'rgb(0,0,0)';
         }
-        console.log('PC plot', { n: x.length, is3D, mr });
         if (!is3D) {
-          const trace = {
-            x: x,
-            y: y,
-            mode: 'markers',
-            type: 'scattergl',
-            marker: { size: 5, color: colors },
-          };
+          const traces = [];
+          if (haveIntensity && fx.length > 0) {
+            const bins = 6;
+            const bxDef = []; const byDef = [];
+            for (let b = 0; b < bins; b++) {
+              const b0 = vmin + (b / bins) * (vmax - vmin);
+              const b1 = vmin + ((b + 1) / bins) * (vmax - vmin) + 1e-9;
+              const bx = []; const by = [];
+              for (let i = 0; i < fx.length; i++) {
+                const iv = fint[i];
+                if (!Number.isFinite(iv)) { bxDef.push(fx[i]); byDef.push(fy[i]); continue; }
+                if (iv >= b0 && iv < b1) { bx.push(fx[i]); by.push(fy[i]); }
+              }
+              const t = (b + 0.5) / bins;
+              const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
+              traces.push({ x: bx, y: by, mode: 'markers', type: 'scattergl', marker: { size: 3, color: `rgb(${g},${g},${g})` }, hoverinfo: 'skip', showlegend: false });
+            }
+            if (bxDef.length) { traces.push({ x: bxDef, y: byDef, mode: 'markers', type: 'scattergl', marker: { size: 3, color: 'rgb(160,160,160)' }, hoverinfo: 'skip', showlegend: false }); }
+          } else {
+            traces.push({ x: fx, y: fy, mode: 'markers', type: 'scattergl', marker: { size: 3, color: 'rgb(0,0,0)' }, hoverinfo: 'skip', showlegend: false });
+          }
           const layout = {
             paper_bgcolor: 'white',
             plot_bgcolor: 'white',
-            xaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true },
-            yaxis: { range: [0, +mr], tickmode: 'array', tickvals: [0, mr / 2, mr], ticktext: ['0', (mr / 2).toFixed(1), (+mr).toFixed(1)], title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true, scaleanchor: 'x', scaleratio: 1 },
-            margin: { l: 20, r: 20, t: 20, b: 20 },
+            xaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'X (m)', font: { size: 10 }, standoff: 6 }, showticklabels: true, ticklabelposition: 'outside', ticklabeloverflow: 'allow', automargin: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true },
+            yaxis: { range: [0, +mr], tickmode: 'linear', tick0: 0, dtick: mr / 10, title: { text: 'Y (m)', font: { size: 10 }, standoff: 6 }, showticklabels: true, ticklabelposition: 'outside', ticklabeloverflow: 'allow', automargin: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true, scaleanchor: 'x', scaleratio: 1 },
+            margin: { l: 48, r: 24, t: 20, b: 44 },
             showlegend: false,
           };
-          Plotly.react(div, [trace], layout, { staticPlot: true, displayModeBar: false });
+          Plotly.react(div, traces, layout, { staticPlot: true, displayModeBar: false });
         } else {
-          // Build finite arrays only to avoid WebGL NaNs
-          const zFilled = (z && z.length === x.length) ? z : new Array(x.length).fill(0);
-          const fx = []; const fy = []; const fz = [];
-          for (let i = 0; i < x.length; i++) {
-            const xi = x[i]; const yi = y[i]; const zi = zFilled[i];
-            if (isFinite(xi) && isFinite(yi) && isFinite(zi)) { fx.push(xi); fy.push(yi); fz.push(zi); }
-          }
           console.log('PC3D filtered lengths', { x: fx.length, y: fy.length, z: fz.length });
-          const trace = {
-            x: fx,
-            y: fy,
-            z: fz,
-            mode: 'markers',
-            type: 'scatter3d',
-            marker: { size: 4, color: 'black' },
-            hoverinfo: 'skip',
-            showlegend: false,
-          };
+          const traces = [];
+          if (haveIntensity && fx.length > 0) {
+            const bins = 6;
+            const bxDef = []; const byDef = []; const bzDef = [];
+            for (let b = 0; b < bins; b++) {
+              const b0 = vmin + (b / bins) * (vmax - vmin);
+              const b1 = vmin + ((b + 1) / bins) * (vmax - vmin) + 1e-9;
+              const bx = []; const by = []; const bz = [];
+              for (let i = 0; i < fx.length; i++) {
+                const iv = fint[i];
+                if (!Number.isFinite(iv)) { bxDef.push(fx[i]); byDef.push(fy[i]); bzDef.push(fz[i]); continue; }
+                if (iv >= b0 && iv < b1) { bx.push(fx[i]); by.push(fy[i]); bz.push(fz[i]); }
+              }
+              const t = (b + 0.5) / bins;
+              const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
+              traces.push({ x: bx, y: by, z: bz, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: `rgb(${g},${g},${g})` }, hoverinfo: 'skip', showlegend: false });
+            }
+            if (bxDef.length) { traces.push({ x: bxDef, y: byDef, z: bzDef, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: 'rgb(160,160,160)' }, hoverinfo: 'skip', showlegend: false }); }
+          } else {
+            traces.push({ x: fx, y: fy, z: fz, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: 'rgb(0,0,0)' }, hoverinfo: 'skip', showlegend: false });
+          }
           // Dummy transparent anchors to force axes to appear even if no points
           const anchor = {
             x: [-mr, +mr], y: [0, 0], z: [0, 0], mode: 'markers', type: 'scatter3d',
@@ -331,25 +374,35 @@
           const axisX = { x: [-mr, +mr], y: [0, 0], z: [0, 0], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
           const axisY = { x: [0, 0], y: [0, +mr], z: [0, 0], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
           const axisZ = { x: [0, 0], y: [0, 0], z: [-mr, +mr], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
-          // Preserve camera across updates
+          // Capture current camera to preserve user interactions
           let prevCam = null;
-          try { prevCam = (div._fullLayout && div._fullLayout.scene && div._fullLayout.scene._scene) ? div._fullLayout.scene.camera : (div._fullLayout && div._fullLayout.scene && div._fullLayout.scene.camera); } catch (e) { }
-          const initCam = prevCam || { eye: { x: 0, y: -1, z: 2 } };
+          try { prevCam = (div && div._fullLayout && div._fullLayout.scene) ? div._fullLayout.scene.camera : null; } catch (e) { prevCam = null; }
           const layout = {
             paper_bgcolor: 'white',
             scene: {
-              xaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
-              yaxis: { range: [0, +mr], tickmode: 'array', tickvals: [0, mr / 2, mr], ticktext: ['0', (mr / 2).toFixed(1), (+mr).toFixed(1)], title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
-              zaxis: { range: [-mr, +mr], tickmode: 'array', tickvals: [-mr, 0, +mr], ticktext: [(-mr).toFixed(1), '0', (+mr).toFixed(1)], title: { text: 'Z (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
-              camera: initCam,
+              xaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              yaxis: { range: [0, +mr], tickmode: 'linear', tick0: 0, dtick: mr / 10, title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              zaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'Z (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
               bgcolor: 'white',
-              aspectmode: 'cube',
+              aspectmode: 'manual',
+              aspectratio: { x: 2, y: 1, z: 1 },
             },
             margin: { l: 0, r: 0, t: 0, b: 0 },
             showlegend: false,
             uirevision: 'pc3d',
+            dragmode: 'orbit',
           };
-          Plotly.react(div, [trace, axisX, axisY, axisZ, anchor], layout, { staticPlot: false, displayModeBar: false });
+          // Apply camera: reset if requested; else preserve previous; else set initial default
+          if (pc3dResetOnNext) {
+            layout.scene.camera = { eye: { x: -0.1, y: -1.0, z: 0.1 }, center: { x: 0, y: 0, z: 0 }, up: { x: -0.1, y: -1.0, z: 1 } };
+            pc3dResetOnNext = false;
+          } else if (prevCam) {
+            layout.scene.camera = prevCam;
+          } else if (!pc3dInitialized) {
+            layout.scene.camera = { eye: { x: -0.1, y: -1.0, z: 0.1 }, center: { x: 0, y: 0, z: 0 }, up: { x: -0.1, y: -1.0, z: 1 } };
+          }
+          Plotly.react(div, traces.concat([axisX, axisY, axisZ, anchor]), layout, { staticPlot: false, displayModeBar: false, scrollZoom: true });
+          pc3dInitialized = true;
         }
       } catch (e) { console.error(e); }
     }
@@ -416,6 +469,88 @@
       bindViewerControls();
       // Ensure processes grid updates even if SSE is delayed
       procTimer = setInterval(fetchProcesses, 1000);
+      // Fetch initial tuning and populate minimal UI if present
+      try {
+        fetch('/tuning').then(r => r.json()).then(j => {
+          window._tuning = j || {};
+          try {
+            const cf1 = (j.cfar_2d && j.cfar_2d.az) || (j.cfar_3d && j.cfar_3d.doppler) || {};
+            const cf2 = (j.cfar_2d && j.cfar_2d.range) || (j.cfar_3d && j.cfar_3d.range) || {};
+            document.getElementById('cf1_lb').value = cf1.l_bound ?? '';
+            document.getElementById('cf1_g').value = cf1.guard_len ?? '';
+            document.getElementById('cf1_n').value = cf1.noise_len ?? '';
+            document.getElementById('cf2_lb').value = cf2.l_bound ?? '';
+            document.getElementById('cf2_g').value = cf2.guard_len ?? '';
+            document.getElementById('cf2_n').value = cf2.noise_len ?? '';
+            const s = (j.thresholds_3d && j.thresholds_3d.snr_table) || [[2, 5.5], [10, 2.5], [35, 10.0]];
+            const p = (j.thresholds_3d && j.thresholds_3d.peak_table) || [[4, 100], [1, 400], [500, 0]];
+            document.getElementById('snr_x0').value = s[0]?.[0] ?? ''; document.getElementById('snr_y0').value = s[0]?.[1] ?? '';
+            document.getElementById('snr_x1').value = s[1]?.[0] ?? ''; document.getElementById('snr_y1').value = s[1]?.[1] ?? '';
+            document.getElementById('snr_x2').value = s[2]?.[0] ?? ''; document.getElementById('snr_y2').value = s[2]?.[1] ?? '';
+            document.getElementById('pk_x0').value = p[0]?.[0] ?? ''; document.getElementById('pk_y0').value = p[0]?.[1] ?? '';
+            document.getElementById('pk_x1').value = p[1]?.[0] ?? ''; document.getElementById('pk_y1').value = p[1]?.[1] ?? '';
+            document.getElementById('pk_x2').value = p[2]?.[0] ?? ''; document.getElementById('pk_y2').value = p[2]?.[1] ?? '';
+          } catch (e) { }
+        });
+      } catch (e) { }
+      // Bind apply
+      const btn = document.getElementById('t_apply');
+      if (btn) {
+        btn.addEventListener('click', async () => {
+          const body = {
+            cfar_2d: {
+              az: {
+                l_bound: parseFloat(document.getElementById('cf1_lb').value || '1.5'),
+                guard_len: parseInt(document.getElementById('cf1_g').value || '2'),
+                noise_len: parseInt(document.getElementById('cf1_n').value || '10'),
+              },
+              range: {
+                l_bound: parseFloat(document.getElementById('cf2_lb').value || '3.0'),
+                guard_len: parseInt(document.getElementById('cf2_g').value || '2'),
+                noise_len: parseInt(document.getElementById('cf2_n').value || '10'),
+              }
+            },
+            cfar_3d: {
+              doppler: {
+                l_bound: parseFloat(document.getElementById('cf1_lb').value || '1.5'),
+                guard_len: parseInt(document.getElementById('cf1_g').value || '4'),
+                noise_len: parseInt(document.getElementById('cf1_n').value || '16'),
+              },
+              range: {
+                l_bound: parseFloat(document.getElementById('cf2_lb').value || '2.5'),
+                guard_len: parseInt(document.getElementById('cf2_g').value || '4'),
+                noise_len: parseInt(document.getElementById('cf2_n').value || '16'),
+              }
+            },
+            thresholds_3d: {
+              snr_table: [
+                [parseFloat(document.getElementById('snr_x0').value || '2'), parseFloat(document.getElementById('snr_y0').value || '5.5')],
+                [parseFloat(document.getElementById('snr_x1').value || '10'), parseFloat(document.getElementById('snr_y1').value || '2.5')],
+                [parseFloat(document.getElementById('snr_x2').value || '35'), parseFloat(document.getElementById('snr_y2').value || '10.0')]
+              ],
+              peak_table: [
+                [parseFloat(document.getElementById('pk_x0').value || '4'), parseFloat(document.getElementById('pk_y0').value || '100')],
+                [parseFloat(document.getElementById('pk_x1').value || '1'), parseFloat(document.getElementById('pk_y1').value || '400')],
+                [parseFloat(document.getElementById('pk_x2').value || '500'), parseFloat(document.getElementById('pk_y2').value || '0')]
+              ]
+            }
+          };
+          try {
+            await fetch('/tuning', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          } catch (e) { console.error(e); }
+        });
+      }
+      // Disable 3D-only boxes if 2D profile detected in options
+      try {
+        const is2D = (window.radar_config_options || []).some(o => o && o.mode === '2D' && document.getElementById('radar_cfg_sel')?.value?.includes(o.name));
+        const dis = (flag) => { document.getElementById('snr_box').disabled = flag; document.getElementById('peak_box').disabled = flag; };
+        dis(is2D);
+        document.getElementById('radar_cfg_sel')?.addEventListener('change', () => {
+          const val = document.getElementById('radar_cfg_sel').value || '';
+          const is2 = (val.toLowerCase().includes('2d'));
+          dis(is2);
+        });
+      } catch (e) { }
     }
     window.addEventListener('load', init);
   </script>
@@ -473,6 +608,56 @@
           {% endif %}
         </select>
         <span class="meta">(only when not running)</span>
+      </div>
+      <div class="panel" style="margin-top:8px;">
+        <h4>Tuning</h4>
+        <div class="meta">CFAR#1 feeds first CFAR (2D: Azimuth, 3D: Doppler). CFAR#2 feeds second CFAR (2D: Range, 3D:
+          Range).</div>
+        <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:6px;">
+          <fieldset style="min-width:156px;">
+            <legend>CFAR #1</legend>
+            <div class="meta">l_bound</div>
+            <input id="cf1_lb" type="number" step="0.1" style="width:90px;">
+            <div class="meta">guard_len</div>
+            <input id="cf1_g" type="number" step="1" style="width:90px;">
+            <div class="meta">noise_len</div>
+            <input id="cf1_n" type="number" step="1" style="width:90px;">
+          </fieldset>
+          <fieldset style="min-width:156px;">
+            <legend>CFAR #2</legend>
+            <div class="meta">l_bound</div>
+            <input id="cf2_lb" type="number" step="0.1" style="width:90px;">
+            <div class="meta">guard_len</div>
+            <input id="cf2_g" type="number" step="1" style="width:90px;">
+            <div class="meta">noise_len</div>
+            <input id="cf2_n" type="number" step="1" style="width:90px;">
+          </fieldset>
+          <fieldset id="snr_box" style="min-width:208px;">
+            <legend>3D SNR thresholds table</legend>
+            <div class="meta">Row 1: x, y</div>
+            <input id="snr_x0" type="number" step="1" style="width:70px;">
+            <input id="snr_y0" type="number" step="0.1" style="width:70px;">
+            <div class="meta">Row 2: x, y</div>
+            <input id="snr_x1" type="number" step="1" style="width:70px;">
+            <input id="snr_y1" type="number" step="0.1" style="width:70px;">
+            <div class="meta">Row 3: x, y</div>
+            <input id="snr_x2" type="number" step="1" style="width:70px;">
+            <input id="snr_y2" type="number" step="0.1" style="width:70px;">
+          </fieldset>
+          <fieldset id="peak_box" style="min-width:208px;">
+            <legend>3D Peak thresholds table</legend>
+            <div class="meta">Row 1: x, y</div>
+            <input id="pk_x0" type="number" step="1" style="width:70px;">
+            <input id="pk_y0" type="number" step="1" style="width:70px;">
+            <div class="meta">Row 2: x, y</div>
+            <input id="pk_x1" type="number" step="1" style="width:70px;">
+            <input id="pk_y1" type="number" step="1" style="width:70px;">
+            <div class="meta">Row 3: x, y</div>
+            <input id="pk_x2" type="number" step="1" style="width:70px;">
+            <input id="pk_y2" type="number" step="1" style="width:70px;">
+          </fieldset>
+        </div>
+        <div style="margin-top:8px;"><button id="t_apply">Apply</button></div>
       </div>
     </div>
     <div class="col panel" style="flex:1;">

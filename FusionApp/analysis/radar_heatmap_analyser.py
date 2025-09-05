@@ -16,9 +16,9 @@ from config_params import CFGS
 from sample_processing.radar_params import ADCParams
 from sample_processing.radar_proc import (
     openradar_pd_process_frame,
-    openradar_pd_process_frame_optimised,
+    process_2D_radar_frame,
     pyradar_process_frame,
-    openradar_rt_process_frame,
+    process_3D_radar_frame,
     custom_process_frame,
 )
 from utils import setup_logger, disable_shm_resource_tracker
@@ -131,10 +131,22 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             )
 
         # result = openradar_pd_process_frame(frame, self.adc_params, IS_INDOOR=True)
-        result = openradar_pd_process_frame_optimised(
-            frame, self.adc_params, IS_INDOOR=True
-        )
-        # result = openradar_rt_process_frame(frame, self.adc_params)
+        # Choose 2D vs 3D pipeline based on number of TX antennas
+        if int(getattr(self.adc_params, "tx", 0)) == 2:
+            result = process_2D_radar_frame(
+                frame,
+                self.adc_params,
+                IS_INDOOR=True,
+                tuning=getattr(self, "tuning", {}),
+            )
+        elif int(getattr(self.adc_params, "tx", 0)) == 3:
+            result = process_3D_radar_frame(
+                frame, self.adc_params, tuning=getattr(self, "tuning", {})
+            )
+        else:
+            raise RuntimeError(
+                f"Unsupported adc_params.tx={getattr(self.adc_params, 'tx', None)}; expected 2 or 3"
+            )
 
         # frame = frame.reshape(frame.shape[0], frame.shape[1] * frame.shape[2], -1)
         # result = pyradar_process_frame(frame, self.adc_params, doa_method="MUSIC", IS_INDOOR=False)
@@ -181,6 +193,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
         input_queue: multiprocessing.Queue,
         output_queue: multiprocessing.Queue,
         stop_event,
+        control_queue: Optional[multiprocessing.Queue] = None,
     ):
         """Main processing loop"""
         # Initialize logger and ADC parameters in the target process
@@ -326,6 +339,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             f"Doppler Resolution: {self.adc_params.doppler_resolution:.4f} m/s"
         )
 
+        # Runtime tuning container (updated via control messages if wired later)
+        self.tuning = {}
+
         # Process frames
         self._total_dropped_frames = 0
         while not stop_event.is_set():
@@ -343,6 +359,22 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     item = preloaded_item
                     preloaded_item = None
                 else:
+                    # Poll tuning updates first
+                    if control_queue is not None:
+                        try:
+                            cmd = control_queue.get_nowait()
+                            if isinstance(cmd, str) and cmd.startswith("TUNING:"):
+                                import json as _json
+
+                                self.tuning = _json.loads(cmd.split(":", 1)[1]) or {}
+                                if self.logger:
+                                    self.logger.info(
+                                        "Updated tuning params in analyser"
+                                    )
+                        except Empty:
+                            pass
+                        except Exception:
+                            pass
                     item = input_queue.get(timeout=1)
                 # Support STOP sentinel for immediate shutdown
                 if isinstance(item, dict) and item.get("STOP"):
@@ -570,6 +602,19 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         except Full:
                             self.logger.warning("Output queue full, skipping frame")
                         continue
+                if isinstance(item, dict) and isinstance(
+                    item.get("TUNING"), (str, bytes)
+                ):
+                    # Accept tuning updates injected through the queue (optional path)
+                    try:
+                        import json as _json
+
+                        self.tuning = _json.loads(item.get("TUNING")) or {}
+                        if self.logger:
+                            self.logger.info("Updated tuning params in analyser")
+                    except Exception:
+                        pass
+                    continue
                 if isinstance(item, DCA1000Frame):
                     # Do not drop further in analyser; process the first frame we dequeued
                     latest_frame = item
@@ -578,6 +623,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     drain_end_ns = drain_start_ns
                     recv_ns = time.perf_counter_ns()
                     # Process the most recent frame
+                    # Pass tuning into processing functions via adc_params or kwargs if needed
                     results = self._analyse_frame(latest_frame)
                     end_ns = time.perf_counter_ns()
                     # Attach timing metadata (monotonic ns) and propagate capture times

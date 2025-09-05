@@ -63,8 +63,7 @@ class FusionEngine:
             from radar.dca1000_awr2243 import DCA1000EVM, DCA1000Config
 
             # Pass radar_config_file like the old working version
-            radar_config_file = config.get(
-                "config_file", CFGS.AWR2243_CONFIG_FILE)
+            radar_config_file = config.get("config_file", CFGS.AWR2243_CONFIG_FILE)
             radar_config = DCA1000Config(radar_config_file=radar_config_file)
             if "dest_dir" in config:
                 radar_config.dest_dir = config["dest_dir"]
@@ -75,8 +74,7 @@ class FusionEngine:
             from radar.dca1000_awr2243 import DCA1000Recording, DCA1000Config
 
             # Pass radar_config_file for recording mode too
-            radar_config_file = config.get(
-                "config_file", CFGS.AWR2243_CONFIG_FILE)
+            radar_config_file = config.get("config_file", CFGS.AWR2243_CONFIG_FILE)
             radar_config = DCA1000Config(radar_config_file=radar_config_file)
             radar_config.dest_dir = config["dest_dir"]
             return DCA1000Recording(radar_config, sync_state=sync_state)
@@ -166,8 +164,9 @@ class FusionEngine:
                 "camera_results_queue must be provided when camera_feed_config is available"
             )
 
-        # Create separate control queues for camera and radar
+        # Create separate control queues for camera, radar feed and radar analyser
         radar_control_queue = Queue() if control_queue is not None else None
+        radar_analyser_control_queue = Queue() if control_queue is not None else None
         camera_control_queue = Queue() if control_queue is not None else None
 
         # Preallocate shared memory for radar raw frames (engine-owned)
@@ -232,12 +231,10 @@ class FusionEngine:
             # Expose results SHM identifiers to the GUI process via environment variables
             try:
                 rd_names = ",".join(
-                    [blk.name for blk in self._radar_res_shm_blocks.get(
-                        "rd", [])]
+                    [blk.name for blk in self._radar_res_shm_blocks.get("rd", [])]
                 )
                 ra_names = ",".join(
-                    [blk.name for blk in self._radar_res_shm_blocks.get(
-                        "ra", [])]
+                    [blk.name for blk in self._radar_res_shm_blocks.get("ra", [])]
                 )
                 if rd_names:
                     os.environ["RADAR_RD_SHM_NAMES"] = rd_names
@@ -262,8 +259,7 @@ class FusionEngine:
         self.logger.info("Creating feed and analyzer instances...")
         try:
             radar_feed = self._create_radar_feed(self.radar_feed_config)
-            radar_analyser = self._create_radar_analyser(
-                self.radar_analyser_config)
+            radar_analyser = self._create_radar_analyser(self.radar_analyser_config)
 
             camera_feed = None
             camera_analyser = None
@@ -276,8 +272,7 @@ class FusionEngine:
                     self.camera_analyser_config
                 )
 
-            self.logger.info(
-                "Feed and analyzer instances created successfully")
+            self.logger.info("Feed and analyzer instances created successfully")
         except Exception as e:
             self.logger.error(f"Failed to create feed/analyzer instances: {e}")
             raise
@@ -305,6 +300,7 @@ class FusionEngine:
                 self._radar_stream_queue,
                 radar_results_queue,
                 stop_event,
+                radar_analyser_control_queue,
             ),
         )
         processes.append(radar_analyser_process)
@@ -365,22 +361,31 @@ class FusionEngine:
                     command = control_queue.get_nowait()
                     self.logger.info(f"Received control command: {command}")
 
-                    # Forward command to radar
+                    # Forward command to radar feed
                     if radar_control_queue is not None:
                         try:
                             radar_control_queue.put(command)
+                            self.logger.debug(f"Forwarded command to radar: {command}")
+                        except Exception as e:
+                            self.logger.error(f"Error forwarding command to radar: {e}")
+
+                    # Forward command to radar analyser
+                    if radar_analyser_control_queue is not None:
+                        try:
+                            radar_analyser_control_queue.put(command)
                             self.logger.debug(
-                                f"Forwarded command to radar: {command}")
+                                f"Forwarded command to radar analyser: {command}"
+                            )
                         except Exception as e:
                             self.logger.error(
-                                f"Error forwarding command to radar: {e}")
+                                f"Error forwarding command to radar analyser: {e}"
+                            )
 
                     # Forward command to camera
                     if camera_control_queue is not None:
                         try:
                             camera_control_queue.put(command)
-                            self.logger.debug(
-                                f"Forwarded command to camera: {command}")
+                            self.logger.debug(f"Forwarded command to camera: {command}")
                         except Exception as e:
                             self.logger.error(
                                 f"Error forwarding command to camera: {e}"
@@ -409,16 +414,13 @@ class FusionEngine:
                     self.logger.info(f"Process {i} already done.")
 
                 if process.is_alive():
-                    self.logger.error(
-                        f"Process {i} did not terminate, killing...")
+                    self.logger.error(f"Process {i} did not terminate, killing...")
                     process.kill()
                     process.join()
 
-                self.logger.info(
-                    f"Process {i} joined, exit_code: {process.exitcode}")
+                self.logger.info(f"Process {i} joined, exit_code: {process.exitcode}")
             except Exception as e:
-                self.logger.error(
-                    f"Error while shutting down process {i}: {e}")
+                self.logger.error(f"Error while shutting down process {i}: {e}")
 
         # Final process status check
         self.logger.info("Final process status:")
@@ -454,6 +456,15 @@ class FusionEngine:
             if self.logger:
                 self.logger.error(
                     f"Engine: radar_control_queue close/join_thread failed: {e}"
+                )
+        try:
+            if control_queue is not None and radar_analyser_control_queue is not None:
+                radar_analyser_control_queue.close()
+                radar_analyser_control_queue.join_thread()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: radar_analyser_control_queue close/join_thread failed: {e}"
                 )
         try:
             if control_queue is not None and camera_control_queue is not None:
@@ -500,7 +511,6 @@ class FusionEngine:
                             )
         except Exception as e:
             if self.logger:
-                self.logger.error(
-                    f"Engine: unexpected error cleaning SHM: {e}")
+                self.logger.error(f"Engine: unexpected error cleaning SHM: {e}")
 
         self.logger.info("FusionEngine stopped successfully.")
