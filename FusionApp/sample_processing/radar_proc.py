@@ -572,7 +572,9 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     }
 
 
-def process_2D_radar_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
+def process_2D_radar_frame(
+    frame, adc_params: ADCParams, IS_INDOOR=True, tuning: Optional[dict] = None
+):
     """
     Process a radar frame to produce a 2D range-azimuth heatmap and a 2D point cloud
     (x, y; z is None), along with Doppler velocities and SNR values.
@@ -627,7 +629,9 @@ def process_2D_radar_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     function_start = time.perf_counter()
 
     # Validate configuration: this pipeline expects 2 TX (2D)
-    assert int(getattr(adc_params, "tx", 0)) == 2, "process_2D_radar_frame requires adc_params.tx == 2"
+    assert (
+        int(getattr(adc_params, "tx", 0)) == 2
+    ), "process_2D_radar_frame requires adc_params.tx == 2"
 
     # Frame counter for profile logging cadence
     if not hasattr(process_2D_radar_frame, "frame_count"):
@@ -721,20 +725,23 @@ def process_2D_radar_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     heatmap_time = time.perf_counter() - step_start
     logger.debug(f"    [RADAR_PROFILE] Heatmap log computation: {heatmap_time:.4f}s")
 
+    t2d = (tuning or {}).get("cfar_2d", {}) if isinstance(tuning, dict) else {}
+    t2d_az = t2d.get("az", {})
+    t2d_r = t2d.get("range", {})
     if IS_INDOOR:
-        AZ_LBOUND = 1.5
-        AZ_GUARD_LEN = 2
-        AZ_NOISE_LEN = 10
-        R_LBOUND = 3.0
-        R_GUARD_LEN = 2
-        R_NOISE_LEN = 10
+        AZ_LBOUND = float(t2d_az.get("l_bound", 1.5))
+        AZ_GUARD_LEN = int(t2d_az.get("guard_len", 2))
+        AZ_NOISE_LEN = int(t2d_az.get("noise_len", 10))
+        R_LBOUND = float(t2d_r.get("l_bound", 3.0))
+        R_GUARD_LEN = int(t2d_r.get("guard_len", 2))
+        R_NOISE_LEN = int(t2d_r.get("noise_len", 10))
     else:
-        AZ_LBOUND = 1.0
-        AZ_GUARD_LEN = 2
-        AZ_NOISE_LEN = 10
-        R_LBOUND = 1.5
-        R_GUARD_LEN = 2
-        R_NOISE_LEN = 10
+        AZ_LBOUND = float(t2d_az.get("l_bound", 1.0))
+        AZ_GUARD_LEN = int(t2d_az.get("guard_len", 2))
+        AZ_NOISE_LEN = int(t2d_az.get("noise_len", 10))
+        R_LBOUND = float(t2d_r.get("l_bound", 1.5))
+        R_GUARD_LEN = int(t2d_r.get("guard_len", 2))
+        R_NOISE_LEN = int(t2d_r.get("noise_len", 10))
 
     # --- cfar in azimuth direction
     step_start = time.perf_counter()
@@ -870,7 +877,7 @@ def process_2D_radar_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     }
 
 
-def process_3D_radar_frame(frame, adc_params):
+def process_3D_radar_frame(frame, adc_params, tuning: Optional[dict] = None):
     """
     Process a radar frame to produce a 3D point cloud (x, y, z) and a range-doppler heatmap,
     including Doppler velocities and SNR values for detections.
@@ -884,16 +891,16 @@ def process_3D_radar_frame(frame, adc_params):
     function_start = time.perf_counter()
 
     # Validate configuration: this pipeline expects 3 TX (3D)
-    assert int(getattr(adc_params, "tx", 0)) == 3, "process_3D_radar_frame requires adc_params.tx == 3"
+    assert (
+        int(getattr(adc_params, "tx", 0)) == 3
+    ), "process_3D_radar_frame requires adc_params.tx == 3"
 
     # Frame counter for profile logging cadence control
     if not hasattr(process_3D_radar_frame, "frame_count"):
         process_3D_radar_frame.frame_count = 0
     process_3D_radar_frame.frame_count += 1
 
-    logger.debug(
-        f"process_3D_radar_frame: Processing frame with shape {frame.shape}"
-    )
+    logger.debug(f"process_3D_radar_frame: Processing frame with shape {frame.shape}")
     logger.debug(
         f"ADC Params - tx: {adc_params.tx}, rx: {adc_params.rx}, samples: {adc_params.samples}, chirps: {adc_params.chirps}, range_resolution: {adc_params.range_resolution}, doppler_resolution: {adc_params.doppler_resolution}"
     )
@@ -978,22 +985,33 @@ def process_3D_radar_frame(frame, adc_params):
     step_start = time.perf_counter()
     # --- CFAR, SNR is calculated as well.
     fft2d_sum = det_matrix.astype(np.int64)
+    # Apply optional tuning for 3D CFAR (uniform handling)
+    t3d = (tuning or {}).get("cfar_3d", {}) if isinstance(tuning, dict) else {}
+    t3d_d = t3d.get("doppler", {})
+    t3d_r = t3d.get("range", {})
+    lb_d = float(t3d_d.get("l_bound", 1.5))
+    gl_d = int(t3d_d.get("guard_len", 4))
+    nl_d = int(t3d_d.get("noise_len", 16))
+    lb_r = float(t3d_r.get("l_bound", 2.5))
+    gl_r = int(t3d_r.get("guard_len", 4))
+    nl_r = int(t3d_r.get("noise_len", 16))
+
     thresholdDoppler, noiseFloorDoppler = np.apply_along_axis(
         func1d=dsp.ca_,
         axis=0,
         arr=fft2d_sum.T,
-        l_bound=1.5,
-        guard_len=4,
-        noise_len=16,
+        l_bound=lb_d,
+        guard_len=gl_d,
+        noise_len=nl_d,
     )
 
     thresholdRange, noiseFloorRange = np.apply_along_axis(
         func1d=dsp.ca_,
         axis=0,
         arr=fft2d_sum,
-        l_bound=2.5,
-        guard_len=4,
-        noise_len=16,
+        l_bound=lb_r,
+        guard_len=gl_r,
+        noise_len=nl_r,
     )
 
     # thresholdDoppler, noiseFloorDoppler = np.apply_along_axis(
@@ -1094,10 +1112,14 @@ def process_3D_radar_frame(frame, adc_params):
         f"detObj2D['rangeIdx'] after peak grouping = {len(detObj2D['rangeIdx'])}"
     )
 
-    # SNRThresholds2 = np.array([[2, 30], [10, 20], [35, 16.0]])
-    SNRThresholds2 = np.array([[2, 5.5], [10, 2.5], [35, 10.0]])
-    # peakValThresholds2 = np.array([[4, 275], [1, 400], [500, 0]])
-    peakValThresholds2 = np.array([[4, 100], [1, 400], [500, 0]])
+    # Threshold tables (tunable)
+    th3d = (tuning or {}).get("thresholds_3d", {}) if isinstance(tuning, dict) else {}
+    SNRThresholds2 = np.array(
+        th3d.get("snr_table", [[2, 5.5], [10, 2.5], [35, 10.0]]), dtype=np.float32
+    )
+    peakValThresholds2 = np.array(
+        th3d.get("peak_table", [[4, 100], [1, 400], [500, 0]]), dtype=np.float32
+    )
 
     step_start = time.perf_counter()
     detObj2D = dsp.range_based_pruning(
@@ -1158,7 +1180,12 @@ def process_3D_radar_frame(frame, adc_params):
     cluster_labels = np.array([])
     snrs = detObj2D["SNR"]  # Use the SNR values from the detected objects
 
-    logger.info(f"Min, Mean and max snr: {np.min(snrs)}, {np.mean(snrs)}, {np.max(snrs)}")
+    if snrs.size > 0:
+        logger.info(
+            f"Min, Mean and max snr: {np.min(snrs)}, {np.mean(snrs)}, {np.max(snrs)}"
+        )
+    else:
+        logger.info("No detections: empty SNR array")
 
     velocities = (
         detObj2D["dopplerIdx"] * adc_params.doppler_resolution

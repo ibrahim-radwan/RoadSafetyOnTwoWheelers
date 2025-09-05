@@ -94,7 +94,13 @@ class FusionRunner:
     def get_latest_point_cloud_json(self) -> Optional[Dict[str, Any]]:
         return self._impl.get_latest_point_cloud_json()
 
-    
+    # Tuning passthrough
+    def get_tuning(self) -> Dict[str, Any]:
+        return self._impl.get_tuning()
+
+    def set_tuning(self, tuning: Dict[str, Any]) -> Dict[str, Any]:
+        return self._impl.set_tuning(tuning)
+
     # Expose minimal state needed by routes (back-compat with existing checks)
     @property
     def _running(self) -> bool:
@@ -153,6 +159,20 @@ def status():
         return jsonify({"running": False}), 503
     st = runner.get_status()
     return jsonify(st)
+
+
+@app.route("/tuning", methods=["GET", "POST"])
+def tuning():
+    global runner
+    if runner is None:
+        return ("runner not initialized", 503)
+    if request.method == "GET":
+        return jsonify(runner.get_tuning())
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        body = {}
+    return jsonify(runner.set_tuning(body))
 
 
 @app.route("/status/processes")

@@ -83,7 +83,22 @@ class FusionRunner:
         self._camera_connected: bool = False
         self._radar_only: bool = False
 
-    def start(self, radar_only: bool = False, radar_config_file: Optional[str] = None) -> bool:
+        # Runtime tuning (hot) applied by analyser via control queue
+        self._tuning: Dict[str, Any] = {
+            "cfar_2d": {
+                "az": {"l_bound": 1.5, "guard_len": 2, "noise_len": 10},
+                "range": {"l_bound": 3.0, "guard_len": 2, "noise_len": 10},
+            },
+            "cfar_3d": {
+                "doppler": {"l_bound": 1.5, "guard_len": 4, "noise_len": 16},
+                "range": {"l_bound": 2.5, "guard_len": 4, "noise_len": 16},
+            },
+            "thresholds_3d": {"snr_min": 8.0},
+        }
+
+    def start(
+        self, radar_only: bool = False, radar_config_file: Optional[str] = None
+    ) -> bool:
         if self._running or self._starting:
             return False
         self._failed = False
@@ -106,9 +121,13 @@ class FusionRunner:
 
         fusion_engine: FusionEngine
         fusion_engine = (
-            FusionFactory.create_live_radar_only(radar_config_file_override=radar_config_file)
+            FusionFactory.create_live_radar_only(
+                radar_config_file_override=radar_config_file
+            )
             if radar_only
-            else FusionFactory.create_live_fusion(radar_config_file_override=radar_config_file)
+            else FusionFactory.create_live_fusion(
+                radar_config_file_override=radar_config_file
+            )
         )
 
         from multiprocessing import Process
@@ -375,6 +394,27 @@ class FusionRunner:
         except Exception as e:
             self.logger.error(f"Failed to send control command '{command}': {e}")
 
+    # Tuning API
+    def get_tuning(self) -> Dict[str, Any]:
+        return dict(self._tuning)
+
+    def set_tuning(self, tuning: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            if isinstance(tuning, dict):
+                # Shallow merge for known sections
+                for k in ("cfar_2d", "cfar_3d", "thresholds_3d"):
+                    if k in tuning and isinstance(tuning[k], dict):
+                        cur = self._tuning.get(k, {})
+                        cur.update(tuning[k])
+                        self._tuning[k] = cur
+                # Broadcast to analyser via control queue
+                import json as _json
+
+                self.send_control("TUNING:" + _json.dumps(self._tuning))
+        except Exception as e:
+            self.logger.error(f"set_tuning failed: {e}")
+        return dict(self._tuning)
+
     def _draw_detections(self, bgr: np.ndarray, objects: Optional[Any]) -> np.ndarray:
         try:
             if bgr is None or objects is None:
@@ -585,15 +625,22 @@ class FusionRunner:
             result = {
                 "x": list(map(float, x)) if hasattr(x, "__len__") else [],
                 "y": list(map(float, y)) if hasattr(y, "__len__") else [],
-                "z": list(map(float, z)) if (z is not None and hasattr(z, "__len__")) else None,
-                "intensity": list(map(float, inten)) if (inten is not None and hasattr(inten, "__len__")) else None,
+                "z": (
+                    list(map(float, z))
+                    if (z is not None and hasattr(z, "__len__"))
+                    else None
+                ),
+                "intensity": (
+                    list(map(float, inten))
+                    if (inten is not None and hasattr(inten, "__len__"))
+                    else None
+                ),
                 "max_range": float(mr) if isinstance(mr, (int, float)) else None,
                 "max_speed": float(ms) if isinstance(ms, (int, float)) else None,
             }
             return result
         except Exception:
             return None
-
 
     def get_status(self) -> Dict[str, Any]:
         with self._stats_lock:
@@ -670,6 +717,7 @@ class FusionRunner:
                 "recording_duration_hms": (
                     _fmt_hms(rec_dur_s) if self._rec_is_recording else "00:00:00"
                 ),
+                "tuning": self._tuning,
             }
         )
         return stats_copy
