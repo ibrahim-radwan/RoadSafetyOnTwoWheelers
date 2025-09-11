@@ -6,7 +6,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Fusion Live Server</title>
   <script>
-    window.radar_config_options = {{ radar_config_options | tojson | safe if radar_config_options is defined else '[]' }};
+    // Initialize; populated below from embedded JSON if available
+    window.radar_config_options = [];
+  </script>
+  <script id="cfg-data" type="application/json">
+{{ radar_config_options | tojson if radar_config_options is defined else '[]' }}
+  </script>
+  <script id="defaults-data" type="application/json">
+{"default_replay_path": {{ default_replay_path | tojson if default_replay_path is defined else '""' }},
+ "default_replay_cfg": {{ default_replay_cfg | tojson if default_replay_cfg is defined else '""' }}}
+  </script>
+  <script>
+    try {
+      var __cfgEl = document.getElementById('cfg-data');
+      if (__cfgEl && __cfgEl.textContent && __cfgEl.textContent.trim().length) {
+        window.radar_config_options = JSON.parse(__cfgEl.textContent);
+      }
+    } catch (e) { }
+    try {
+      var __dEl = document.getElementById('defaults-data');
+      if (__dEl && __dEl.textContent && __dEl.textContent.trim().length) {
+        var d = JSON.parse(__dEl.textContent) || {};
+        window.__defaults = d;
+      }
+    } catch (e) { }
   </script>
   <style>
     body {
@@ -105,17 +128,80 @@
       width: 640px;
       height: 480px;
     }
+
+    .hidden {
+      display: none;
+    }
+
+    .picker {
+      border: 1px solid #ccc;
+      padding: 0;
+      border-radius: 6px;
+      background: #fafafa;
+    }
+
+    .picker .picker-toolbar {
+      position: sticky;
+      top: 0;
+      background: #f0f0f0;
+      padding: 6px;
+      border-bottom: 1px solid #ddd;
+      z-index: 1;
+    }
+
+    .picker .list {
+      max-height: 240px;
+      overflow: auto;
+      padding: 6px;
+    }
+
+    .picker .entry {
+      padding: 4px 6px;
+      cursor: pointer;
+    }
+
+    .picker .entry.dir {
+      font-weight: 600;
+    }
+
+    .picker .entry:hover {
+      background: #eef;
+    }
+
+    .picker .entry.selected {
+      background: #cfe3ff;
+    }
   </style>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <script>
     let streamActive = false;
     let isRunning = false;
+    // Replay tracking
+    let rpPlaying = false;
+    let rpLastTs = 0;
+    let rpCur = 0;
     async function systemStart() {
-      const ro = document.getElementById('radar_only').checked ? '?radar_only=1' : '';
-      const sep = ro.includes('?') ? '&' : '?';
-      const sel = document.getElementById('radar_cfg_sel');
-      const cfg = sel && sel.value ? ('radar_cfg=' + encodeURIComponent(sel.value)) : '';
-      const url = '/system/start' + ro + (cfg ? (sep + cfg) : '');
+      const params = [];
+      const radarOnly = document.getElementById('radar_only').checked;
+      if (radarOnly) params.push('radar_only=1');
+      const mode = document.querySelector('input[name="server_mode"]:checked').value;
+      params.push('mode=' + encodeURIComponent(mode));
+      if (mode === 'live') {
+        const sel = document.getElementById('radar_cfg_sel');
+        const cfg = sel && sel.value ? sel.value : '';
+        if (cfg) params.push('radar_cfg=' + encodeURIComponent(cfg));
+      } else {
+        const rpath = document.getElementById('replay_path').value || '';
+        const rcfg = document.getElementById('replay_cfg').value || '';
+        if (rpath) params.push('replay_path=' + encodeURIComponent(rpath));
+        if (rcfg) params.push('radar_cfg=' + encodeURIComponent(rcfg));
+        // Reset replay counters on new start
+        rpCur = 0; rpLastTs = 0; rpPlaying = false;
+        const seekEl = document.getElementById('rp_seek'); if (seekEl) seekEl.value = '0';
+        // Ensure tuning is pushed to replay analyser immediately
+        try { if (typeof window.__sendTuning === 'function') await window.__sendTuning(); } catch (e) { }
+      }
+      const url = '/system/start' + (params.length ? ('?' + params.join('&')) : '');
       await fetch(url, { method: 'POST' });
     }
     async function systemStop() {
@@ -157,7 +243,20 @@
                   isRunning = false;
                   if (videoTimer) clearInterval(videoTimer);
                   if (radarTimer) clearInterval(radarTimer);
+                  // When engine stops, reset replay playing flag
+                  rpPlaying = false;
                 }
+              }
+            } catch (e) { }
+            // Track replay frame progress using reported current_frame when available
+            try {
+              const rj = j && j.replay ? j.replay : null;
+              if (rj && typeof rj.current_frame === 'number') {
+                rpCur = rj.current_frame >>> 0;
+                const seekEl = document.getElementById('rp_seek');
+                if (seekEl) seekEl.value = String(rpCur);
+                const tot = document.getElementById('rp_total');
+                if (tot && typeof rj.total_frames === 'number') tot.textContent = String(rj.total_frames >>> 0);
               }
             } catch (e) { }
             // Refresh processes grid every tick
@@ -167,6 +266,94 @@
         } catch (e) { setInterval(refreshStatus, 1000); }
       } else {
         setInterval(refreshStatus, 1000);
+      }
+    }
+    // Replay controls
+    async function replayCmd(cmd) {
+      try { await fetch('/replay/control?cmd=' + encodeURIComponent(cmd), { method: 'POST' }); } catch (e) { console.error(e); }
+    }
+    function bindReplayControls() {
+      const playBtn = document.getElementById('rp_play');
+      const pauseBtn = document.getElementById('rp_pause');
+      const stopBtn = document.getElementById('rp_stop');
+      const seekBtn = document.getElementById('rp_seek_btn');
+      if (playBtn) playBtn.addEventListener('click', async () => {
+        try {
+          // If the system isn't started, start it in replay mode with current inputs
+          if (!isRunning) {
+            await systemStart();
+            // Brief delay to allow process to initialize queues
+            await new Promise(r => setTimeout(r, 300));
+          }
+        } catch (e) { }
+        rpPlaying = true;
+        await replayCmd('play');
+      });
+      if (pauseBtn) pauseBtn.addEventListener('click', async () => { rpPlaying = false; await replayCmd('pause'); });
+      if (stopBtn) stopBtn.addEventListener('click', async () => {
+        rpPlaying = false; rpCur = 0; rpLastTs = 0;
+        const seekEl = document.getElementById('rp_seek'); if (seekEl) seekEl.value = '0';
+        // Stop playback state in feeds, then stop engine for a clean reset like live mode
+        try { await replayCmd('stop'); } catch (e) { }
+        try { await fetch('/system/stop', { method: 'POST' }); } catch (e) { }
+      });
+      if (seekBtn) seekBtn.addEventListener('click', () => {
+        const v = document.getElementById('rp_seek').value || '0';
+        const n = parseInt(v || '0');
+        if (!isNaN(n)) { rpCur = n; replayCmd('seek:' + n); }
+      });
+    }
+    // File picker helpers
+    async function listDir(target, path) {
+      const r = await fetch('/fs/list?path=' + encodeURIComponent(path || ''));
+      const j = await r.json();
+      const cont = document.getElementById(target);
+      if (!cont) return;
+      cont.innerHTML = '';
+      const upBtn = document.createElement('div');
+      upBtn.className = 'entry dir';
+      upBtn.textContent = '..';
+      upBtn.title = 'Go to parent folder';
+      upBtn.addEventListener('click', () => {
+        const parent = j.cwd.replace(/\\/g, '/').split('/').slice(0, -1).join('/') || j.cwd;
+        listDir(target, parent);
+      });
+      cont.appendChild(upBtn);
+      (j.entries || []).forEach(e => {
+        const d = document.createElement('div');
+        d.className = 'entry ' + (e.type || 'other');
+        d.textContent = (e.type === 'dir' ? '[DIR] ' : '') + e.name;
+        // single click selects
+        d.addEventListener('click', () => {
+          cont.querySelectorAll('.entry').forEach(x => x.classList.remove('selected'));
+          d.classList.add('selected');
+        });
+        // double click opens directories
+        d.addEventListener('dblclick', () => { if (e.type === 'dir') { listDir(target, e.path); } });
+        d.dataset.path = e.path;
+        cont.appendChild(d);
+      });
+      cont.dataset.cwd = j.cwd || '';
+    }
+    async function pickCurrent(targetListId, inputId) {
+      const cont = document.getElementById(targetListId);
+      if (!cont) return;
+      // Prefer selected file, otherwise current directory
+      const sel = cont.querySelector('.entry.selected');
+      const path = sel ? (sel.dataset.path || '') : (cont.dataset.cwd || '');
+      document.getElementById(inputId).value = path;
+      // If picking recording dir, fetch replay info to display total frames
+      if (inputId === 'replay_path') {
+        try {
+          const r = await fetch('/replay/info?path=' + encodeURIComponent(path));
+          const j = await r.json();
+          const el = document.getElementById('rp_total');
+          if (el) {
+            const total = (document.getElementById('radar_only').checked ? (j.radar_frames || 0) : Math.max(j.radar_frames || 0, j.camera_frames || 0));
+            el.dataset.total = String(total || 0);
+            el.textContent = String(total || 0);
+          }
+        } catch (e) { }
       }
     }
     async function startRecord() {
@@ -467,6 +654,7 @@
       refreshStatus();
       setupStatusSSE();
       bindViewerControls();
+      bindReplayControls();
       // Ensure processes grid updates even if SSE is delayed
       procTimer = setInterval(fetchProcesses, 1000);
       // Fetch initial tuning and populate minimal UI if present
@@ -496,8 +684,8 @@
       // Bind apply
       const btn = document.getElementById('t_apply');
       if (btn) {
-        btn.addEventListener('click', async () => {
-          const body = {
+        function collectTuning() {
+          return {
             cfar_2d: {
               az: {
                 l_bound: parseFloat(document.getElementById('cf1_lb').value || '1.5'),
@@ -535,24 +723,65 @@
               ]
             }
           };
-          try {
-            await fetch('/tuning', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-          } catch (e) { console.error(e); }
-        });
+        }
+        async function sendTuning() {
+          const body = collectTuning();
+          try { await fetch('/tuning', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); } catch (e) { console.error(e); }
+        }
+        // expose for systemStart
+        window.__sendTuning = sendTuning;
+        btn.addEventListener('click', sendTuning);
       }
       // Disable 3D-only boxes if 2D profile detected in options
       try {
-        const is2D = (window.radar_config_options || []).some(o => o && o.mode === '2D' && document.getElementById('radar_cfg_sel')?.value?.includes(o.name));
         const dis = (flag) => { document.getElementById('snr_box').disabled = flag; document.getElementById('peak_box').disabled = flag; };
-        dis(is2D);
-        document.getElementById('radar_cfg_sel')?.addEventListener('change', () => {
-          const val = document.getElementById('radar_cfg_sel').value || '';
-          const is2 = (val.toLowerCase().includes('2d'));
-          dis(is2);
-        });
+        const liveSel = document.getElementById('radar_cfg_sel');
+        if (liveSel) {
+          const optSel = liveSel.value || '';
+          dis(optSel.toLowerCase().includes('2d'));
+          liveSel.addEventListener('change', () => {
+            const val = liveSel.value || '';
+            dis(val.toLowerCase().includes('2d'));
+          });
+        }
+        const replayCfg = document.getElementById('replay_cfg');
+        if (replayCfg) {
+          const val0 = replayCfg.value || '';
+          if (val0) dis(val0.toLowerCase().includes('2d'));
+          replayCfg.addEventListener('change', () => {
+            const v = replayCfg.value || '';
+            dis(v.toLowerCase().includes('2d'));
+          });
+        }
       } catch (e) { }
     }
     window.addEventListener('load', init);
+    // Mode toggle: live vs replay (bind after DOM is ready)
+    window.addEventListener('load', function () {
+      function setModeUI() {
+        const modeEl = document.querySelector('input[name="server_mode"]:checked');
+        const mode = modeEl ? modeEl.value : 'live';
+        const liveOnlyEls = document.querySelectorAll('.live-only');
+        const replayOnlyEls = document.querySelectorAll('.replay-only');
+        liveOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'live'));
+        replayOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'replay'));
+        // Prefill defaults for replay when switching into replay mode
+        if (mode === 'replay' && window.__defaults) {
+          try {
+            if (window.__defaults.default_replay_path) {
+              const rp = document.getElementById('replay_path');
+              if (rp && !rp.value) rp.value = window.__defaults.default_replay_path;
+            }
+            if (window.__defaults.default_replay_cfg) {
+              const rc = document.getElementById('replay_cfg');
+              if (rc && !rc.value) rc.value = window.__defaults.default_replay_cfg;
+            }
+          } catch (e) { }
+        }
+      }
+      document.querySelectorAll('input[name="server_mode"]').forEach(r => r.addEventListener('change', setModeUI));
+      setModeUI();
+    });
   </script>
   <script>
     // Auto-apply on change (only when not running)
@@ -591,13 +820,20 @@
   <div class="row">
     <div class="col panel" style="flex:2;">
       <h3>Controls</h3>
+      <div style="margin-bottom:6px;">
+        <label>Server Mode:</label>
+        <label><input type="radio" name="server_mode" value="live" checked> Live</label>
+        <label><input type="radio" name="server_mode" value="replay"> Replay</label>
+      </div>
       <label><input type="checkbox" id="radar_only"> Radar only</label>
-      <button onclick="systemStart()">Start System</button>
-      <button onclick="systemStop()">Stop System</button>
-      <button onclick="systemRetry()">Retry</button>
-      <button onclick="startRecord()">Start Recording</button>
-      <button onclick="stopRecord()">Stop Recording</button>
-      <div style="margin-top:8px;">
+      <div class="live-only">
+        <button onclick="systemStart()">Start System</button>
+        <button onclick="systemStop()">Stop System</button>
+        <button onclick="systemRetry()">Retry</button>
+        <button onclick="startRecord()">Start Recording</button>
+        <button onclick="stopRecord()">Stop Recording</button>
+      </div>
+      <div class="live-only" style="margin-top:8px;">
         <label>Radar Config:</label>
         <select id="radar_cfg_sel">
           {% if radar_config_options %}
@@ -608,6 +844,56 @@
           {% endif %}
         </select>
         <span class="meta">(only when not running)</span>
+      </div>
+      <div class="replay-only hidden" style="margin-top:8px;">
+        <h4>Replay Inputs</h4>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <div style="min-width:320px;">
+            <div class="meta">Recording directory</div>
+            <div style="display:flex; gap:6px;">
+              <input id="replay_path" style="flex:1;" placeholder="/home/user/recording_dir" />
+              <button
+                onclick="document.getElementById('picker_dir').classList.toggle('hidden'); listDir('picker_dir_list','');">Browse</button>
+            </div>
+            <div id="picker_dir" class="picker hidden">
+              <div class="picker-toolbar">
+                <button
+                  onclick="pickCurrent('picker_dir_list','replay_path'); document.getElementById('picker_dir').classList.add('hidden');">Use
+                  This</button>
+                <span class="meta">Tip: single-click to select, double-click to open</span>
+              </div>
+              <div id="picker_dir_list" class="list"></div>
+            </div>
+          </div>
+          <div style="min-width:320px;">
+            <div class="meta">Radar config file</div>
+            <div style="display:flex; gap:6px;">
+              <input id="replay_cfg" style="flex:1;" placeholder="/home/user/configs/AWR...txt" />
+              <button
+                onclick="document.getElementById('picker_cfg').classList.toggle('hidden'); listDir('picker_cfg_list','');">Browse</button>
+            </div>
+            <div id="picker_cfg" class="picker hidden">
+              <div class="picker-toolbar">
+                <button
+                  onclick="pickCurrent('picker_cfg_list','replay_cfg'); document.getElementById('picker_cfg').classList.add('hidden');">Use
+                  This</button>
+                <span class="meta">Tip: single-click to select, double-click to open</span>
+              </div>
+              <div id="picker_cfg_list" class="list"></div>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:8px;">
+          <h4>Playback</h4>
+          <button id="rp_play">Play</button>
+          <button id="rp_pause">Pause</button>
+          <button id="rp_stop">Stop</button>
+          <span class="gap"></span>
+          <label>Frame</label>
+          <input id="rp_seek" type="number" value="0" style="width:100px;" />
+          <button id="rp_seek_btn">Seek</button>
+          <span class="meta">/ <span id="rp_total" data-total="0">0</span></span>
+        </div>
       </div>
       <div class="panel" style="margin-top:8px;">
         <h4>Tuning</h4>

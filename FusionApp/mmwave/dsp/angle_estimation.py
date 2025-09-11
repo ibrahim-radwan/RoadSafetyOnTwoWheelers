@@ -10,11 +10,19 @@
 # limitations under the License.
 # ==============================================================================
 
+# Ensure Intel SVML is disabled on Windows before Numba is imported
+import os
+import platform
+
+if platform.system() == "Windows":
+    os.environ.setdefault("NUMBA_DISABLE_INTEL_SVML", "1")
+
 import numpy as np
 from .utils import *
 from . import compensation
 from scipy.signal import find_peaks
 import warnings
+
 
 def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
     """Calculate the X/Y coordinates for all detected objects.
@@ -53,7 +61,9 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
 
     # Rearrange just like what is done for 1st 2D FFT calculation
     # BE CAREFUL OF THE NAMING!
-    fft2d_azimuth_in = np.concatenate((fft2d_azimuth_in[0::2, ...], fft2d_azimuth_in[1::2, ...]), axis=1)
+    fft2d_azimuth_in = np.concatenate(
+        (fft2d_azimuth_in[0::2, ...], fft2d_azimuth_in[1::2, ...]), axis=1
+    )
     # transpose to (numDetObj, numVirtualAntennas, numDopplerBins)
     fft2d_azimuth_in = np.transpose(fft2d_azimuth_in, axes=(2, 1, 0))
 
@@ -71,49 +81,63 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
     # Filter fft2d_azimuth_out with the DopplerIdx from CFAR and PG
     # azimuth_in(numDetObj, numVirtualAntennas)
     azimuth_in = np.zeros((num_det_obj, config.numAngleBins), dtype=np.complex64)
-    azimuth_in[:, :config.numVirtualAntAzim] = np.array([fft2d_azimuth_out[i, :, dopplerIdx] for i, dopplerIdx in
-                                                         enumerate(
-                                                             det_obj_2d[:, DOPPLERIDX].astype(np.uint32))]).squeeze()
+    azimuth_in[:, : config.numVirtualAntAzim] = np.array(
+        [
+            fft2d_azimuth_out[i, :, dopplerIdx]
+            for i, dopplerIdx in enumerate(det_obj_2d[:, DOPPLERIDX].astype(np.uint32))
+        ]
+    ).squeeze()
 
-    assert azimuth_in.shape == (num_det_obj, config.numAngleBins), \
-        "azimuth FFT input dimension is wrong, it should be {} instead of {}." \
-            .format((num_det_obj, config.numAngleBins), azimuth_in.shape)
+    assert azimuth_in.shape == (
+        num_det_obj,
+        config.numAngleBins,
+    ), "azimuth FFT input dimension is wrong, it should be {} instead of {}.".format(
+        (num_det_obj, config.numAngleBins), azimuth_in.shape
+    )
 
     # 3. Doppler compensation.
-    # Only the 2nd half of the 2D FFT output needs to be compensated. That is 
+    # Only the 2nd half of the 2D FFT output needs to be compensated. That is
     # the reason for azimuth_in[:, numRxAntennas, :].
-    compensation.addDopplerCompensation(det_obj_2d[:, DOPPLERIDX],
-                                        compensation.azimuthModCoefs,
-                                        compensation.azimuthModCoefsHalfBin,
-                                        azimuth_in[:, config.numRxAntennas:],
-                                        config.numRxAntennas * (config.numTxAntennas - 1))
+    compensation.addDopplerCompensation(
+        det_obj_2d[:, DOPPLERIDX],
+        compensation.azimuthModCoefs,
+        compensation.azimuthModCoefsHalfBin,
+        azimuth_in[:, config.numRxAntennas :],
+        config.numRxAntennas * (config.numTxAntennas - 1),
+    )
 
     # If receiver channel biases are provided, activate the following function
     # to compensate for it.
     if config.rxChannelComp is not None:
-        compensation.rxChanPhaseBiasCompensation(config.rxChannelComp,
-                                                 azimuth_in,
-                                                 config.numVirtualAntennas)
+        compensation.rxChanPhaseBiasCompensation(
+            config.rxChannelComp, azimuth_in, config.numVirtualAntennas
+        )
 
-    # The near field correction is currently in exclusion with velocity 
-    # disambiguation because of implementation complexities and also because it 
+    # The near field correction is currently in exclusion with velocity
+    # disambiguation because of implementation complexities and also because it
     # is unlikely to have objects at high velocities in the near field.
 
     # Save a copy for flipped version of azimuth_in for velocity disambiguation.
     azimuth_in_copy = np.zeros_like(azimuth_in)
     if config.extendedMaxVelocityEnabled and config.nearFieldCorrectionCfg.enabled:
-        assert False, "Extended maximum velocity and near field correction are not supported simultaneously."
+        assert (
+            False
+        ), "Extended maximum velocity and near field correction are not supported simultaneously."
 
     if config.extendedMaxVelocityEnabled:
-        azimuth_in_copy[:, :config.numVirtualAntAzim] = azimuth_in[:, :config.numVirtualAntAzim]
+        azimuth_in_copy[:, : config.numVirtualAntAzim] = azimuth_in[
+            :, : config.numVirtualAntAzim
+        ]
 
     # Save a copy of RX antennas corresponding to Tx2 antenna.
     if config.nearFieldCorrectionCfg.enabled:
-        idx_temp = ((det_obj_2d[:, RANGEIDX] >= config.nearFieldCorrectionCfg.startRangeIdx) &
-                    (det_obj_2d[:, RANGEIDX] <= config.nearFieldCorrectionCfg.endRangeIdx))
-        azimuth_in_copy[idx_temp, :config.numRxAntennas] = \
-            azimuth_in_copy[idx_temp, config.numRxAntennas:config.numRxAntennas * 2]
-        azimuth_in[idx_temp, config.numRxAntennas:config.numRxAntennas * 2] = 0
+        idx_temp = (
+            det_obj_2d[:, RANGEIDX] >= config.nearFieldCorrectionCfg.startRangeIdx
+        ) & (det_obj_2d[:, RANGEIDX] <= config.nearFieldCorrectionCfg.endRangeIdx)
+        azimuth_in_copy[idx_temp, : config.numRxAntennas] = azimuth_in_copy[
+            idx_temp, config.numRxAntennas : config.numRxAntennas * 2
+        ]
+        azimuth_in[idx_temp, config.numRxAntennas : config.numRxAntennas * 2] = 0
 
     # 4. 3rd FFT.
     azimuth_out = np.fft.fft(azimuth_in)
@@ -121,23 +145,31 @@ def azimuth_processing(radar_cube, det_obj_2d, config, window_type_2d=None):
     # 5.1. Optional near field correction.
     if config.nearFieldCorrectionCfg.enabled:
         azimuth_out_copy = np.fft.fft(azimuth_in_copy)
-        compensation.nearFieldCorrection(det_obj_2d,
-                                         config.nearFieldCorrectionCfg.startRangeIdx,
-                                         config.nearFieldCorrectionCfg.endRangeIdx,
-                                         azimuth_in, azimuth_in_copy,
-                                         azimuth_out, azimuth_out_copy)
+        compensation.nearFieldCorrection(
+            det_obj_2d,
+            config.nearFieldCorrectionCfg.startRangeIdx,
+            config.nearFieldCorrectionCfg.endRangeIdx,
+            azimuth_in,
+            azimuth_in_copy,
+            azimuth_out,
+            azimuth_out_copy,
+        )
 
     # 5.2. Optional velocity disambiguation.
     if config.extendedMaxVelocityEnabled:
         azimuth_in = azimuth_in_copy
-        azimuth_in[:, config.numRxAntennas:config.numVirtualAntAzim] *= -1
+        azimuth_in[:, config.numRxAntennas : config.numVirtualAntAzim] *= -1
 
     # 6. Magnitude squared.
     azimuth_mag_sqr = np.abs(azimuth_out) ** 2
 
-    # 7. Azimuth, X/Y calculation and populate detObj2D. Convert doppler index to 
-    det_obj2d_azimuth = compensation.XYestimation(azimuth_mag_sqr, config.numAngleBins, det_obj_2d)
-    det_obj2d_azimuth[:, DOPPLERIDX] = DOPPLER_IDX_TO_SIGNED(det_obj2d_azimuth[:, DOPPLERIDX], config.numDopplerBins)
+    # 7. Azimuth, X/Y calculation and populate detObj2D. Convert doppler index to
+    det_obj2d_azimuth = compensation.XYestimation(
+        azimuth_mag_sqr, config.numAngleBins, det_obj_2d
+    )
+    det_obj2d_azimuth[:, DOPPLERIDX] = DOPPLER_IDX_TO_SIGNED(
+        det_obj2d_azimuth[:, DOPPLERIDX], config.numDopplerBins
+    )
 
     return det_obj2d_azimuth
 
@@ -167,6 +199,7 @@ Constants:
 
 # ------------------------------- PreSense Beamforming Functions -------------------------------
 
+
 def aoa_bartlett(steering_vec, sig_in, axis):
     """Perform AOA estimation using Bartlett Beamforming on a given input signal (sig_in). Make sure to specify the correct axis in (axis)
     to ensure correct matrix multiplication. The power spectrum is calculated using the following equation:
@@ -193,7 +226,10 @@ def aoa_bartlett(steering_vec, sig_in, axis):
         >>> dataIn = np.random.rand((num_frames, num_chirps, num_vrx, num_adc_samples))
         >>> aoa_bartlett(steering_vec,dataIn[frame],axis=1)
     """
-    y = np.matmul(np.conjugate(steering_vec), sig_in.swapaxes(axis, np.arange(len(sig_in.shape))[-2]))
+    y = np.matmul(
+        np.conjugate(steering_vec),
+        sig_in.swapaxes(axis, np.arange(len(sig_in.shape))[-2]),
+    )
     doa_spectrum = np.abs(y) ** 2
     return doa_spectrum.swapaxes(axis, np.arange(len(sig_in.shape))[-2])
 
@@ -208,7 +244,7 @@ def aoa_capon(x, steering_vector, magnitude=False):
 
     .. math::
         P_{ca} (\\theta) = \\frac{1}{a^{H}(\\theta) R_{xx}^{-1} a(\\theta)}
-        
+
         w_{ca} (\\theta) = \\frac{R_{xx}^{-1} a(\\theta)}{a^{H}(\\theta) R_{xx}^{-1} a(\\theta)}
 
     Args:
@@ -223,7 +259,7 @@ def aoa_capon(x, steering_vector, magnitude=False):
         A list containing numVec and steeringVectors
         den (ndarray: A 1D-Array of size (numTheta) containing azimuth angle estimations for the given range
         weights (ndarray): A 1D-Array of size (num_ant) containing the Capon weights for the given input data
-    
+
     Example:
         >>> # In this example, dataIn is the input data organized as numFrames by RDC
         >>> Frame = 0
@@ -234,15 +270,22 @@ def aoa_capon(x, steering_vector, magnitude=False):
     """
 
     if steering_vector.shape[1] != x.shape[0]:
-        raise ValueError("'steering_vector' with shape (%d,%d) cannot matrix multiply 'input_data' with shape (%d,%d)" \
-        % (steering_vector.shape[0], steering_vector.shape[1], x.shape[0], x.shape[1]))
+        raise ValueError(
+            "'steering_vector' with shape (%d,%d) cannot matrix multiply 'input_data' with shape (%d,%d)"
+            % (
+                steering_vector.shape[0],
+                steering_vector.shape[1],
+                x.shape[0],
+                x.shape[1],
+            )
+        )
 
     Rxx = cov_matrix(x)
     Rxx = forward_backward_avg(Rxx)
     Rxx_inv = np.linalg.inv(Rxx)
     # Calculate Covariance Matrix Rxx
     first = Rxx_inv @ steering_vector.T
-    den = np.reciprocal(np.einsum('ij,ij->i', steering_vector.conj(), first.T))
+    den = np.reciprocal(np.einsum("ij,ij->i", steering_vector.conj(), first.T))
     weights = np.matmul(first, den)
 
     if magnitude:
@@ -250,7 +293,9 @@ def aoa_capon(x, steering_vector, magnitude=False):
     else:
         return den, weights
 
+
 from numba import njit, prange
+
 
 @njit(cache=True)
 def gen_steering_vec_jitted(ang_est_range, ang_est_resolution, num_ant):
@@ -277,7 +322,7 @@ def aoa_capon_jitted(x_arr, adc_tx, adc_rx, adc_samples):
 
     .. math::
         P_{ca} (\\theta) = \\frac{1}{a^{H}(\\theta) R_{xx}^{-1} a(\\theta)}
-        
+
         w_{ca} (\\theta) = \\frac{R_{xx}^{-1} a(\\theta)}{a^{H}(\\theta) R_{xx}^{-1} a(\\theta)}
 
     Args:
@@ -292,7 +337,7 @@ def aoa_capon_jitted(x_arr, adc_tx, adc_rx, adc_samples):
         A list containing numVec and steeringVectors
         den (ndarray: A 1D-Array of size (numTheta) containing azimuth angle estimations for the given range
         weights (ndarray): A 1D-Array of size (num_ant) containing the Capon weights for the given input data
-    
+
     Example:
         >>> # In this example, dataIn is the input data organized as numFrames by RDC
         >>> Frame = 0
@@ -301,15 +346,13 @@ def aoa_capon_jitted(x_arr, adc_tx, adc_rx, adc_samples):
         >>>     scan_aoa_capon[i,:], _ = dss.aoa_capon(dataIn[Frame,:,:,i].T, steering_vector, magnitude=True)
 
     """
-    
+
     ANGLE_RANGE = 90
     ANGLE_RES = 1
     ANGLE_BINS = (ANGLE_RANGE * 2) // ANGLE_RES + 1
 
     __range_azimuth = np.zeros((ANGLE_BINS, adc_samples), dtype=np.float32)
-    _, __steering_vec = gen_steering_vec_jitted(
-        ANGLE_RANGE, ANGLE_RES, adc_tx * adc_rx
-    )
+    _, __steering_vec = gen_steering_vec_jitted(ANGLE_RANGE, ANGLE_RES, adc_tx * adc_rx)
     __steering_vec = __steering_vec.astype(np.complex64)
 
     __beam_weights = np.zeros(
@@ -317,20 +360,21 @@ def aoa_capon_jitted(x_arr, adc_tx, adc_rx, adc_samples):
         dtype=np.complex64,
     )
 
-    __sv_T = np.ascontiguousarray(__steering_vec.T)   # (num_ant, num_angles), complex64
-    __sv_conj = __steering_vec.conj()                 # (num_angles, num_ant)
+    __sv_T = np.ascontiguousarray(__steering_vec.T)  # (num_ant, num_angles), complex64
+    __sv_conj = __steering_vec.conj()  # (num_angles, num_ant)
 
     num_ant = adc_tx * adc_rx
     if __steering_vec.shape[1] != num_ant:
         raise ValueError("'steering_vector' size does not match adc_tx*adc_rx")
     if not (x_arr.shape[0] == num_ant or x_arr.shape[1] == num_ant):
-        raise ValueError("'input_data' does not have an antenna axis equal to adc_tx*adc_rx")
-
+        raise ValueError(
+            "'input_data' does not have an antenna axis equal to adc_tx*adc_rx"
+        )
 
     for i in prange(x_arr.shape[2]):
         x = x_arr[:, :, i]
         # Rxx = cov_matrix(x)
-        
+
         if x.ndim > 2:
             raise ValueError("x has more than 2 dimensions.")
 
@@ -357,7 +401,9 @@ def aoa_capon_jitted(x_arr, adc_tx, adc_rx, adc_samples):
 
         # Equivalent to einsum over antenna axis, but Numba-friendly
         # den = 1.0 / np.sum(__sv_conj * first.T, axis=1)
-        denom = np.sum(__sv_conj * first.T, axis=1).astype(np.complex64)  # ensure complex64
+        denom = np.sum(__sv_conj * first.T, axis=1).astype(
+            np.complex64
+        )  # ensure complex64
         den = np.reciprocal(denom)  # stays complex64 in Numba
 
         # Preserve existing behavior: one weight vector per range bin as (first @ den)
@@ -367,19 +413,20 @@ def aoa_capon_jitted(x_arr, adc_tx, adc_rx, adc_samples):
 
     return __range_azimuth, __beam_weights
 
+
 def precompile_kernels():
     # Pre-JIT aoa_capon_jitted to avoid first-frame latency
     from numba import types
-    
+
     # Try precompiling by signature (fast, no execution)
 
     print("[WARMUP] Precompiling aoa_capon_jitted by signature")
 
     sig = (
         types.complex64[:, :, :],  # x_arr
-        types.int64,                # adc_tx
-        types.int64,                # adc_rx
-        types.int64,                # adc_samples
+        types.int64,  # adc_tx
+        types.int64,  # adc_rx
+        types.int64,  # adc_samples
     )
     aoa_capon_jitted.compile(sig)
 
@@ -388,8 +435,9 @@ def precompile_kernels():
 
 # ------------------------------- HELPER FUNCTIONS -------------------------------
 
+
 def cov_matrix(x):
-    """ Calculates the spatial covariance matrix (Rxx) for a given set of input data (x=inputData). 
+    """Calculates the spatial covariance matrix (Rxx) for a given set of input data (x=inputData).
         Assumes rows denote Vrx axis.
 
     Args:
@@ -398,12 +446,15 @@ def cov_matrix(x):
     Returns:
         Rxx (ndarray): A 2D-Array with shape (rx, rx)
     """
-    
+
     if x.ndim > 2:
         raise ValueError("x has more than 2 dimensions.")
 
     if x.shape[0] > x.shape[1]:
-        warnings.warn("cov_matrix input should have Vrx as rows. Needs to be transposed", RuntimeWarning)
+        warnings.warn(
+            "cov_matrix input should have Vrx as rows. Needs to be transposed",
+            RuntimeWarning,
+        )
         x = x.T
 
     _, num_adc_samples = x.shape
@@ -414,7 +465,7 @@ def cov_matrix(x):
 
 
 def forward_backward_avg(Rxx):
-    """ Performs forward backward averaging on the given input square matrix
+    """Performs forward backward averaging on the given input square matrix
 
     Args:
         Rxx (ndarray): A 2D-Array square matrix containing the covariance matrix for the given input data
@@ -439,7 +490,7 @@ def forward_backward_avg(Rxx):
 
 
 def peak_search(doa_spectrum, peak_threshold_weight=0.251188643150958):
-    """ Wrapper function to perform scipy.signal's prescribed peak search algorithm
+    """Wrapper function to perform scipy.signal's prescribed peak search algorithm
         Tested Runtime: 45 µs ± 2.61 µs per loop (mean ± std. dev. of 7 runs, 10000 loops each)
 
     Args:
@@ -456,12 +507,12 @@ def peak_search(doa_spectrum, peak_threshold_weight=0.251188643150958):
     peak_threshold = max(doa_spectrum) * peak_threshold_weight
     peaks, properties = find_peaks(doa_spectrum, height=peak_threshold)
     num_max = len(peaks)
-    total_power = np.sum(properties['peak_heights'])
+    total_power = np.sum(properties["peak_heights"])
     return num_max, peaks, total_power
 
 
 def peak_search_full(doa_spectrum, gamma=1.2, peak_threshold_weight=0.251188643150958):
-    """ Perform TI prescribed peak search algorithm
+    """Perform TI prescribed peak search algorithm
     Tested Runtime: 147 µs ± 4.27 µs per loop (mean ± std. dev. of 7 runs, 10000 loops each)
 
     Args:
@@ -475,7 +526,7 @@ def peak_search_full(doa_spectrum, gamma=1.2, peak_threshold_weight=0.2511886431
 
     """
 
-    ang_est = np.zeros(4, dtype='int')
+    ang_est = np.zeros(4, dtype="int")
     # Prevent thinking a sidelobe is a peak
     peak_threshold = max(doa_spectrum) * peak_threshold_weight
     # Perform Multiple Peak Search
@@ -528,8 +579,10 @@ def peak_search_full(doa_spectrum, gamma=1.2, peak_threshold_weight=0.2511886431
     return num_max, ang_est
 
 
-def peak_search_full_variance(doa_spectrum, steering_vec_size, sidelobe_level=0.251188643150958, gamma=1.2):
-    """ Performs peak search (TI's full search) will retaining details about each peak including
+def peak_search_full_variance(
+    doa_spectrum, steering_vec_size, sidelobe_level=0.251188643150958, gamma=1.2
+):
+    """Performs peak search (TI's full search) will retaining details about each peak including
     each peak's width, location, and value.
 
     Args:
@@ -581,10 +634,10 @@ def peak_search_full_variance(doa_spectrum, steering_vec_size, sidelobe_level=0.
             if current_val < max_val / gamma:
                 if max_val > peak_threshold:
                     bandwidth = running_index - max_loc_r
-                    obj = dict.fromkeys(['peakLoc', 'peakVal', 'peakWid'])
-                    obj['peakLoc'] = max_loc
-                    obj['peakVal'] = max_val
-                    obj['peakWid'] = bandwidth
+                    obj = dict.fromkeys(["peakLoc", "peakVal", "peakWid"])
+                    obj["peakLoc"] = max_loc
+                    obj["peakVal"] = max_val
+                    obj["peakWid"] = bandwidth
                     peak_data.append(obj)
                     total_power += max_val
                     num_max += 1
@@ -604,8 +657,15 @@ def peak_search_full_variance(doa_spectrum, steering_vec_size, sidelobe_level=0.
     return peak_data, total_power
 
 
-def variance_estimation(num_max, est_resolution, peak_data, total_power, width_adjust_3d_b=2.5, input_snr=10000):
-    """ This function will calculate an estimated variance value for each detected peak. This should
+def variance_estimation(
+    num_max,
+    est_resolution,
+    peak_data,
+    total_power,
+    width_adjust_3d_b=2.5,
+    input_snr=10000,
+):
+    """This function will calculate an estimated variance value for each detected peak. This should
         be run after running peak_search_full_variance
 
     Args:
@@ -621,12 +681,14 @@ def variance_estimation(num_max, est_resolution, peak_data, total_power, width_a
     """
     est_var = np.zeros(num_max)
     for objIndex in range(num_max):
-        peak_width = 2 * est_resolution * peak_data[objIndex]['peakWid'] * width_adjust_3d_b
-        snr = 2 * input_snr * peak_data[objIndex]['peakVal'] / total_power
+        peak_width = (
+            2 * est_resolution * peak_data[objIndex]["peakWid"] * width_adjust_3d_b
+        )
+        snr = 2 * input_snr * peak_data[objIndex]["peakVal"] / total_power
 
         temp_interpol = np.sqrt(np.reciprocal(snr))  # sqrt(1/snr)
 
-        est_var[objIndex] = (peak_width * temp_interpol)
+        est_var[objIndex] = peak_width * temp_interpol
     return est_var
 
 
@@ -647,17 +709,22 @@ def gen_steering_vec(ang_est_range, ang_est_resolution, num_ant):
         steering_vectors (ndarray): The generated 2D-array steering vector of size (num_vec,num_ant)
 
     Example:
-        >>> #This will generate a numpy array containing the steering vector with 
+        >>> #This will generate a numpy array containing the steering vector with
         >>> #angular span from -90 to 90 in increments of 1 degree for a 4 Vrx platform
         >>> _, steering_vec = gen_steering_vec(90,1,4)
 
     """
-    num_vec = (2 * ang_est_range / ang_est_resolution + 1)
+    num_vec = 2 * ang_est_range / ang_est_resolution + 1
     num_vec = int(round(num_vec))
-    steering_vectors = np.zeros((num_vec, num_ant), dtype='complex64')
+    steering_vectors = np.zeros((num_vec, num_ant), dtype="complex64")
     for kk in range(num_vec):
         for jj in range(num_ant):
-            mag = -1 * np.pi * jj * np.sin((-ang_est_range + kk * ang_est_resolution) * np.pi / 180)
+            mag = (
+                -1
+                * np.pi
+                * jj
+                * np.sin((-ang_est_range + kk * ang_est_resolution) * np.pi / 180)
+            )
             real = np.cos(mag)
             imag = np.sin(mag)
 
@@ -668,7 +735,7 @@ def gen_steering_vec(ang_est_range, ang_est_resolution, num_ant):
 
 # ------------------------------- TI BEAMFORMING FUNCTIONS -------------------------------
 def aoa_estimation_bf_one_point(num_ant, sig_in, steering_vec):
-    """ Calculates the total power of the given spectrum
+    """Calculates the total power of the given spectrum
 
     Args:
         num_ant (int): The number of virtual antennas (Vrx) being used
@@ -686,7 +753,9 @@ def aoa_estimation_bf_one_point(num_ant, sig_in, steering_vec):
     #            f2temp1 = f2temp1+(np.conjugate(steering_vec[((num_ant-1)*idx)+(i-1)])*sig_in[i])
     # --- UNOPTIMIZED CODE ---
 
-    assert sig_in.shape[0] == num_ant, "[ERROR] Shape of sig_in does not meet required num_ant dimensions"
+    assert (
+        sig_in.shape[0] == num_ant
+    ), "[ERROR] Shape of sig_in does not meet required num_ant dimensions"
     out_value = np.matmul(steering_vec[:num_ant], sig_in)
     return out_value
 
@@ -713,8 +782,10 @@ def aoa_est_bf_single_peak_det(sig_in, steering_vec):
     return max_index
 
 
-# Single Peak Angle of Arrival Estimation -- Variance, Spectrum, AOA 
-def aoa_est_bf_single_peak(num_ant, noise, est_resolution, sig_in, steering_vec_size, steering_vec):
+# Single Peak Angle of Arrival Estimation -- Variance, Spectrum, AOA
+def aoa_est_bf_single_peak(
+    num_ant, noise, est_resolution, sig_in, steering_vec_size, steering_vec
+):
     """Beamforming Estimate Angle of Arrival for single peak (single peak should be known a priori)
         Function call includes variance calculations
         Function does generate a spectrum.
@@ -760,7 +831,9 @@ def aoa_est_bf_single_peak(num_ant, noise, est_resolution, sig_in, steering_vec_
             left_index = steering_vec_size - 1
 
     # Find mainlobe 3dB right threshold point
-    while right_index < steering_vec_size and doa_spectrum[right_index] >= threshold_3db:
+    while (
+        right_index < steering_vec_size and doa_spectrum[right_index] >= threshold_3db
+    ):
         signal_power += doa_spectrum[right_index]
         right_index += 1
         if right_index == steering_vec_size:
@@ -771,16 +844,29 @@ def aoa_est_bf_single_peak(num_ant, noise, est_resolution, sig_in, steering_vec_
     if temp_3db_span < 0:
         temp_3db_span += steering_vec_size
 
-    temp_var_sqr_inv = 2 * (aoaestbf_var_est_const ** 2) * input_power * num_ant * signal_power
+    temp_var_sqr_inv = (
+        2 * (aoaestbf_var_est_const**2) * input_power * num_ant * signal_power
+    )
     temp_var_sqr_inv *= np.reciprocal(noise * total_power)
     temp_interpol = np.sqrt(np.reciprocal(temp_var_sqr_inv))
 
-    return [est_resolution * temp_3db_span * temp_interpol, max_index,
-            doa_spectrum]  # Return [est_var, angleEst, angleSpectrum]
+    return [
+        est_resolution * temp_3db_span * temp_interpol,
+        max_index,
+        doa_spectrum,
+    ]  # Return [est_var, angleEst, angleSpectrum]
 
 
 # Multiple Peak Angle of Arrival Estimation -- Detection Only
-def aoa_est_bf_multi_peak_det(gamma, sidelobe_level, sig_in, steering_vec, steering_vec_size, ang_est, search=False):
+def aoa_est_bf_multi_peak_det(
+    gamma,
+    sidelobe_level,
+    sig_in,
+    steering_vec,
+    steering_vec_size,
+    ang_est,
+    search=False,
+):
     """Use Bartlett beamforming to estimate AOA for multi peak situation (a priori), no variance calculation
 
     Args:
@@ -795,7 +881,7 @@ def aoa_est_bf_multi_peak_det(gamma, sidelobe_level, sig_in, steering_vec, steer
     Returns:
         num_max (int): The number of max points found across the theta bins at this particular range bin
         doa_spectrum (ndarray): A 1D-Array of size (numTheta, 1) containing the theta spectrum at a given range bin
-        
+
     """
 
     # Calculate Total Power at each angle
@@ -862,14 +948,24 @@ def aoa_est_bf_multi_peak_det(gamma, sidelobe_level, sig_in, steering_vec, steer
 
 
 # Multiple Peak Angle of Arrival Estimation -- Full Variance Calculations
-def aoa_est_bf_multi_peak(gamma, sidelobe_level, width_adjust_3d_b, input_snr, est_resolution, sig_in, steering_vec,
-                          steering_vec_size, peak_data, ang_est):
-    """ This function performs all sections of the angle of arrival process in one function.
-    
+def aoa_est_bf_multi_peak(
+    gamma,
+    sidelobe_level,
+    width_adjust_3d_b,
+    input_snr,
+    est_resolution,
+    sig_in,
+    steering_vec,
+    steering_vec_size,
+    peak_data,
+    ang_est,
+):
+    """This function performs all sections of the angle of arrival process in one function.
+
     1. Performs bartlett beamforming
     2. Performs multi-peak search
     3. Calculates an estimated variance
-    
+
     Args:
         gamma (float): Weight to determine when a peak will pass as a true peak
         sidelobe_level (float): A low value threshold used to avoid sidelobe detections as peaks
@@ -933,9 +1029,9 @@ def aoa_est_bf_multi_peak(gamma, sidelobe_level, width_adjust_3d_b, input_snr, e
                 if max_val > peak_threshold:
                     bandwidth = running_index - max_loc_r
                     obj = peak_data[num_max]
-                    obj['peakLoc'] = max_loc
-                    obj['peakVal'] = max_val
-                    obj['peakWid'] = bandwidth
+                    obj["peakLoc"] = max_loc
+                    obj["peakVal"] = max_val
+                    obj["peakWid"] = bandwidth
                     total_power += max_val
                     num_max += 1
                 min_val = current_val
@@ -952,19 +1048,21 @@ def aoa_est_bf_multi_peak(gamma, sidelobe_level, width_adjust_3d_b, input_snr, e
 
     # Variance Estimation
     for objIndex in range(num_max):
-        peak_width = 2 * est_resolution * peak_data[objIndex]['peakWid'] * width_adjust_3d_b
-        snr = 2 * input_snr * peak_data[objIndex]['peakVal'] / total_power
+        peak_width = (
+            2 * est_resolution * peak_data[objIndex]["peakWid"] * width_adjust_3d_b
+        )
+        snr = 2 * input_snr * peak_data[objIndex]["peakVal"] / total_power
 
         temp_interpol = np.sqrt(np.reciprocal(snr))  # sqrt(1/snr)
 
         est_var.append((peak_width / aoaestbf_var_est_const) * temp_interpol)
-        ang_est[objIndex] = peak_data[objIndex]['peakLoc']
+        ang_est[objIndex] = peak_data[objIndex]["peakLoc"]
 
     return num_max, np.array(est_var)
 
 
 def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
-    """ Estimate the phase introduced from the elevation of the elevation antennas
+    """Estimate the phase introduced from the elevation of the elevation antennas
 
     Args:
         virtual_ant: Signal received by the rx antennas, shape = [#angleBins, #detectedObjs], zero-pad #virtualAnts to #angleBins
@@ -982,9 +1080,11 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
     num_detected_obj = virtual_ant.shape[1]
 
     # Zero pad azimuth
-    azimuth_ant = virtual_ant[:2 * num_rx, :]
-    azimuth_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex64)
-    azimuth_ant_padded[:2 * num_rx, :] = azimuth_ant
+    azimuth_ant = virtual_ant[: 2 * num_rx, :]
+    azimuth_ant_padded = np.zeros(
+        shape=(fft_size, num_detected_obj), dtype=np.complex64
+    )
+    azimuth_ant_padded[: 2 * num_rx, :] = azimuth_ant
 
     # Process azimuth information
     azimuth_fft = np.fft.fft(azimuth_ant_padded, axis=0)
@@ -999,14 +1099,18 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
     x_vector = wx / np.pi
 
     # Zero pad elevation
-    elevation_ant = virtual_ant[2 * num_rx:, :]
-    elevation_ant_padded = np.zeros(shape=(fft_size, num_detected_obj), dtype=np.complex64)
+    elevation_ant = virtual_ant[2 * num_rx :, :]
+    elevation_ant_padded = np.zeros(
+        shape=(fft_size, num_detected_obj), dtype=np.complex64
+    )
     # elevation_ant_padded[:len(elevation_ant)] = elevation_ant
     elevation_ant_padded[:num_rx, :] = elevation_ant
 
     # Process elevation information
     elevation_fft = np.fft.fft(elevation_ant, axis=0)
-    elevation_max = np.argmax(np.log2(np.abs(elevation_fft)), axis=0)  # shape = (num_detected_obj, )
+    elevation_max = np.argmax(
+        np.log2(np.abs(elevation_fft)), axis=0
+    )  # shape = (num_detected_obj, )
     peak_2 = np.zeros_like(elevation_max, dtype=np.complex64)
     # peak_2 = elevation_fft[np.argmax(np.log2(np.abs(elevation_fft)))]
     for i in range(len(elevation_max)):
@@ -1015,29 +1119,36 @@ def naive_xyz(virtual_ant, num_tx=3, num_rx=4, fft_size=64):
     # Calculate elevation phase shift
     wz = np.angle(peak_1 * peak_2.conj() * np.exp(1j * 2 * wx))
     z_vector = wz / np.pi
-    
+
     # Fix: Ensure we don't take sqrt of negative numbers
     # Calculate y_vector ensuring the value under sqrt is non-negative
     inner_term = 1 - x_vector**2 - z_vector**2
     y_vector = np.zeros_like(inner_term)
-    
+
     # Where inner_term is positive, calculate y_vector as normal
     positive_idx = inner_term > 0
     y_vector[positive_idx] = np.sqrt(inner_term[positive_idx])
-    
+
     # Where inner_term is negative, set y_vector to 0 and normalize x and z
     negative_idx = ~positive_idx
     if np.any(negative_idx):
         # Normalize x_vector and z_vector where the sum of squares exceeds 1
-        norm = np.sqrt(x_vector[negative_idx]**2 + z_vector[negative_idx]**2)
+        norm = np.sqrt(x_vector[negative_idx] ** 2 + z_vector[negative_idx] ** 2)
         x_vector[negative_idx] /= norm
         z_vector[negative_idx] /= norm
-    
+
     return x_vector, y_vector, z_vector
 
 
-def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, method='Capon', num_vrx=12, est_range=90,
-                                est_resolution=1):
+def beamforming_naive_mixed_xyz(
+    azimuth_input,
+    input_ranges,
+    range_resolution,
+    method="Capon",
+    num_vrx=12,
+    est_range=90,
+    est_resolution=1,
+):
     """ This function estimates the XYZ location of a series of input detections by performing beamforming on the
     azimuth axis and naive AOA on the vertical axis.
         
@@ -1073,11 +1184,13 @@ def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, m
             should be in meters
 
     """
-    if method not in ('Capon', 'Bartlett'):
+    if method not in ("Capon", "Bartlett"):
         raise ValueError("Method argument must be 'Capon' or 'Bartlett'")
 
     if azimuth_input.shape[1] != num_vrx:
-        raise ValueError("azimuthInput is the wrong shape. Change num_vrx if not using TI 1843 platform")
+        raise ValueError(
+            "azimuthInput is the wrong shape. Change num_vrx if not using TI 1843 platform"
+        )
 
     doa_var_thr = 10
     num_vec, steering_vec = gen_steering_vec(est_range, est_resolution, 8)
@@ -1087,11 +1200,15 @@ def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, m
     output_ranges = []
 
     for i, inputSignal in enumerate(azimuth_input):
-        if method == 'Capon':
-            doa_spectrum, _ = aoa_capon(np.reshape(inputSignal[:8], (8, 1)).T, steering_vec)
+        if method == "Capon":
+            doa_spectrum, _ = aoa_capon(
+                np.reshape(inputSignal[:8], (8, 1)).T, steering_vec
+            )
             doa_spectrum = np.abs(doa_spectrum)
-        elif method == 'Bartlett':
-            doa_spectrum = aoa_bartlett(steering_vec, np.reshape(inputSignal[:8], (8, 1)), axis=0)
+        elif method == "Bartlett":
+            doa_spectrum = aoa_bartlett(
+                steering_vec, np.reshape(inputSignal[:8], (8, 1)), axis=0
+            )
             doa_spectrum = np.abs(doa_spectrum).squeeze()
         else:
             doa_spectrum = None
@@ -1099,27 +1216,38 @@ def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, m
         # Find Max Values and Max Indices
 
         #    num_out, max_theta, total_power = peak_search(doa_spectrum)
-        obj_dict, total_power = peak_search_full_variance(doa_spectrum, steering_vec.shape[0], sidelobe_level=0.9)
+        obj_dict, total_power = peak_search_full_variance(
+            doa_spectrum, steering_vec.shape[0], sidelobe_level=0.9
+        )
         num_out = len(obj_dict)
-        max_theta = [obj['peakLoc'] for obj in obj_dict]
+        max_theta = [obj["peakLoc"] for obj in obj_dict]
 
-        estimated_variance = variance_estimation(num_out, est_resolution, obj_dict, total_power)
+        estimated_variance = variance_estimation(
+            num_out, est_resolution, obj_dict, total_power
+        )
 
         higher_rung = inputSignal[8:12]
         lower_rung = inputSignal[2:6]
         for j in range(num_out):
-            ele_out = aoa_estimation_bf_one_point(4, higher_rung, steering_vec[max_theta[j]])
-            azi_out = aoa_estimation_bf_one_point(4, lower_rung, steering_vec[max_theta[j]])
+            ele_out = aoa_estimation_bf_one_point(
+                4, higher_rung, steering_vec[max_theta[j]]
+            )
+            azi_out = aoa_estimation_bf_one_point(
+                4, lower_rung, steering_vec[max_theta[j]]
+            )
             num = azi_out * np.conj(ele_out)
             wz = np.arctan2(num.imag, num.real) / np.pi
 
-            temp_angle = -est_range + max_theta[
-                j] * est_resolution  # Converts to degrees, centered at boresight (0 degrees)
+            temp_angle = (
+                -est_range + max_theta[j] * est_resolution
+            )  # Converts to degrees, centered at boresight (0 degrees)
             # Make sure the temp angle generated is within bounds
             if np.abs(temp_angle) <= est_range and estimated_variance[j] < doa_var_thr:
                 e_angle = np.arcsin(wz)
                 a_angle = -1 * (np.pi / 180) * temp_angle  # Degrees to radians
-                output_e_angles.append((180 / np.pi) * e_angle)  # Convert radians to degrees
+                output_e_angles.append(
+                    (180 / np.pi) * e_angle
+                )  # Convert radians to degrees
 
                 # print(e_angle)
                 # if (np.sin(a_angle)/np.cos(e_angle)) > 1 or (np.sin(a_angle)/np.cos(e_angle)) < -1:
@@ -1127,16 +1255,18 @@ def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, m
                 # assert np.cos(e_angle) == np.nan, "Found you"
 
                 # TODO: Not sure how to deal with arg of arcsin >1 or <-1
-#                if np.sin(a_angle)/np.cos(e_angle) > 1:
-#                    output_a_angles.append((180 / np.pi) * np.arcsin(1))
-#                    print("Found a pesky nan")
-#                elif np.sin(a_angle)/np.cos(e_angle) < -1:
-#                    output_a_angles.append((180 / np.pi) * np.arcsin(-1))
-#                    print("Found a pesky nan")
-#                else:
-#                    output_a_angles.append((180 / np.pi) * np.arcsin(np.sin(a_angle)/np.cos(e_angle))) # Why
+                #                if np.sin(a_angle)/np.cos(e_angle) > 1:
+                #                    output_a_angles.append((180 / np.pi) * np.arcsin(1))
+                #                    print("Found a pesky nan")
+                #                elif np.sin(a_angle)/np.cos(e_angle) < -1:
+                #                    output_a_angles.append((180 / np.pi) * np.arcsin(-1))
+                #                    print("Found a pesky nan")
+                #                else:
+                #                    output_a_angles.append((180 / np.pi) * np.arcsin(np.sin(a_angle)/np.cos(e_angle))) # Why
 
-                output_a_angles.append((180 / np.pi) * np.arcsin(np.sin(a_angle) * np.cos(e_angle)))  # Why
+                output_a_angles.append(
+                    (180 / np.pi) * np.arcsin(np.sin(a_angle) * np.cos(e_angle))
+                )  # Why
 
                 output_ranges.append(input_ranges[i])
 
@@ -1145,9 +1275,13 @@ def beamforming_naive_mixed_xyz(azimuth_input, input_ranges, range_resolution, m
     ranges = np.array(output_ranges)
 
     # points could be calculated by trigonometry,
-    x = np.sin(np.pi / 180 * theta) * ranges * range_resolution     # x = np.sin(azi) * range
-    y = np.cos(np.pi / 180 * theta) * ranges * range_resolution     # y = np.cos(azi) * range
-    z = np.tan(np.pi / 180 * phi) * ranges * range_resolution       # z = np.tan(ele) * range
+    x = (
+        np.sin(np.pi / 180 * theta) * ranges * range_resolution
+    )  # x = np.sin(azi) * range
+    y = (
+        np.cos(np.pi / 180 * theta) * ranges * range_resolution
+    )  # y = np.cos(azi) * range
+    z = np.tan(np.pi / 180 * phi) * ranges * range_resolution  # z = np.tan(ele) * range
 
     xyz_vec = np.array([x, y, z])
 
