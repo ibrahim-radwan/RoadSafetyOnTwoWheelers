@@ -97,7 +97,11 @@ class FusionRunner:
         }
 
     def start(
-        self, radar_only: bool = False, radar_config_file: Optional[str] = None
+        self,
+        radar_only: bool = False,
+        radar_config_file: Optional[str] = None,
+        mode: str = "live",
+        replay_path: Optional[str] = None,
     ) -> bool:
         if self._running or self._starting:
             return False
@@ -106,6 +110,7 @@ class FusionRunner:
         self._starting = True
         self._radar_connected = False
         self._camera_connected = False
+        self._mode = (mode or "live").lower()
 
         try:
             self._stop_event = threading.Event()
@@ -120,15 +125,48 @@ class FusionRunner:
             pass
 
         fusion_engine: FusionEngine
-        fusion_engine = (
-            FusionFactory.create_live_radar_only(
-                radar_config_file_override=radar_config_file
+        if self._mode == "replay":
+            # Create a shared sync_state and compute start timestamp from directory
+            from multiprocessing import Manager
+            from engine.sync_state import (
+                create_sync_state,
+                SyncStateUtils,
+                TimestampScanner,
             )
-            if radar_only
-            else FusionFactory.create_live_fusion(
-                radar_config_file_override=radar_config_file
+
+            mgr = Manager()
+            sync_state = create_sync_state(mgr)
+            recording_dir = replay_path or ""
+            try:
+                t0, _, _ = TimestampScanner.find_common_start_timestamp(recording_dir)
+            except Exception:
+                t0 = 0.0
+            SyncStateUtils.set_start_timestamp(sync_state, t0)
+
+            if radar_only:
+                fusion_engine = FusionFactory.create_replay_radar_only(
+                    recording_dir=recording_dir,
+                    radar_config_file=radar_config_file,
+                    sync_state=sync_state,
+                )
+            else:
+                fusion_engine = FusionFactory.create_replay_fusion(
+                    recording_dir=recording_dir,
+                    radar_config_file=radar_config_file,
+                    sync_state=sync_state,
+                )
+            # Store for status exposure
+            self._sync_state = sync_state
+        else:
+            fusion_engine = (
+                FusionFactory.create_live_radar_only(
+                    radar_config_file_override=radar_config_file
+                )
+                if radar_only
+                else FusionFactory.create_live_fusion(
+                    radar_config_file_override=radar_config_file
+                )
             )
-        )
 
         from multiprocessing import Process
 
@@ -143,16 +181,19 @@ class FusionRunner:
             ),
         )
         try:
-            # Ensure HW init uses the same config file as analyser
-            try:
-                radar_cfg_path = fusion_engine.radar_analyser_config.get("config_file")
-            except Exception:
-                radar_cfg_path = radar_config_file
-            ok_hw = radar_hw_init(radar_cfg_path)
-            if not ok_hw:
-                self.logger.error(
-                    "Radar HW init failed; proceeding to start engine anyway"
-                )
+            # Live: initialize hardware; Replay: skip HW init
+            if self._mode != "replay":
+                try:
+                    radar_cfg_path = fusion_engine.radar_analyser_config.get(
+                        "config_file"
+                    )
+                except Exception:
+                    radar_cfg_path = radar_config_file
+                ok_hw = radar_hw_init(radar_cfg_path)
+                if not ok_hw:
+                    self.logger.error(
+                        "Radar HW init failed; proceeding to start engine anyway"
+                    )
             self._engine_process.start()
             self.logger.info(
                 f"FusionEngine process started: pid={self._engine_process.pid}"
@@ -228,7 +269,12 @@ class FusionRunner:
                     pass
         except Exception:
             pass
-        radar_hw_cleanup()
+        # Live mode uses HW; replay does not require cleanup
+        try:
+            if getattr(self, "_mode", "live") != "replay":
+                radar_hw_cleanup()
+        except Exception:
+            pass
         self._running = False
         self._starting = False
         self._radar_connected = False
@@ -276,6 +322,13 @@ class FusionRunner:
             try:
                 item = self._radar_results_queue.get(timeout=1)
                 if isinstance(item, dict):
+                    # Capture replay status from radar feed
+                    if item.get("RADAR_PLAYBACK_STATUS"):
+                        try:
+                            st = item.get("RADAR_PLAYBACK_STATUS") or {}
+                            self._radar_playback_status = st
+                        except Exception:
+                            pass
                     if item.get("RADAR_RES_SHM_INIT"):
                         try:
                             rd_meta = item.get("rd")
@@ -718,6 +771,22 @@ class FusionRunner:
                     _fmt_hms(rec_dur_s) if self._rec_is_recording else "00:00:00"
                 ),
                 "tuning": self._tuning,
+                "replay": {
+                    "current_frame": (
+                        int(
+                            (getattr(self, "_radar_playback_status", {}) or {}).get(
+                                "current_frame", 0
+                            )
+                        )
+                    ),
+                    "total_frames": (
+                        int(
+                            (getattr(self, "_radar_playback_status", {}) or {}).get(
+                                "total_frames", 0
+                            )
+                        )
+                    ),
+                },
             }
         )
         return stats_copy

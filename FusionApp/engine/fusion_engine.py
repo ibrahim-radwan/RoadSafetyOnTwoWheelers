@@ -278,6 +278,13 @@ class FusionEngine:
             raise
 
         processes = []
+        timeline_thread = None
+        start_signal_thread = None
+
+        # Create a status queue for radar feed playback info (replay)
+        from multiprocessing import Queue as _MPQueue
+
+        rf_status_queue = _MPQueue()
 
         # Start radar feed process
         self.logger.info("Creating radar feed process...")
@@ -287,7 +294,7 @@ class FusionEngine:
                 self._radar_stream_queue,
                 stop_event,
                 radar_control_queue,
-                status_queue,
+                rf_status_queue,
             ),
         )
         processes.append(radar_process)
@@ -331,6 +338,73 @@ class FusionEngine:
                 ),
             )
             processes.append(camera_analyser_process)
+
+        # Optional timeline updater and start-signal threads for replay mode
+        try:
+            if self.radar_feed_config.get("type") == "DCA1000Recording":
+                from engine.sync_state import SyncStateUtils
+                import threading
+
+                sync_state = self.radar_feed_config.get("sync_state")
+                if sync_state is not None:
+
+                    def _timeline_loop():
+                        import time as _t
+
+                        try:
+                            while not stop_event.is_set():
+                                SyncStateUtils.update_timeline(sync_state)
+                                _t.sleep(0.01)
+                        except Exception:
+                            pass
+
+                    def _start_signal_loop():
+                        try:
+                            # Wait up to 30s for feeds to report readiness, then signal start
+                            from engine.sync_state import SyncStateUtils as _SSU
+
+                            if _SSU.wait_for_feeds_ready(sync_state, timeout=30):
+                                _SSU.signal_start_playback(sync_state)
+                            else:
+                                # Proceed anyway to avoid deadlock
+                                _SSU.signal_start_playback(sync_state)
+                        except Exception:
+                            pass
+
+                    timeline_thread = threading.Thread(
+                        target=_timeline_loop, name="TimelineUpdater", daemon=True
+                    )
+                    start_signal_thread = threading.Thread(
+                        target=_start_signal_loop, name="StartSignal", daemon=True
+                    )
+                    timeline_thread.start()
+                    start_signal_thread.start()
+        except Exception:
+            pass
+
+        # Forward radar feed status to results queue for UI consumption
+        import threading
+
+        def _status_forward_loop():
+            import time as _t
+
+            while not stop_event.is_set():
+                try:
+                    st = rf_status_queue.get_nowait()
+                    try:
+                        radar_results_queue.put_nowait({"RADAR_PLAYBACK_STATUS": st})
+                    except Exception:
+                        pass
+                except queue.Empty:
+                    pass
+                except Exception:
+                    pass
+                _t.sleep(0.05)
+
+        status_forward_thread = threading.Thread(
+            target=_status_forward_loop, name="StatusForward", daemon=True
+        )
+        status_forward_thread.start()
 
         # Start all processes
         self.logger.info(f"Starting {len(processes)} processes...")
@@ -512,5 +586,7 @@ class FusionEngine:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Engine: unexpected error cleaning SHM: {e}")
+
+        # Threads are daemons; they exit with process
 
         self.logger.info("FusionEngine stopped successfully.")

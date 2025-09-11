@@ -177,6 +177,7 @@ class FusionFactory:
     def create_replay_radar_only(
         recording_dir: str,
         radar_config_file: Optional[str] = None,
+        sync_state: Optional[object] = None,
     ) -> FusionEngine:
         """
         Create a FusionEngine for replay radar-only mode.
@@ -189,7 +190,11 @@ class FusionFactory:
             Configured FusionEngine with configuration dictionaries for radar replay only
         """
         # Create minimal configuration dictionaries for radar replay only
-        radar_feed_config = {"type": "DCA1000Recording", "dest_dir": recording_dir}
+        radar_feed_config = {
+            "type": "DCA1000Recording",
+            "dest_dir": recording_dir,
+            "sync_state": sync_state,
+        }
 
         radar_analyser_config = {
             "type": "RadarHeatmapAnalyser",
