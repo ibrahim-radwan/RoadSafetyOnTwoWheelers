@@ -140,7 +140,10 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 tuning=getattr(self, "tuning", {}),
             )
         elif int(getattr(self.adc_params, "tx", 0)) == 3:
-            result = process_3D_radar_frame(
+            # Use MUSIC-2D variant for 3D estimation
+            from sample_processing.radar_proc_music2d import process_3D_radar_frame_music_2d
+
+            result = process_3D_radar_frame_music_2d(
                 frame, self.adc_params, tuning=getattr(self, "tuning", {})
             )
         else:
