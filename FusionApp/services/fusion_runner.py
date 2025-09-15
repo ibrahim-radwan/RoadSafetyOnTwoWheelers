@@ -1,4 +1,5 @@
 import os
+import glob
 import time
 import threading
 from collections import deque
@@ -82,6 +83,9 @@ class FusionRunner:
         self._radar_connected: bool = False
         self._camera_connected: bool = False
         self._radar_only: bool = False
+        # Replay dir for matching frame filenames; last-saved guard
+        self._replay_dir: Optional[str] = None
+        self._last_saved_pc_ts: Optional[float] = None
 
         # Runtime tuning (hot) applied by analyser via control queue
         self._tuning: Dict[str, Any] = {
@@ -137,6 +141,7 @@ class FusionRunner:
             mgr = Manager()
             sync_state = create_sync_state(mgr)
             recording_dir = replay_path or ""
+            self._replay_dir = recording_dir or None
             try:
                 t0, _, _ = TimestampScanner.find_common_start_timestamp(recording_dir)
             except Exception:
@@ -228,6 +233,71 @@ class FusionRunner:
         self._starting = False
         self._running = True
         return True
+
+    def _save_point_cloud_npy(
+        self,
+        point_cloud: Optional[Dict[str, Any]],
+        frame_timestamp: Optional[float],
+        src_filepath: Optional[str] = None,
+    ) -> None:
+        """Save (z, y, x, doppler) array to .npy next to the matching .bin.
+
+        Active only in replay mode or when live recording is enabled.
+        """
+        try:
+            if point_cloud is None or frame_timestamp is None:
+                return
+            # Determine target .npy path
+            if isinstance(src_filepath, str) and src_filepath:
+                bin_path = src_filepath
+                npy_path = os.path.splitext(bin_path)[0] + ".npy"
+            else:
+                # Only in replay or live+recording
+                base_dir: Optional[str] = None
+                if getattr(self, "_mode", "live") == "replay" and self._replay_dir:
+                    base_dir = self._replay_dir
+                elif self._rec_is_recording and self._record_dir:
+                    base_dir = self._record_dir
+                else:
+                    return
+                ts = float(frame_timestamp)
+                ts_i = int(ts)
+                ts_frac = int((ts - ts_i) * 1e5)
+                prefix = f"{ts_i:010d}_{ts_frac:05d}_"
+                try:
+                    matches = glob.glob(os.path.join(base_dir, prefix + "*.bin"))
+                    if not matches:
+                        return
+                    bin_path = matches[0]
+                    npy_path = os.path.splitext(bin_path)[0] + ".npy"
+                except Exception:
+                    return
+
+            try:
+                x = np.asarray(point_cloud.get("x", []), dtype=float)
+                y = np.asarray(point_cloud.get("y", []), dtype=float)
+                z_raw = point_cloud.get("z")
+                z = (
+                    np.asarray(z_raw, dtype=float)
+                    if z_raw is not None
+                    else np.zeros_like(x)
+                )
+                d_raw = point_cloud.get("doppler")
+                d = (
+                    np.asarray(d_raw, dtype=float)
+                    if d_raw is not None
+                    else np.zeros_like(x)
+                )
+                n = min(x.shape[0], y.shape[0], z.shape[0], d.shape[0])
+                arr = np.stack((z[:n], y[:n], x[:n], d[:n]), axis=1)
+                np.save(npy_path, arr)
+            except Exception as e:
+                try:
+                    self.logger.warning(f"Point cloud npy save failed: {e}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -359,6 +429,16 @@ class FusionRunner:
                     elif item.get("RADAR_RES_SHM_FRAME"):
                         self._latest_point_cloud = item.get("point_cloud")
                         self._latest_radar_ts = float(item.get("frame_timestamp", 0.0))
+                        src_path = item.get("src_filepath")
+                        # Save npy when applicable
+                        try:
+                            self._save_point_cloud_npy(
+                                self._latest_point_cloud,
+                                self._latest_radar_ts,
+                                src_filepath=src_path,
+                            )
+                        except Exception:
+                            pass
                         try:
                             self._last_res_slot = int(item.get("slot", 0)) & 1
                             self._last_res_seq = int(item.get("seq", 0))
@@ -384,6 +464,16 @@ class FusionRunner:
                             self._latest_radar_ts = float(
                                 item.get("frame_timestamp", 0.0)
                             )
+                        src_path = item.get("src_filepath")
+                        # Save npy when applicable
+                        try:
+                            self._save_point_cloud_npy(
+                                self._latest_point_cloud,
+                                self._latest_radar_ts,
+                                src_filepath=src_path,
+                            )
+                        except Exception:
+                            pass
                         self._radar_connected = True
                         with self._stats_lock:
                             self._stats["last_radar_update"] = time.time()

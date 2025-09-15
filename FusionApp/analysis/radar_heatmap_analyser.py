@@ -141,7 +141,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             )
         elif int(getattr(self.adc_params, "tx", 0)) == 3:
             # Use MUSIC-2D variant for 3D estimation
-            from sample_processing.radar_proc_music2d import process_3D_radar_frame_music_2d
+            from sample_processing.radar_proc_music2d import (
+                process_3D_radar_frame_music_2d,
+            )
 
             result = process_3D_radar_frame_music_2d(
                 frame,
@@ -175,6 +177,8 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             "y": y_pos,
             "z": z_pos,
             "intensity": snrs,  # Use SNR as intensity
+            # Also include per-point doppler (velocity)
+            "doppler": velocities,
             # Provide max range/speed for downstream renderers
             "max_range": getattr(self.adc_params, "max_range", None),
             "max_speed": getattr(self.adc_params, "max_doppler", None),
@@ -191,6 +195,8 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             "max_speed": getattr(self.adc_params, "max_doppler", None),
             "processing_time": processing_time,
             "frame_timestamp": dca_frame.timestamp,
+            # Propagate source filepath when available (replay mode)
+            "src_filepath": getattr(dca_frame, "filepath", None),
         }
 
     def run(
@@ -434,6 +440,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         data=dca_frame_data,
                         capture_monotonic_ns=int(item.get("capture_monotonic_ns", 0)),
                         enqueue_monotonic_ns=int(item.get("enqueue_monotonic_ns", 0)),
+                        filepath=None,  # no filepath in SHM path
                     )
 
                     # Analyse
@@ -595,6 +602,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                             "frame_timestamp": latest_frame.timestamp,
                             # Keep small payloads (point cloud) in-band
                             "point_cloud": results.get("point_cloud"),
+                            "src_filepath": getattr(latest_frame, "filepath", None),
                         }
                         try:
                             output_queue.put_nowait(meta)
@@ -619,6 +627,57 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                             self.logger.info("Updated tuning params in analyser")
                     except Exception:
                         pass
+                    continue
+                # Replay feed may wrap frame with its source filepath
+                if isinstance(item, dict) and item.get("FRAME") is not None:
+                    latest_frame = item.get("FRAME")
+                    try:
+                        setattr(
+                            latest_frame,
+                            "filepath",
+                            item.get(
+                                "RADAR_REPLAY_FILEPATH",
+                                getattr(latest_frame, "filepath", None),
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    drained_count = 0
+                    drain_start_ns = time.perf_counter_ns()
+                    drain_end_ns = drain_start_ns
+                    recv_ns = time.perf_counter_ns()
+                    results = self._analyse_frame(latest_frame)
+                    end_ns = time.perf_counter_ns()
+                    # Attach timing/diag metadata
+                    self._total_dropped_frames += drained_count
+                    try:
+                        qsize_hint = input_queue.qsize()
+                    except Exception:
+                        qsize_hint = -1
+                    results.update(
+                        {
+                            "capture_monotonic_ns": getattr(
+                                latest_frame, "capture_monotonic_ns", 0
+                            ),
+                            "capture_wall_ns": getattr(
+                                latest_frame, "capture_wall_ns", 0
+                            ),
+                            "enqueue_monotonic_ns": getattr(
+                                latest_frame, "enqueue_monotonic_ns", 0
+                            ),
+                            "analyser_receive_ns": recv_ns,
+                            "analyser_end_ns": end_ns,
+                            "first_dequeue_wait_ns": recv_ns - wait_start_ns,
+                            "drain_ns": drain_end_ns - drain_start_ns,
+                            "drained_count": drained_count,
+                            "total_dropped_frames": self._total_dropped_frames,
+                            "input_queue_size_hint": qsize_hint,
+                        }
+                    )
+                    try:
+                        output_queue.put_nowait(results)
+                    except Full:
+                        self.logger.warning("Output queue full, skipping frame")
                     continue
                 if isinstance(item, DCA1000Frame):
                     # Do not drop further in analyser; process the first frame we dequeued

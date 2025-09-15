@@ -44,6 +44,7 @@ class DCA1000Frame:
         capture_monotonic_ns: int = None,
         capture_wall_ns: int = None,
         enqueue_monotonic_ns: int = None,
+        filepath: Optional[str] = None,
     ):
         self.data: ndarray = data
         # Legacy relative timestamp in seconds (kept for compatibility)
@@ -59,6 +60,8 @@ class DCA1000Frame:
         self.enqueue_monotonic_ns: int = (
             enqueue_monotonic_ns if enqueue_monotonic_ns is not None else 0
         )
+        # Optional source filepath (used in replay to map to .bin basename)
+        self.filepath: Optional[str] = filepath
 
 
 class DCA1000EVM(RadarFeed):
@@ -136,7 +139,9 @@ class DCA1000EVM(RadarFeed):
                             if rec_dir:
                                 self._dest_dir = rec_dir
                                 if self.logger:
-                                    self.logger.info(f"Recording directory set to: {self._dest_dir}")
+                                    self.logger.info(
+                                        f"Recording directory set to: {self._dest_dir}"
+                                    )
                     except Exception:
                         pass
                     self._is_recording = True
@@ -166,10 +171,8 @@ class DCA1000EVM(RadarFeed):
         end = time.perf_counter()
 
         if self.logger:
-            self.logger.debug(
-                f"Read {data_buf.nbytes/1024:.3f} KBs in {end-start:.6f}")
-            self.logger.debug(
-                f"Bandwidth: {data_buf.nbytes/(end-start)/1e6:.4f} MB/s")
+            self.logger.debug(f"Read {data_buf.nbytes/1024:.3f} KBs in {end-start:.6f}")
+            self.logger.debug(f"Bandwidth: {data_buf.nbytes/(end-start)/1e6:.4f} MB/s")
 
         assert self._start_time is not None, "Start time is not initialized"
         # Legacy relative timestamp (seconds)
@@ -230,12 +233,10 @@ class DCA1000EVM(RadarFeed):
                     )
                 return True
             # No engine-provided SHM: fail as per policy
-            raise RuntimeError(
-                "Missing preallocated radar SHM metadata from engine")
+            raise RuntimeError("Missing preallocated radar SHM metadata from engine")
         except Exception as e:
             if self.logger is not None:
-                self.logger.error(
-                    f"Failed to initialize/attach radar SHM: {e}")
+                self.logger.error(f"Failed to initialize/attach radar SHM: {e}")
             return False
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
@@ -251,8 +252,7 @@ class DCA1000EVM(RadarFeed):
                         continue
                     # With engine-owned SHM, no need to send SHM_INIT meta
                     try:
-                        stream_queue.put_nowait(
-                            {"ADC_PARAMS": self._ADC_PARAMS_l})
+                        stream_queue.put_nowait({"ADC_PARAMS": self._ADC_PARAMS_l})
                     except Exception as e2:
                         if self.logger is not None:
                             self.logger.warning(
@@ -262,8 +262,7 @@ class DCA1000EVM(RadarFeed):
                 # Copy into alternating SHM slot and send compact metadata
                 try:
                     slot = self._shm_seq & 1
-                    mv = memoryview(self._shm_blocks[slot].buf)[
-                        : self._shm_nbytes]
+                    mv = memoryview(self._shm_blocks[slot].buf)[: self._shm_nbytes]
                     mv[:] = dca_frame.data.tobytes()
                     try:
                         mv.release()
@@ -299,8 +298,7 @@ class DCA1000EVM(RadarFeed):
                 continue
             except KeyboardInterrupt:
                 if self.logger is not None:
-                    self.logger.info(
-                        "Keyboard interrupt received, stopping...")
+                    self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
 
         if self.logger is not None:
@@ -340,11 +338,9 @@ class DCA1000EVM(RadarFeed):
         # Create destination directory if it doesn't exist
         if not os.path.exists(self._dest_dir):
             os.makedirs(self._dest_dir, exist_ok=True)
-            self.logger.info(
-                f"Created destination directory: {self._dest_dir}")
+            self.logger.info(f"Created destination directory: {self._dest_dir}")
         else:
-            self.logger.info(
-                f"Using existing destination directory: {self._dest_dir}")
+            self.logger.info(f"Using existing destination directory: {self._dest_dir}")
 
         self._start_time = time.perf_counter()
         self._dca = DCA1000()
@@ -366,12 +362,10 @@ class DCA1000EVM(RadarFeed):
             % (LVDSDataSizePerChirp_l, maxSendBytesPerChirp_l)
         )
 
-        self.logger.info("System connection check: %s",
-                         self._dca.sys_alive_check())
+        self.logger.info("System connection check: %s", self._dca.sys_alive_check())
         self.logger.info(self._dca.read_fpga_version())
         self.logger.info(
-            "Config fpga: %s", self._dca.config_fpga(
-                self._config.dca_config_file)
+            "Config fpga: %s", self._dca.config_fpga(self._config.dca_config_file)
         )
         self.logger.info(
             "Config record packet delay: %s",
@@ -467,8 +461,7 @@ class DCA1000Recording(RadarFeed):
         self._scan_recording_files()
         self._load_radar_config()
         if self.logger is not None:
-            self.logger.info(
-                f"Found {len(self._frame_files)} frame files for playback")
+            self.logger.info(f"Found {len(self._frame_files)} frame files for playback")
 
         # Signal readiness for synchronized mode
         if self._sync_state is not None:
@@ -537,8 +530,7 @@ class DCA1000Recording(RadarFeed):
         if "frame_periodicity" in CFG_PARAMS_l:
             self._frame_rate = CFG_PARAMS_l["frame_periodicity"] / 5
 
-            self.logger.info(
-                f"Extracted frame rate: {self._frame_rate:.2f} Hz")
+            self.logger.info(f"Extracted frame rate: {self._frame_rate:.2f} Hz")
         else:
             self.logger.warning(
                 "frameCfg not found in config, using default frame rate"
@@ -567,7 +559,7 @@ class DCA1000Recording(RadarFeed):
         if data_buf.size == 0:
             raise ValueError(f"Empty or corrupted frame file: {filepath}")
 
-        return DCA1000Frame(timestamp, data_buf)
+        return DCA1000Frame(timestamp, data_buf, filepath=filepath)
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
         """Send frames to the radar stream queue with synchronized timing control"""
@@ -600,8 +592,7 @@ class DCA1000Recording(RadarFeed):
                     current_timeline = SyncStateUtils.get_current_timeline_position(
                         self._sync_state
                     )
-                    timeline_diff = abs(
-                        current_timeline - last_timeline_position)
+                    timeline_diff = abs(current_timeline - last_timeline_position)
 
                     # Detect seeking (backward move, large jump) or reset to beginning
                     if (
@@ -636,8 +627,7 @@ class DCA1000Recording(RadarFeed):
                 if is_playing:
                     # Check if we have more frames to play
                     if self._current_frame_index >= len(self._frame_files):
-                        self.logger.info(
-                            "Reached end of recording, stopping playback")
+                        self.logger.info("Reached end of recording, stopping playback")
                         if use_sync:
                             SyncStateUtils.set_playback_state(
                                 self._sync_state, SyncPlaybackState.STOPPED
@@ -672,8 +662,7 @@ class DCA1000Recording(RadarFeed):
 
                             # Check if playback was paused while waiting
                             if (
-                                SyncStateUtils.get_playback_state(
-                                    self._sync_state)
+                                SyncStateUtils.get_playback_state(self._sync_state)
                                 != SyncPlaybackState.PLAYING
                             ):
                                 break
@@ -703,7 +692,9 @@ class DCA1000Recording(RadarFeed):
                         frame = self._read_frame_from_file(filepath)
                         # Avoid blocking if analyzer is shutting down
                         try:
-                            stream_queue.put_nowait(frame)
+                            stream_queue.put_nowait(
+                                {"RADAR_REPLAY_FILEPATH": filepath, "FRAME": frame}
+                            )
                         except Exception as e:
                             self.logger.warning(
                                 f"Queue busy/closed, dropping frame: {e}"
@@ -757,8 +748,7 @@ class DCA1000Recording(RadarFeed):
             return
 
         self._playback_state = PlaybackState.PLAYING
-        self.logger.info(
-            f"Playback started from frame {self._current_frame_index}")
+        self.logger.info(f"Playback started from frame {self._current_frame_index}")
         self._send_status_update()
 
     def pause(self):
@@ -797,8 +787,7 @@ class DCA1000Recording(RadarFeed):
                 best_index = i
 
         self.seek_to_frame(best_index)
-        self.logger.info(
-            f"Seeked to timestamp {timestamp:.3f}s (frame {best_index})")
+        self.logger.info(f"Seeked to timestamp {timestamp:.3f}s (frame {best_index})")
 
     def seek_to_percent(self, percent: float):
         """Seek to a specific percentage of the recording (0-100)"""
@@ -817,8 +806,7 @@ class DCA1000Recording(RadarFeed):
         target_index = max(0, min(target_index, max_index))
 
         self.seek_to_frame(target_index)
-        self.logger.info(
-            f"Seeked to {percent:.1f}% (frame {target_index}/{max_index})")
+        self.logger.info(f"Seeked to {percent:.1f}% (frame {target_index}/{max_index})")
 
     def get_current_frame_info(self) -> Optional[Tuple[int, float, str]]:
         """Get information about current frame: (index, timestamp, filename)"""
@@ -892,8 +880,7 @@ class DCA1000Recording(RadarFeed):
 
                 time.sleep(0.1)
             except KeyboardInterrupt:
-                self.logger.info(
-                    "Keyboard interrupt received, stopping playback...")
+                self.logger.info("Keyboard interrupt received, stopping playback...")
                 stop_event.set()
                 break
 
@@ -968,8 +955,7 @@ class DCA1000Recording(RadarFeed):
                             self._sync_state
                         )
                         relative_time = target_timestamp - start_timestamp
-                        SyncStateUtils.seek_to_time(
-                            self._sync_state, relative_time)
+                        SyncStateUtils.seek_to_time(self._sync_state, relative_time)
                         self.logger.debug(
                             f"Seeked to timeline position {relative_time:.3f}s (frame {position})"
                         )
