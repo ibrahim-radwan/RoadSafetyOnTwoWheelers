@@ -282,7 +282,7 @@ def process_3D_radar_frame_music_2d(
     coarse_el_step: int = 12,
     fine_half_win_az: int = 8,
     fine_half_win_el: int = 8,
-    music_diag_load: float = 0.0,
+    music_diag_load: float = 0.01,
 ):
     """3D processing using 2D MUSIC AoA per detection.
 
@@ -335,7 +335,7 @@ def process_3D_radar_frame_music_2d(
     det_matrix, aoa_input = dsp.doppler_processing(
         radar_cube,
         num_tx_antennas=adc_params.tx,
-        clutter_removal_enabled=True,
+        clutter_removal_enabled=False,
         interleaved=False,
         window_type_2d=dsp.utils.Window.HAMMING,
     )
