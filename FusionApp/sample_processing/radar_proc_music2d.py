@@ -16,6 +16,91 @@ from mmwave import dsp
 from sample_processing.radar_proc import logger  # reuse existing logger
 
 
+_POSITIONS_CACHE = {}
+_STEERING_CACHE = {}
+
+
+def _get_positions_wl_cached(num_tx: int, num_rx: int) -> np.ndarray:
+    """Return cached virtual array positions in wavelength units for given (tx, rx)."""
+    key = (int(num_tx), int(num_rx))
+    pos = _POSITIONS_CACHE.get(key)
+    if pos is None:
+        pos = _virtual_array_positions_1843_in_wavelengths(int(num_tx), int(num_rx))
+        _POSITIONS_CACHE[key] = pos
+    return pos
+
+
+def _get_or_build_steering_cache(
+    num_tx: int,
+    num_rx: int,
+    az_range: Tuple[int, int],
+    el_range: Tuple[int, int],
+    fine_az_step: int,
+    fine_el_step: int,
+    coarse_az_step: int,
+    coarse_el_step: int,
+    fine_half_win_az: int,
+    fine_half_win_el: int,
+):
+    """Get or build per-parameter steering caches to reuse across frames.
+
+    Returns: (positions_wl, az_grid, el_grid, coarse_az_grid, coarse_el_grid, A_coarse, fine_cache)
+    """
+    key = (
+        int(num_tx),
+        int(num_rx),
+        int(az_range[0]),
+        int(az_range[1]),
+        int(el_range[0]),
+        int(el_range[1]),
+        int(max(1, int(fine_az_step))),
+        int(max(1, int(fine_el_step))),
+        int(max(1, int(coarse_az_step))),
+        int(max(1, int(coarse_el_step))),
+        int(max(1, int(fine_half_win_az))),
+        int(max(1, int(fine_half_win_el))),
+    )
+    entry = _STEERING_CACHE.get(key)
+    if entry is not None:
+        return entry
+
+    positions_wl = _get_positions_wl_cached(num_tx, num_rx)
+    az_grid = np.arange(
+        az_range[0], az_range[1] + 1, max(1, int(fine_az_step)), dtype=np.float32
+    )
+    el_grid = np.arange(
+        el_range[0], el_range[1] + 1, max(1, int(fine_el_step)), dtype=np.float32
+    )
+    coarse_az_grid = np.arange(
+        az_range[0], az_range[1] + 1, max(1, int(coarse_az_step)), dtype=np.float32
+    )
+    coarse_el_grid = np.arange(
+        el_range[0], el_range[1] + 1, max(1, int(coarse_el_step)), dtype=np.float32
+    )
+    A_coarse, fine_cache = _build_coarse_fine_steering_cache(
+        positions_wl,
+        coarse_az_grid,
+        coarse_el_grid,
+        (int(az_grid.min()), int(az_grid.max())),
+        (int(el_grid.min()), int(el_grid.max())),
+        fine_az_step=max(1, int(fine_az_step)),
+        fine_el_step=max(1, int(fine_el_step)),
+        fine_half_win_az=int(fine_half_win_az),
+        fine_half_win_el=int(fine_half_win_el),
+    )
+    entry = (
+        positions_wl,
+        az_grid,
+        el_grid,
+        coarse_az_grid,
+        coarse_el_grid,
+        A_coarse,
+        fine_cache,
+    )
+    _STEERING_CACHE[key] = entry
+    return entry
+
+
 def _virtual_array_positions_1843_in_wavelengths(
     num_tx: int, num_rx: int
 ) -> np.ndarray:
@@ -181,7 +266,7 @@ def _music_2d_peak_coarse_to_fine_cached(
     M = Rxx.shape[0]
     d = max(1, min(num_sources, M - 1))
     En = v[:, : (M - d)]
-    # Coarse search
+    # Coarse search in element space
     vprod = En.conj().T @ A_coarse
     denom = np.sum(np.abs(vprod) ** 2, axis=0).real + 1e-12
     P = 1.0 / denom
@@ -243,7 +328,7 @@ def _estimate_xyz_music2d(
         and isinstance(num_coarse_az, int)
     ):
         az_peak, el_peak = _music_2d_peak_coarse_to_fine_cached(
-            Rfb, A_coarse, num_coarse_az, fine_cache, num_sources=1
+            Rfb, A_coarse, int(num_coarse_az), fine_cache, num_sources=1
         )
     else:
         if az_grid is None or el_grid is None:
@@ -429,29 +514,25 @@ def process_3D_radar_frame_music_2d(
         }
 
     step_start = time.perf_counter()
-    positions_wl = _virtual_array_positions_1843_in_wavelengths(
-        adc_params.tx, adc_params.rx
-    )
-    # Fine grids used for fallback and for defining refinement extents
-    az_grid = np.arange(az_range[0], az_range[1] + 1, fine_az_step, dtype=np.float32)
-    el_grid = np.arange(el_range[0], el_range[1] + 1, fine_el_step, dtype=np.float32)
-    # Precompute coarse steering and fine caches
-    coarse_az_grid = np.arange(
-        az_range[0], az_range[1] + 1, max(1, int(coarse_az_step)), dtype=np.float32
-    )
-    coarse_el_grid = np.arange(
-        el_range[0], el_range[1] + 1, max(1, int(coarse_el_step)), dtype=np.float32
-    )
-    A_coarse, fine_cache = _build_coarse_fine_steering_cache(
+    (
         positions_wl,
+        az_grid,
+        el_grid,
         coarse_az_grid,
         coarse_el_grid,
-        (int(az_grid.min()), int(az_grid.max())),
-        (int(el_grid.min()), int(el_grid.max())),
-        fine_az_step=max(1, int(fine_az_step)),
-        fine_el_step=max(1, int(fine_el_step)),
-        fine_half_win_az=fine_half_win_az,
-        fine_half_win_el=fine_half_win_el,
+        A_coarse,
+        fine_cache,
+    ) = _get_or_build_steering_cache(
+        adc_params.tx,
+        adc_params.rx,
+        az_range,
+        el_range,
+        fine_az_step,
+        fine_el_step,
+        coarse_az_step,
+        coarse_el_step,
+        fine_half_win_az,
+        fine_half_win_el,
     )
     t_music_setup = time.perf_counter() - step_start
 
@@ -464,29 +545,66 @@ def process_3D_radar_frame_music_2d(
     # Precompute FB-averaging permutation once
     M = positions_wl.shape[0]
     J_fb = np.fliplr(np.eye(M, dtype=np.float32))
+
+    # Batched coarse-stage search across detections
+    t0_music = time.perf_counter()
+    half = max(0, int(doppler_halfspan))
+    r_idx = detObj2D["rangeIdx"].astype(int)
+    k_idx = detObj2D["dopplerIdx"].astype(int)
+    Rfbs = np.empty((num_det, M, M), dtype=np.complex64)
     for i in range(num_det):
-        t0 = time.perf_counter()
-        r = int(detObj2D["rangeIdx"][i])
-        k = int(detObj2D["dopplerIdx"][i])
-        xi, yi, zi = _estimate_xyz_music2d(
-            aoa_input,
-            r,
-            k,
-            doppler_halfspan,
-            positions_wl,
-            adc_params.range_resolution,
-            diag_load=float(music_diag_load),
-            az_grid=az_grid,
-            el_grid=el_grid,
-            A_coarse=A_coarse,
-            num_coarse_az=int(coarse_az_grid.size),
-            fine_cache=fine_cache,
-            J_fb=J_fb,
+        r = int(r_idx[i])
+        k = int(k_idx[i])
+        k0 = max(0, k - half)
+        k1 = min(aoa_input.shape[2] - 1, k + half)
+        X = aoa_input[r, :, k0 : k1 + 1].astype(np.complex64)
+        if X.ndim == 1:
+            X = X[:, None]
+        Rxx = (X @ X.conj().T) / max(1, X.shape[1])
+        Rfb = 0.5 * (Rxx + J_fb @ Rxx.conj() @ J_fb)
+        if music_diag_load and float(music_diag_load) > 0.0:
+            tr = float(np.trace(Rfb).real)
+            Rfb = Rfb + np.eye(M, dtype=Rfb.dtype) * (
+                float(music_diag_load) * tr / M
+            )
+        Rfbs[i] = Rfb.astype(np.complex64, copy=False)
+
+    # Compute noise subspaces En for all detections, then batch multiply against A_coarse
+    d = 1
+    p = M - d
+    Ens = np.empty((num_det, M, p), dtype=np.complex64)
+    for i in range(num_det):
+        _, v = np.linalg.eigh(Rfbs[i])
+        Ens[i] = v[:, :p]
+    EnH = np.transpose(Ens.conj(), (0, 2, 1))  # (N, p, M)
+    A_coarse_mat = A_coarse.astype(np.complex64, copy=False)  # (M, G)
+    vprod = EnH @ A_coarse_mat  # (N, p, G)
+    denom = np.sum(np.abs(vprod) ** 2, axis=1).real + 1e-12  # (N, G)
+    P = 1.0 / denom
+    coarse_idx = np.argmax(P, axis=1).astype(int)
+    Na_coarse = int(coarse_az_grid.size)
+    el_idx_coarse = coarse_idx // Na_coarse
+    az_idx_coarse = coarse_idx % Na_coarse
+
+    # Fine refinement per detection using cached fine steering
+    for i in range(num_det):
+        ie = int(el_idx_coarse[i])
+        ia = int(az_idx_coarse[i])
+        A_fine, fine_az_grid, fine_el_grid = fine_cache[(ie, ia)]
+        az_peak, el_peak = _music_peak_with_A(
+            Ens[i], A_fine, fine_az_grid, fine_el_grid
         )
-        xs[i] = xi
-        ys[i] = yi
-        zs[i] = zi
-        music_t_total += time.perf_counter() - t0
+        # Convert to xyz
+        azr = np.deg2rad(az_peak)
+        elr = np.deg2rad(el_peak)
+        ux = np.cos(elr) * np.sin(azr)
+        uy = np.sin(elr)
+        uz = np.cos(elr) * np.cos(azr)
+        rng_m = adc_params.range_resolution * float(r_idx[i])
+        xs[i] = ux * rng_m
+        ys[i] = uz * rng_m
+        zs[i] = uy * rng_m
+    music_t_total = time.perf_counter() - t0_music
 
     # RA heatmap is not essential here; set to None to simplify
     range_azimuth = None
