@@ -240,7 +240,7 @@ class FusionRunner:
         frame_timestamp: Optional[float],
         src_filepath: Optional[str] = None,
     ) -> None:
-        """Save (z, y, x, doppler) array to .npy next to the matching .bin.
+        """Save (x, y, z, power) array to .npy next to the matching .bin.
 
         Active only in replay mode or when live recording is enabled.
         """
@@ -282,14 +282,26 @@ class FusionRunner:
                     if z_raw is not None
                     else np.zeros_like(x)
                 )
-                d_raw = point_cloud.get("doppler")
-                d = (
-                    np.asarray(d_raw, dtype=float)
-                    if d_raw is not None
+                inten_raw = point_cloud.get("intensity", point_cloud.get("snr"))
+                inten = (
+                    np.asarray(inten_raw, dtype=float)
+                    if inten_raw is not None
                     else np.zeros_like(x)
                 )
-                n = min(x.shape[0], y.shape[0], z.shape[0], d.shape[0])
-                arr = np.stack((z[:n], y[:n], x[:n], d[:n]), axis=1)
+                n = min(x.shape[0], y.shape[0], z.shape[0], inten.shape[0])
+                p = inten[:n]
+                try:
+                    pmin = float(np.nanmin(p)) if p.size > 0 else 0.0
+                    pmax = float(np.nanmax(p)) if p.size > 0 else 1.0
+                    denom = pmax - pmin
+                    if not np.isfinite(denom) or denom <= 1e-12:
+                        p = np.zeros_like(p, dtype=float)
+                    else:
+                        p = (p - pmin) / denom
+                        p = np.clip(p, 0.0, 1.0)
+                except Exception:
+                    p = np.zeros_like(p, dtype=float)
+                arr = np.stack((x[:n], y[:n], z[:n], p), axis=1)
                 np.save(npy_path, arr)
             except Exception as e:
                 try:
