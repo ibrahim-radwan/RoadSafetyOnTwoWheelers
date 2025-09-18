@@ -34,6 +34,8 @@ class RadarHeatmapAnalyser(RadarAnalyser):
         *,
         prealloc_shm_meta: Optional[dict] = None,
         prealloc_res_shm_meta: Optional[dict] = None,
+        output_dir: Optional[str] = None,
+        full_analysis: bool = False,
     ):
         # Only store serializable configuration
         self.config_file = config_file
@@ -56,6 +58,112 @@ class RadarHeatmapAnalyser(RadarAnalyser):
         self._ra_shape = None
         self._ra_dtype = None
         self._res_seq = 0
+        # Full analysis controls
+        self._output_dir = output_dir
+        self._full_analysis = bool(full_analysis)
+
+    # === Artefact saving helpers ===
+    def _resolve_stem(self, frame) -> Optional[str]:
+        try:
+            import os as _os, glob as _glob
+
+            src_fp = getattr(frame, "filepath", None)
+            if isinstance(src_fp, str) and src_fp:
+                return _os.path.splitext(src_fp)[0]
+            # Derive from timestamp and configured output_dir
+            if self._output_dir and hasattr(frame, "timestamp"):
+                ts = float(getattr(frame, "timestamp", 0.0))
+                ts_i = int(ts)
+                ts_f = int((ts - ts_i) * 1e5)
+                prefix = f"{ts_i:010d}_{ts_f:05d}_"
+                matches = _glob.glob(_os.path.join(self._output_dir, prefix + "*.bin"))
+                if matches:
+                    return _os.path.splitext(matches[0])[0]
+        except Exception:
+            pass
+        return None
+
+    def _save_point_cloud_npy(
+        self, stem: str, point_cloud: Optional[Dict[str, Any]]
+    ) -> None:
+        if not self._full_analysis:
+            return
+        try:
+            import numpy as _np
+
+            if not point_cloud:
+                return
+            x = _np.asarray(point_cloud.get("x", []), dtype=float)
+            y = _np.asarray(point_cloud.get("y", []), dtype=float)
+            z_raw = point_cloud.get("z")
+            z = (
+                _np.asarray(z_raw, dtype=float)
+                if z_raw is not None
+                else _np.zeros_like(x)
+            )
+            inten_raw = point_cloud.get("intensity", point_cloud.get("snr"))
+            inten = (
+                _np.asarray(inten_raw, dtype=float)
+                if inten_raw is not None
+                else _np.zeros_like(x)
+            )
+            n = min(x.shape[0], y.shape[0], z.shape[0], inten.shape[0])
+            p = inten[:n]
+            try:
+                pmin = float(_np.nanmin(p)) if p.size > 0 else 0.0
+                pmax = float(_np.nanmax(p)) if p.size > 0 else 1.0
+                denom = pmax - pmin
+                if not _np.isfinite(denom) or denom <= 1e-12:
+                    p = _np.zeros_like(p, dtype=float)
+                else:
+                    p = _np.clip((p - pmin) / denom, 0.0, 1.0)
+            except Exception:
+                p = _np.zeros_like(p, dtype=float)
+            arr = _np.stack((x[:n], y[:n], z[:n], p), axis=1)
+            _np.save(stem + ".npy", arr)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Point cloud .npy save failed: {e}")
+
+    def _save_tesseract_mat(self, stem: str) -> None:
+        if not self._full_analysis:
+            return
+        try:
+            import numpy as _np
+            from scipy.io import savemat as _savemat
+
+            tesseract = _np.zeros((0, 0, 0, 0), dtype=_np.float64)
+            _savemat(stem + "_tesseract.mat", {"tesseract": tesseract})
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Tesseract .mat save failed: {e}")
+
+    def _save_zyx_cube_mat(self, stem: str) -> None:
+        if not self._full_analysis:
+            return
+        try:
+            import numpy as _np
+            from scipy.io import savemat as _savemat
+
+            zyx_cube = _np.zeros((0, 0, 0), dtype=_np.float64)
+            _savemat(stem + "_zyx_cube.mat", {"zyx_cube": zyx_cube})
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"zyx_cube .mat save failed: {e}")
+
+    def _maybe_save_artefacts(self, frame, results: Dict[str, Any]) -> None:
+        if not self._full_analysis:
+            return
+        stem = self._resolve_stem(frame)
+        if not stem:
+            return
+        try:
+            self._save_tesseract_mat(stem)
+            self._save_zyx_cube_mat(stem)
+            self._save_point_cloud_npy(stem, results.get("point_cloud"))
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Artefact save error: {e}")
 
     def _preprocess_frame_from_raw_data(self, dca_frame: np.ndarray) -> np.ndarray:
         """
@@ -361,10 +469,32 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 # If we have a pending SHM init for results, send it now
                 if getattr(self, "_pending_res_init", None) is not None:
                     try:
-                        output_queue.put_nowait(self._pending_res_init)
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            output_queue.put(self._pending_res_init)
+                        else:
+                            output_queue.put_nowait(self._pending_res_init)
                         self._pending_res_init = None
                     except Full:
-                        pass
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            if self.logger:
+                                self.logger.error(
+                                    "Output queue full during SHM init meta send (full-analysis)"
+                                )
+                            stop_event.set()
+                            break
+                        else:
+                            if self.logger:
+                                self.logger.warning(
+                                    "Output queue full during SHM init meta send"
+                                )
                 # Use preloaded first item if available; otherwise read from queue
                 if preloaded_item is not None:
                     item = preloaded_item
@@ -445,6 +575,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
 
                     # Analyse
                     results = self._analyse_frame(latest_frame)
+                    # Save artefacts in full-analysis mode
+                    self._maybe_save_artefacts(latest_frame, results)
+
                     end_ns = time.perf_counter_ns()
 
                     # Write results to SHM if available
@@ -605,15 +738,55 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                             "src_filepath": getattr(latest_frame, "filepath", None),
                         }
                         try:
-                            output_queue.put_nowait(meta)
+                            if os.environ.get("FULL_ANALYSIS", "0") in (
+                                "1",
+                                "true",
+                                "True",
+                            ):
+                                output_queue.put(meta)
+                            else:
+                                output_queue.put_nowait(meta)
                         except Full:
-                            self.logger.warning("Output queue full, skipping frame")
+                            if os.environ.get("FULL_ANALYSIS", "0") in (
+                                "1",
+                                "true",
+                                "True",
+                            ):
+                                self.logger.error(
+                                    "Output queue full (SHM meta) in full-analysis"
+                                )
+                                stop_event.set()
+                                break
+                            else:
+                                self.logger.warning(
+                                    "Output queue full, skipping frame (SHM meta)"
+                                )
                         continue
                     else:
                         try:
-                            output_queue.put_nowait(results)
+                            if os.environ.get("FULL_ANALYSIS", "0") in (
+                                "1",
+                                "true",
+                                "True",
+                            ):
+                                output_queue.put(results)
+                            else:
+                                output_queue.put_nowait(results)
                         except Full:
-                            self.logger.warning("Output queue full, skipping frame")
+                            if os.environ.get("FULL_ANALYSIS", "0") in (
+                                "1",
+                                "true",
+                                "True",
+                            ):
+                                self.logger.error(
+                                    "Output queue full (results) in full-analysis"
+                                )
+                                stop_event.set()
+                                break
+                            else:
+                                self.logger.warning(
+                                    "Output queue full, skipping frame (results)"
+                                )
                         continue
                 if isinstance(item, dict) and isinstance(
                     item.get("TUNING"), (str, bytes)
@@ -647,6 +820,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     drain_end_ns = drain_start_ns
                     recv_ns = time.perf_counter_ns()
                     results = self._analyse_frame(latest_frame)
+
+                    self._maybe_save_artefacts(latest_frame, results)
+
                     end_ns = time.perf_counter_ns()
                     # Attach timing/diag metadata
                     self._total_dropped_frames += drained_count
@@ -675,9 +851,29 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                         }
                     )
                     try:
-                        output_queue.put_nowait(results)
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            output_queue.put(results)
+                        else:
+                            output_queue.put_nowait(results)
                     except Full:
-                        self.logger.warning("Output queue full, skipping frame")
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            self.logger.error(
+                                "Output queue full (replay frame) in full-analysis"
+                            )
+                            stop_event.set()
+                            break
+                        else:
+                            self.logger.warning(
+                                "Output queue full, skipping frame (replay frame)"
+                            )
                     continue
                 if isinstance(item, DCA1000Frame):
                     # Do not drop further in analyser; process the first frame we dequeued
@@ -689,6 +885,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     # Process the most recent frame
                     # Pass tuning into processing functions via adc_params or kwargs if needed
                     results = self._analyse_frame(latest_frame)
+
+                    self._maybe_save_artefacts(latest_frame, results)
+
                     end_ns = time.perf_counter_ns()
                     # Attach timing metadata (monotonic ns) and propagate capture times
                     self._total_dropped_frames += drained_count
@@ -720,10 +919,30 @@ class RadarHeatmapAnalyser(RadarAnalyser):
 
                     # Send results
                     try:
-                        output_queue.put_nowait(results)
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            output_queue.put(results)
+                        else:
+                            output_queue.put_nowait(results)
                     except Full:
-                        # Queue might be full, skip this frame
-                        self.logger.warning("Output queue full, skipping frame")
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            self.logger.error(
+                                "Output queue full (raw DCA frame) in full-analysis"
+                            )
+                            stop_event.set()
+                            break
+                        else:
+                            # Queue might be full, skip this frame
+                            self.logger.warning(
+                                "Output queue full, skipping frame (raw DCA frame)"
+                            )
                         pass
                 else:
                     # Ignore unrelated items to avoid log spam

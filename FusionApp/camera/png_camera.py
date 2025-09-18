@@ -269,24 +269,77 @@ class PNGCamera(CameraFeed):
                     send_frame = False
 
                     if use_sync:
-                        # Synchronized timing mode
-                        start_timestamp = SyncStateUtils.get_start_timestamp(
-                            self._sync_state
-                        )
-                        relative_frame_time = frame_timestamp - start_timestamp
-
-                        # Check if it's time to send this frame (or past time)
-                        current_timeline = SyncStateUtils.get_current_timeline_position(
-                            self._sync_state
-                        )
-                        if current_timeline >= relative_frame_time:
+                        # In full-analysis mode, don't throttle by timeline; gating below will enforce correctness
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
                             send_frame = True
+                        else:
+                            # Synchronized timing mode (real-time replay)
+                            start_timestamp = SyncStateUtils.get_start_timestamp(
+                                self._sync_state
+                            )
+                            relative_frame_time = frame_timestamp - start_timestamp
+
+                            # Check if it's time to send this frame (or past time)
+                            current_timeline = (
+                                SyncStateUtils.get_current_timeline_position(
+                                    self._sync_state
+                                )
+                            )
+                            if current_timeline >= relative_frame_time:
+                                send_frame = True
                     else:
                         # Legacy frame rate-based timing mode
                         current_time = time.perf_counter()
                         time_since_last_frame = current_time - self._last_frame_time
                         if time_since_last_frame >= (1.0 / self._frame_rate):
                             send_frame = True
+
+                    # In full-analysis synchronized mode, enforce radar-driven window gating
+                    if use_sync and os.environ.get("FULL_ANALYSIS", "0") in (
+                        "1",
+                        "true",
+                        "True",
+                    ):
+                        try:
+                            start_ts, end_ts, _, _ = SyncStateUtils.get_radar_window(
+                                self._sync_state
+                            )
+                            # If window is valid, restrict sending to [start_ts, end_ts)
+                            if end_ts > start_ts:
+                                # Fast-forward if this frame is before the current window
+                                while (
+                                    self._current_frame_index < len(self._frame_files)
+                                    and self._frame_files[self._current_frame_index][1]
+                                    < start_ts - 1e-9
+                                ):
+                                    self._advance_frame()
+                                    if self._current_frame_index >= len(
+                                        self._frame_files
+                                    ):
+                                        break
+                                if self._current_frame_index < len(self._frame_files):
+                                    _, frame_timestamp, _ = self._frame_files[
+                                        self._current_frame_index
+                                    ]
+                                # If this frame is at or beyond end of window, wait for window update
+                                if frame_timestamp >= end_ts - 1e-9:
+                                    # Wait briefly for a new window; avoid busy spin
+                                    last_seq = SyncStateUtils.get_radar_window(
+                                        self._sync_state
+                                    )[3]
+                                    new_seq = SyncStateUtils.wait_for_window_update(
+                                        self._sync_state, last_seq, timeout=0.2
+                                    )
+                                    if new_seq is None:
+                                        time.sleep(0.01)
+                                    # Defer sending this loop
+                                    send_frame = False
+                        except Exception:
+                            pass
 
                     if send_frame:
                         # Read current frame

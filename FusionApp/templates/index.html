@@ -364,33 +364,49 @@
     }
     // Two-viewer polling logic
     let radarMode = 'rd';
-    let videoTimer = null;
-    let radarTimer = null;
+  let videoTimer = null;
+  let radarTimer = null;
+  // Unified poller to better align UI updates of video and radar
+  let unifiedTimer = null;
+  let lastVideoTick = 0;
+  let lastRadarTick = 0;
     let procTimer = null;
     let pc3dInitialized = false; // preserve 3D camera across frames
     let pc3dResetOnNext = false; // force reset camera when switching to 3D
-    function scheduleVideoPoll() {
-      if (videoTimer) clearInterval(videoTimer);
+    // Unified scheduler: fires frequently, honors per-stream FPS
+    function scheduleUnifiedPoll() {
+      if (videoTimer) { clearInterval(videoTimer); videoTimer = null; }
+      if (radarTimer) { clearInterval(radarTimer); radarTimer = null; }
+      if (unifiedTimer) { clearInterval(unifiedTimer); unifiedTimer = null; }
       if (!isRunning) return;
-      const mode = document.querySelector('input[name="video_mode"]:checked').value;
-      if (mode !== 'live') return;
-      const fpsSel = document.getElementById('video_fps');
-      let fps = parseInt(fpsSel.value || '1');
-      fps = Math.max(1, fps);
-      const period = Math.max(50, Math.floor(1000 / fps));
-      videoTimer = setInterval(fetchVideoFrame, period);
+      lastVideoTick = 0; lastRadarTick = 0;
+      const basePeriod = 50; // ms cadence
+      unifiedTimer = setInterval(() => {
+        if (!isRunning) return;
+        const now = Date.now();
+        try {
+          const vMode = document.querySelector('input[name="video_mode"]:checked').value;
+          if (vMode === 'live') {
+            let vfps = parseInt((document.getElementById('video_fps').value || '1'), 10);
+            vfps = Math.max(1, vfps);
+            const vPeriod = Math.max(50, Math.floor(1000 / vfps));
+            if (now - lastVideoTick >= vPeriod) { fetchVideoFrame(); lastVideoTick = now; }
+          }
+        } catch (e) { }
+        try {
+          const rMode = document.querySelector('input[name="radar_mode"]:checked').value;
+          if (rMode === 'live') {
+            let rfps = parseInt((document.getElementById('radar_fps').value || '1'), 10);
+            rfps = Math.max(1, rfps);
+            const rPeriod = Math.max(50, Math.floor(1000 / rfps));
+            if (now - lastRadarTick >= rPeriod) { fetchRadarFrame(); lastRadarTick = now; }
+          }
+        } catch (e) { }
+      }, basePeriod);
     }
-    function scheduleRadarPoll() {
-      if (radarTimer) clearInterval(radarTimer);
-      if (!isRunning) return;
-      const mode = document.querySelector('input[name="radar_mode"]:checked').value;
-      if (mode !== 'live') return;
-      const fpsSel = document.getElementById('radar_fps');
-      let fps = parseInt(fpsSel.value || '1');
-      fps = Math.max(1, fps);
-      const period = Math.max(50, Math.floor(1000 / fps));
-      radarTimer = setInterval(fetchRadarFrame, period);
-    }
+    // Backward-compatible shims
+    function scheduleVideoPoll() { scheduleUnifiedPoll(); }
+    function scheduleRadarPoll() { scheduleUnifiedPoll(); }
     async function fetchVideoFrame() {
       if (!isRunning) return;
       const el = document.getElementById('video_view');
@@ -764,9 +780,10 @@
         const liveOnlyEls = document.querySelectorAll('.live-only');
         const replayOnlyEls = document.querySelectorAll('.replay-only');
         liveOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'live'));
-        replayOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'replay'));
-        // Prefill defaults for replay when switching into replay mode
-        if (mode === 'replay' && window.__defaults) {
+        // Treat 'full' like 'replay' for UI purposes
+        replayOnlyEls.forEach(el => el.classList.toggle('hidden', mode === 'live'));
+        // Prefill defaults when switching into replay/full mode
+        if ((mode === 'replay' || mode === 'full') && window.__defaults) {
           try {
             if (window.__defaults.default_replay_path) {
               const rp = document.getElementById('replay_path');
@@ -824,6 +841,7 @@
         <label>Server Mode:</label>
         <label><input type="radio" name="server_mode" value="live" checked> Live</label>
         <label><input type="radio" name="server_mode" value="replay"> Replay</label>
+        <label><input type="radio" name="server_mode" value="full"> Full-Analysis</label>
       </div>
       <label><input type="checkbox" id="radar_only"> Radar only</label>
       <div class="live-only">

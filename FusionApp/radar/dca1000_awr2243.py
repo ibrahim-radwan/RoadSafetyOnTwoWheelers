@@ -642,41 +642,70 @@ class DCA1000Recording(RadarFeed):
                     ]
 
                     if use_sync:
-                        # Synchronized timing mode
-                        start_timestamp = SyncStateUtils.get_start_timestamp(
-                            self._sync_state
-                        )
-                        relative_frame_time = frame_timestamp - start_timestamp
-
-                        # Wait until the shared timeline reaches this frame's time
-                        while not stop_event.is_set():
-                            current_timeline = (
-                                SyncStateUtils.get_current_timeline_position(
-                                    self._sync_state
-                                )
+                        # In full-analysis mode, do not throttle by real-time timeline;
+                        # publish radar-driven window and proceed immediately.
+                        if os.environ.get("FULL_ANALYSIS", "0") not in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            # Synchronized timing mode (real-time replay)
+                            start_timestamp = SyncStateUtils.get_start_timestamp(
+                                self._sync_state
                             )
+                            relative_frame_time = frame_timestamp - start_timestamp
 
-                            # Check if it's time to send this frame (or past time)
-                            if current_timeline >= relative_frame_time:
-                                break
+                            # Wait until the shared timeline reaches this frame's time
+                            while not stop_event.is_set():
+                                current_timeline = (
+                                    SyncStateUtils.get_current_timeline_position(
+                                        self._sync_state
+                                    )
+                                )
 
-                            # Check if playback was paused while waiting
+                                # Check if it's time to send this frame (or past time)
+                                if current_timeline >= relative_frame_time:
+                                    break
+
+                                # Check if playback was paused while waiting
+                                if (
+                                    SyncStateUtils.get_playback_state(self._sync_state)
+                                    != SyncPlaybackState.PLAYING
+                                ):
+                                    break
+
+                                # Sleep briefly to avoid busy waiting
+                                time.sleep(0.001)
+
+                            # Check if we should still send the frame (playback might have been paused/stopped)
                             if (
-                                SyncStateUtils.get_playback_state(self._sync_state)
+                                stop_event.is_set()
+                                or SyncStateUtils.get_playback_state(self._sync_state)
                                 != SyncPlaybackState.PLAYING
                             ):
-                                break
-
-                            # Sleep briefly to avoid busy waiting
-                            time.sleep(0.001)
-
-                        # Check if we should still send the frame (playback might have been paused/stopped)
-                        if (
-                            stop_event.is_set()
-                            or SyncStateUtils.get_playback_state(self._sync_state)
-                            != SyncPlaybackState.PLAYING
-                        ):
-                            continue
+                                continue
+                        # Publish the radar-driven processing window
+                        try:
+                            # Determine next frame timestamp for window end
+                            if self._current_frame_index + 1 < len(self._frame_files):
+                                _, ts_next, _ = self._frame_files[
+                                    self._current_frame_index + 1
+                                ]
+                            else:
+                                # Last frame: allow camera to flush remaining frames
+                                ts_next = frame_timestamp + 1e9
+                            # Publish window [frame_timestamp, ts_next)
+                            try:
+                                SyncStateUtils.set_radar_window(
+                                    self._sync_state,
+                                    frame_timestamp,
+                                    ts_next,
+                                    self._current_frame_index,
+                                )
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
                     else:
                         # Legacy frame rate-based timing mode
                         # Wait for stream_queue to be empty (or nearly empty)
@@ -692,14 +721,23 @@ class DCA1000Recording(RadarFeed):
                         frame = self._read_frame_from_file(filepath)
                         # Avoid blocking if analyzer is shutting down
                         try:
-                            stream_queue.put_nowait(
-                                {"RADAR_REPLAY_FILEPATH": filepath, "FRAME": frame}
-                            )
+                            if os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True"):
+                                stream_queue.put({"RADAR_REPLAY_FILEPATH": filepath, "FRAME": frame})
+                            else:
+                                stream_queue.put_nowait({"RADAR_REPLAY_FILEPATH": filepath, "FRAME": frame})
                         except Exception as e:
-                            self.logger.warning(
-                                f"Queue busy/closed, dropping frame: {e}"
-                            )
-                            time.sleep(0.001)
+                            if os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True"):
+                                self.logger.error(
+                                    f"Replay frame queue failure in full-analysis: {e}"
+                                )
+                                stop_event.set()
+                                time.sleep(0.001)
+                                continue
+                            else:
+                                self.logger.warning(
+                                    f"Queue busy/closed, dropping frame: {e}"
+                                )
+                                time.sleep(0.001)
 
                         self.logger.debug(
                             f"Sent frame {self._current_frame_index}: {os.path.basename(filepath)} "
@@ -714,6 +752,45 @@ class DCA1000Recording(RadarFeed):
 
                         # Advance to next frame
                         self._current_frame_index += 1
+
+                        # In full-analysis mode, let the camera catch up to window end before advancing further
+                        try:
+                            if use_sync and os.environ.get("FULL_ANALYSIS", "0") in (
+                                "1",
+                                "true",
+                                "True",
+                            ):
+                                # Compute the end timestamp of the just-published window
+                                try:
+                                    if self._current_frame_index < len(self._frame_files):
+                                        _, next_ts, _ = self._frame_files[self._current_frame_index]
+                                    else:
+                                        # Last frame already sent; no need to wait
+                                        next_ts = frame_timestamp + 1e-6
+                                except Exception:
+                                    next_ts = frame_timestamp + 1e-6
+                                # Wait until camera processed up to next_ts (or until paused/stopped/timeout)
+                                start_wait = time.perf_counter()
+                                max_wait = 2.0  # seconds safety to prevent deadlock if camera stalls
+                                while not stop_event.is_set():
+                                    # Break if playback paused or stopped
+                                    if (
+                                        SyncStateUtils.get_playback_state(self._sync_state)
+                                        != SyncPlaybackState.PLAYING
+                                    ):
+                                        break
+                                    try:
+                                        cam_ts = float(self._sync_state.last_camera_timestamp.value)
+                                    except Exception:
+                                        cam_ts = 0.0
+                                    if cam_ts >= next_ts - 1e-9:
+                                        break
+                                    if time.perf_counter() - start_wait > max_wait:
+                                        # Timeout: proceed to avoid permanent stall
+                                        break
+                                    time.sleep(0.002)
+                        except Exception:
+                            pass
 
                         # Send status update every 5 frames for smoother progress
                         if self._current_frame_index % 5 == 0:

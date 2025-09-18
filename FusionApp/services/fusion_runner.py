@@ -86,6 +86,8 @@ class FusionRunner:
         # Replay dir for matching frame filenames; last-saved guard
         self._replay_dir: Optional[str] = None
         self._last_saved_pc_ts: Optional[float] = None
+        # Mode flags
+        self._full_analysis: bool = False
 
         # Runtime tuning (hot) applied by analyser via control queue
         self._tuning: Dict[str, Any] = {
@@ -115,6 +117,7 @@ class FusionRunner:
         self._radar_connected = False
         self._camera_connected = False
         self._mode = (mode or "live").lower()
+        self._full_analysis = self._mode == "full"
 
         try:
             self._stop_event = threading.Event()
@@ -129,7 +132,7 @@ class FusionRunner:
             pass
 
         fusion_engine: FusionEngine
-        if self._mode == "replay":
+        if self._mode in ("replay", "full"):
             # Create a shared sync_state and compute start timestamp from directory
             from multiprocessing import Manager
             from engine.sync_state import (
@@ -162,6 +165,20 @@ class FusionRunner:
                 )
             # Store for status exposure
             self._sync_state = sync_state
+            # Propagate full-analysis mode to engine
+            try:
+                setattr(fusion_engine, "full_analysis", bool(self._full_analysis))
+            except Exception as e:
+                # In full-analysis mode, this is fatal because downstream components rely on this hint
+                if self._full_analysis:
+                    self._failed = True
+                    self._failure_reason = f"failed to set full_analysis on engine: {e}"
+                    self._starting = False
+                    self._running = False
+                    return False
+                else:
+                    self.logger.warning("Failed to set full_analysis on engine: %s", e)
+
         else:
             fusion_engine = (
                 FusionFactory.create_live_radar_only(
@@ -175,6 +192,22 @@ class FusionRunner:
 
         from multiprocessing import Process
 
+        # Propagate FULL_ANALYSIS hint to child processes via environment for mode-specific queue behavior
+        try:
+            if self._full_analysis:
+                os.environ["FULL_ANALYSIS"] = "1"
+            else:
+                os.environ.pop("FULL_ANALYSIS", None)
+        except Exception as e:
+            if self._full_analysis:
+                self._failed = True
+                self._failure_reason = f"failed to set FULL_ANALYSIS env: {e}"
+                self._starting = False
+                self._running = False
+                return False
+            else:
+                self.logger.warning("Failed to set FULL_ANALYSIS env: %s", e)
+
         self._engine_process = Process(
             target=fusion_engine.run,
             args=(
@@ -186,8 +219,8 @@ class FusionRunner:
             ),
         )
         try:
-            # Live: initialize hardware; Replay: skip HW init
-            if self._mode != "replay":
+            # Live: initialize hardware; Replay/Full: skip HW init
+            if self._mode not in ("replay", "full"):
                 try:
                     radar_cfg_path = fusion_engine.radar_analyser_config.get(
                         "config_file"
@@ -242,9 +275,11 @@ class FusionRunner:
     ) -> None:
         """Save (x, y, z, power) array to .npy next to the matching .bin.
 
-        Active only in replay mode or when live recording is enabled.
+        Active only in full-analysis mode.
         """
         try:
+            if not getattr(self, "_full_analysis", False):
+                return
             if point_cloud is None or frame_timestamp is None:
                 return
             # Determine target .npy path
@@ -252,13 +287,9 @@ class FusionRunner:
                 bin_path = src_filepath
                 npy_path = os.path.splitext(bin_path)[0] + ".npy"
             else:
-                # Only in replay or live+recording
-                base_dir: Optional[str] = None
-                if getattr(self, "_mode", "live") == "replay" and self._replay_dir:
-                    base_dir = self._replay_dir
-                elif self._rec_is_recording and self._record_dir:
-                    base_dir = self._record_dir
-                else:
+                # Only in full-analysis replay with known base directory
+                base_dir: Optional[str] = self._replay_dir if self._replay_dir else None
+                if base_dir is None:
                     return
                 ts = float(frame_timestamp)
                 ts_i = int(ts)
@@ -351,9 +382,9 @@ class FusionRunner:
                     pass
         except Exception:
             pass
-        # Live mode uses HW; replay does not require cleanup
+        # Live mode uses HW; replay/full do not require cleanup
         try:
-            if getattr(self, "_mode", "live") != "replay":
+            if getattr(self, "_mode", "live") not in ("replay", "full"):
                 radar_hw_cleanup()
         except Exception:
             pass
@@ -442,15 +473,6 @@ class FusionRunner:
                         self._latest_point_cloud = item.get("point_cloud")
                         self._latest_radar_ts = float(item.get("frame_timestamp", 0.0))
                         src_path = item.get("src_filepath")
-                        # Save npy when applicable
-                        try:
-                            self._save_point_cloud_npy(
-                                self._latest_point_cloud,
-                                self._latest_radar_ts,
-                                src_filepath=src_path,
-                            )
-                        except Exception:
-                            pass
                         try:
                             self._last_res_slot = int(item.get("slot", 0)) & 1
                             self._last_res_seq = int(item.get("seq", 0))
@@ -477,15 +499,6 @@ class FusionRunner:
                                 item.get("frame_timestamp", 0.0)
                             )
                         src_path = item.get("src_filepath")
-                        # Save npy when applicable
-                        try:
-                            self._save_point_cloud_npy(
-                                self._latest_point_cloud,
-                                self._latest_radar_ts,
-                                src_filepath=src_path,
-                            )
-                        except Exception:
-                            pass
                         self._radar_connected = True
                         with self._stats_lock:
                             self._stats["last_radar_update"] = time.time()

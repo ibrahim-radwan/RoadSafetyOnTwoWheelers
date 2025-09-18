@@ -39,6 +39,8 @@ class FusionEngine:
         self.radar_analyser_config = radar_analyser_config
         self.camera_feed_config = camera_feed_config
         self.camera_analyser_config = camera_analyser_config
+        # Mode hint propagated from runner
+        self.full_analysis: bool = bool(getattr(self, "full_analysis", False))
 
         # Initialize queues (keep radar queue at 1 to avoid backlog; source drops to latest)
         self._radar_stream_queue: Queue = Queue(maxsize=1)
@@ -87,10 +89,16 @@ class FusionEngine:
         if analyser_type == "RadarHeatmapAnalyser":
             from analysis.radar_heatmap_analyser import RadarHeatmapAnalyser
 
+            # Ensure we propagate optional full-analysis flags and output directory
+            # These may have been injected into the config in run() when operating in
+            # replay/full-analysis modes (e.g., output_dir for artefact resolution and
+            # full_analysis to toggle heavy saving logic inside the analyser).
             return RadarHeatmapAnalyser(
                 config.get("config_file"),
                 prealloc_shm_meta=config.get("prealloc_shm_meta"),
                 prealloc_res_shm_meta=config.get("prealloc_res_shm_meta"),
+                output_dir=config.get("output_dir"),
+                full_analysis=bool(config.get("full_analysis", False)),
             )
         else:
             raise ValueError(f"Unknown radar analyser type: {analyser_type}")
@@ -259,6 +267,20 @@ class FusionEngine:
         self.logger.info("Creating feed and analyzer instances...")
         try:
             radar_feed = self._create_radar_feed(self.radar_feed_config)
+            # Propagate full-analysis and output directory into analyser config
+            try:
+                if (
+                    isinstance(self.radar_feed_config, dict)
+                    and self.radar_feed_config.get("type") == "DCA1000Recording"
+                ):
+                    out_dir = self.radar_feed_config.get("dest_dir")
+                    if out_dir:
+                        self.radar_analyser_config["output_dir"] = out_dir
+                self.radar_analyser_config["full_analysis"] = bool(
+                    getattr(self, "full_analysis", False)
+                )
+            except Exception:
+                pass
             radar_analyser = self._create_radar_analyser(self.radar_analyser_config)
 
             camera_feed = None
@@ -392,7 +414,16 @@ class FusionEngine:
                 try:
                     st = rf_status_queue.get_nowait()
                     try:
-                        radar_results_queue.put_nowait({"RADAR_PLAYBACK_STATUS": st})
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            radar_results_queue.put({"RADAR_PLAYBACK_STATUS": st})
+                        else:
+                            radar_results_queue.put_nowait(
+                                {"RADAR_PLAYBACK_STATUS": st}
+                            )
                     except Exception:
                         pass
                 except queue.Empty:
