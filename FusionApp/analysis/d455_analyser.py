@@ -263,17 +263,35 @@ class D455Analyser(CameraAnalyser):
                 analysis_end_time = time.perf_counter()
                 analysis_time = analysis_end_time - analysis_start_time
 
-                # Non-blocking result publish; drop if consumer is busy
+                # Publish results (blocking in full-analysis mode, else non-blocking best-effort)
                 try:
-                    # Propagate camera diagnostics in the results object if present
                     try:
                         video_frame.drops_total = getattr(video_frame, "drops_total", 0)
                         video_frame.seq = getattr(video_frame, "seq", 0)
                     except Exception:
                         pass
-                    output_queue.put_nowait(D455Results(video_frame, objects))
+                    # Gate on environment hint to avoid coupling to runner directly
+                    use_blocking = os.environ.get("FULL_ANALYSIS", "0") in (
+                        "1",
+                        "true",
+                        "True",
+                    )
+                    if use_blocking:
+                        output_queue.put(D455Results(video_frame, objects))
+                    else:
+                        output_queue.put_nowait(D455Results(video_frame, objects))
                 except Full:
-                    self.logger.debug("Camera results queue full; dropping result")
+                    if os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True"):
+                        # Fatal in full-analysis: cannot drop results
+                        self.logger.error(
+                            "Camera results queue full in full-analysis mode"
+                        )
+                        stop_event.set()
+                        break
+                    else:
+                        self.logger.warning(
+                            "Camera results queue full; dropping result"
+                        )
 
                 total_end_time = time.perf_counter()
                 total_processing_time_frame = total_end_time - total_start_time

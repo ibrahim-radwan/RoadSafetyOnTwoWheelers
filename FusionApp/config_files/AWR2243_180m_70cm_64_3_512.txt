@@ -32,7 +32,7 @@ ackTimeout=50000;
 #channel config parameters, please modify if needed.
 #rlChanCfg_t
 #
-channelTx=5;
+channelTx=7;
 channelRx=15;
 cascading=0;
 #END
@@ -163,6 +163,20 @@ startFreqVar=0;
 freqSlopeVar=0;
 idleTimeVar=0;
 adcStartTimeVar=0;
+txEnable=2;
+#END
+
+#
+#Chirp Configuration parameters, please modify if needed.
+#rlChirpCfg_t
+#
+chirpStartIdx=2;
+chirpEndIdx=2;
+profileIdCPCFG=0;
+startFreqVar=0;
+freqSlopeVar=0;
+idleTimeVar=0;
+adcStartTimeVar=0;
 txEnable=4;
 #END
 
@@ -171,7 +185,7 @@ txEnable=4;
 #rlFrameCfg_t
 #
 chirpStartIdxFCF=0;
-chirpEndIdxFCF=1;
+chirpEndIdxFCF=2;
 frameCount=0;
 loopCount=64;
 periodicity=10000000;
