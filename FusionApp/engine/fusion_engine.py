@@ -99,6 +99,8 @@ class FusionEngine:
                 prealloc_res_shm_meta=config.get("prealloc_res_shm_meta"),
                 output_dir=config.get("output_dir"),
                 full_analysis=bool(config.get("full_analysis", False)),
+                enable_tesseract=bool(config.get("enable_tesseract", True)),
+                enable_zyx_cube=bool(config.get("enable_zyx_cube", True)),
             )
         else:
             raise ValueError(f"Unknown radar analyser type: {analyser_type}")
@@ -166,6 +168,16 @@ class FusionEngine:
 
         self.logger.info("FusionEngine starting...")
 
+        # Propagate full-analysis mode to environment for all child processes (used for backpressure decisions)
+        try:
+            if bool(getattr(self, "full_analysis", False)):
+                os.environ["FULL_ANALYSIS"] = "1"
+            else:
+                # Do not forcibly unset if user manually set; only set to 0 if absent
+                os.environ.setdefault("FULL_ANALYSIS", "0")
+        except Exception:
+            pass
+
         # Validate camera requirements
         if self.camera_feed_config is not None and camera_results_queue is None:
             raise ValueError(
@@ -176,6 +188,23 @@ class FusionEngine:
         radar_control_queue = Queue() if control_queue is not None else None
         radar_analyser_control_queue = Queue() if control_queue is not None else None
         camera_control_queue = Queue() if control_queue is not None else None
+
+        # Acknowledgement queue (radar replay pacing in full-analysis mode)
+        ack_queue = None
+        try:
+            if (
+                bool(getattr(self, "full_analysis", False))
+                and self.radar_feed_config.get("type") == "DCA1000Recording"
+            ):
+                from multiprocessing import Queue as _Q
+
+                ack_queue = _Q()
+                self.logger.info(
+                    "Created radar replay ACK queue for full-analysis pacing"
+                )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to create ACK queue: {e}")
 
         # Preallocate shared memory for radar raw frames (engine-owned)
         prealloc_shm_meta = None
@@ -317,6 +346,7 @@ class FusionEngine:
                 stop_event,
                 radar_control_queue,
                 rf_status_queue,
+                ack_queue,  # may be None (ignored by live feed)
             ),
         )
         processes.append(radar_process)
@@ -330,6 +360,7 @@ class FusionEngine:
                 radar_results_queue,
                 stop_event,
                 radar_analyser_control_queue,
+                ack_queue,  # analyser sends ACK after replay frame processing
             ),
         )
         processes.append(radar_analyser_process)

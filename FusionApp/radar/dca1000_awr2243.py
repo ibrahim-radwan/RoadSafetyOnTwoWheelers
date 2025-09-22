@@ -284,12 +284,29 @@ class DCA1000EVM(RadarFeed):
                         "frame_timestamp": dca_frame.timestamp,
                     }
                     try:
-                        stream_queue.put_nowait(meta)
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            # Block until consumer ready to enforce backpressure (slow acquisition to analysis)
+                            stream_queue.put(meta)
+                        else:
+                            stream_queue.put_nowait(meta)
                     except queue.Full as e:
                         if self.logger is not None:
-                            self.logger.warning(
-                                f"Radar SHM frame meta drop: {type(e).__name__}: {e}"
-                            )
+                            if os.environ.get("FULL_ANALYSIS", "0") in (
+                                "1",
+                                "true",
+                                "True",
+                            ):
+                                self.logger.error(
+                                    f"Unexpected full queue in full-analysis (should have blocked): {type(e).__name__}: {e}"
+                                )
+                            else:
+                                self.logger.warning(
+                                    f"Radar SHM frame meta drop: {type(e).__name__}: {e}"
+                                )
                 except Exception as e:
                     if self.logger is not None:
                         self.logger.error(f"Radar SHM copy/send failed: {e}")
@@ -310,10 +327,10 @@ class DCA1000EVM(RadarFeed):
         stop_event,
         control_queue: Optional[multiprocessing.Queue] = None,
         status_queue: Optional[multiprocessing.Queue] = None,
+        ack_queue: Optional[multiprocessing.Queue] = None,
     ):
         # Initialize logger in target process
         self.logger = setup_logger("DCA1000EVM")
-        # Silence resource_tracker for shared_memory in this child
         try:
             disable_shm_resource_tracker(self.logger)
         except Exception:
@@ -329,13 +346,9 @@ class DCA1000EVM(RadarFeed):
                     f"cancel_join_thread unavailable or failed for stream_queue: {e}"
                 )
 
-        # Store control queue reference
         self._control_queue = control_queue
+        self.logger.info("Starting live DCA1000 acquisition...")
 
-        # Initialize logger and components in target process
-        self.logger.info("Starting...")
-
-        # Create destination directory if it doesn't exist
         if not os.path.exists(self._dest_dir):
             os.makedirs(self._dest_dir, exist_ok=True)
             self.logger.info(f"Created destination directory: {self._dest_dir}")
@@ -343,45 +356,67 @@ class DCA1000EVM(RadarFeed):
             self.logger.info(f"Using existing destination directory: {self._dest_dir}")
 
         self._start_time = time.perf_counter()
-        self._dca = DCA1000()
 
-        self._dca.reset_fpga()
-        self.logger.info("Waiting 1s for radar and FPGA reset...")
-        time.sleep(1)
+        # Initialize board
+        try:
+            self._dca = DCA1000(self._config.cli_port, self._config.data_port)
+        except Exception as e:
+            self.logger.error(f"Failed to create DCA1000 instance: {e}")
+            return
 
-        (
-            LVDSDataSizePerChirp_l,
-            maxSendBytesPerChirp_l,
-            self._ADC_PARAMS_l,
-            CFG_PARAMS_l,
-        ) = self._dca.AWR2243_read_config(self._config.radar_config_file)
-        self._dca.refresh_parameter()
+        try:
+            self._dca.reset_fpga()
+            (
+                LVDSDataSizePerChirp_l,
+                maxSendBytesPerChirp_l,
+                self._ADC_PARAMS_l,
+                CFG_PARAMS_l,
+            ) = self._dca.AWR2243_read_config(self._config.radar_config_file)
+            self._dca.refresh_parameter()
+            self.logger.info(
+                "LVDSDataSizePerChirp:%d must <= maxSendBytesPerChirp:%d",
+                LVDSDataSizePerChirp_l,
+                maxSendBytesPerChirp_l,
+            )
+            self.logger.info("System connection check: %s", self._dca.sys_alive_check())
+            self.logger.info(self._dca.read_fpga_version())
+            self.logger.info(
+                "Config fpga: %s", self._dca.config_fpga(self._config.dca_config_file)
+            )
+            self.logger.info(
+                "Config record packet delay: %s",
+                self._dca.config_record(self._config.dca_config_file),
+            )
+        except Exception as e:
+            self.logger.error(f"Failed during DCA1000 configuration: {e}")
+            return
 
-        self.logger.info(
-            "LVDSDataSizePerChirp:%d must <= maxSendBytesPerChirp:%d"
-            % (LVDSDataSizePerChirp_l, maxSendBytesPerChirp_l)
-        )
+        # Pass ADC params
+        try:
+            stream_queue.put({"ADC_PARAMS": self._ADC_PARAMS_l})
+        except Exception:
+            pass
 
-        self.logger.info("System connection check: %s", self._dca.sys_alive_check())
-        self.logger.info(self._dca.read_fpga_version())
-        self.logger.info(
-            "Config fpga: %s", self._dca.config_fpga(self._config.dca_config_file)
-        )
-        self.logger.info(
-            "Config record packet delay: %s",
-            self._dca.config_record(self._config.dca_config_file),
-        )
+        # Start streaming
+        try:
+            self._dca.stream_start()
+            self._dca.fastRead_in_Cpp_thread_start()
+        except Exception as e:
+            self.logger.error(f"Failed to start streaming: {e}")
+            return
 
-        # Pass ADC parameters to the stream_queue before streaming data
-        stream_queue.put({"ADC_PARAMS": self._ADC_PARAMS_l})
-
-        self._dca.stream_start()
-        self._dca.fastRead_in_Cpp_thread_start()
-
-        # Send frames directly (no extra producer thread)
+        # Acquisition loop
         self._send_frame(stream_queue, stop_event)
 
-        # Cleanup shared memory blocks if allocated
+        # Cleanup
+        try:
+            if self._dca is not None:
+                self._dca.fastRead_in_Cpp_thread_stop()
+                self._dca.stream_stop()
+                self._dca.close()
+        except Exception:
+            pass
+
         if self._shm_blocks:
             for shm in self._shm_blocks:
                 try:
@@ -395,20 +430,11 @@ class DCA1000EVM(RadarFeed):
             self._shm_names = None
             self._shm_inited = False
 
-        if self._dca is not None:
-            self._dca.fastRead_in_Cpp_thread_stop()
-            self._dca.stream_stop()
-            self._dca.close()
-
-        self.logger.info("Stopped")
-
-        # Give native threads a brief moment to unwind before process exit
+        self.logger.info("Live DCA1000 acquisition stopped")
         try:
             time.sleep(0.2)
         except Exception:
             pass
-
-        # Close stream queue to free resources (no join due to cancel_join_thread)
         try:
             if stream_queue is not None:
                 stream_queue.close()
@@ -562,12 +588,36 @@ class DCA1000Recording(RadarFeed):
         return DCA1000Frame(timestamp, data_buf, filepath=filepath)
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
-        """Send frames to the radar stream queue with synchronized timing control"""
+        """Send frames to the radar stream queue with optional synchronized timing & ACK pacing"""
         self.logger.info("Starting frame sender thread...")
+        use_sync = self._sync_state is not None
+        ack_queue = getattr(self, "_ack_queue", None)
+        full_analysis = os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True")
+        if full_analysis and ack_queue is not None:
+            self.logger.info(
+                "FULL_ANALYSIS replay: disabling timeline-based seeking; enforcing sequential ACK-paced playback"
+            )
 
-        # Determine if we're using synchronized mode
+        # Synchronized start signal if applicable
+        if use_sync:
+            self.logger.info(
+                "Using synchronized timing mode%s",
+                " with ACK pacing" if ack_queue else "",
+            )
+            if not SyncStateUtils.wait_for_start_signal(self._sync_state, timeout=30):
+                self.logger.warning(
+                    "Timeout waiting for start signal, proceeding anyway"
+                )
+        else:
+            self.logger.info(
+                "Using frame rate-based timing mode%s",
+                " with ACK pacing" if ack_queue else "",
+            )
+
+        # Legacy variables for original timing code
         use_sync = self._sync_state is not None
         last_timeline_position = 0.0  # Track timeline position for seeking detection
+        last_sent_index = -1  # For sequence gap detection in full-analysis
 
         if use_sync:
             self.logger.info("Using synchronized timing mode")
@@ -587,40 +637,34 @@ class DCA1000Recording(RadarFeed):
                         self._sync_state
                     )
                     is_playing = sync_playback_state == SyncPlaybackState.PLAYING
-
-                    # Check for seeking (timeline position jumped significantly)
-                    current_timeline = SyncStateUtils.get_current_timeline_position(
-                        self._sync_state
-                    )
-                    timeline_diff = abs(current_timeline - last_timeline_position)
-
-                    # Detect seeking (backward move, large jump) or reset to beginning
-                    if (
-                        current_timeline < last_timeline_position - 0.05
-                        or timeline_diff > 0.5
-                        or current_timeline == 0.0
-                    ):
-                        # Timeline jumped or reset - find the correct frame to seek to
-                        start_timestamp = SyncStateUtils.get_start_timestamp(
+                    if not (full_analysis and ack_queue is not None):
+                        # Only apply timeline-based seeking outside full-analysis deterministic mode
+                        current_timeline = SyncStateUtils.get_current_timeline_position(
                             self._sync_state
                         )
-                        target_timestamp = start_timestamp + current_timeline
-
-                        # Find closest frame to target timestamp
-                        best_index = 0
-                        best_diff = float("inf")
-                        for i, (_, timestamp, _) in enumerate(self._frame_files):
-                            diff = abs(timestamp - target_timestamp)
-                            if diff < best_diff:
-                                best_diff = diff
-                                best_index = i
-
-                        self._current_frame_index = best_index
-                        self.logger.debug(
-                            f"Seeked to frame {best_index} (timestamp: {target_timestamp:.3f}s, timeline: {current_timeline:.3f}s)"
-                        )
-
-                    last_timeline_position = current_timeline
+                        timeline_diff = abs(current_timeline - last_timeline_position)
+                        if (
+                            current_timeline < last_timeline_position - 0.05
+                            or timeline_diff > 0.5
+                            or current_timeline == 0.0
+                        ):
+                            start_timestamp = SyncStateUtils.get_start_timestamp(
+                                self._sync_state
+                            )
+                            target_timestamp = start_timestamp + current_timeline
+                            best_index = 0
+                            best_diff = float("inf")
+                            for i, (_, timestamp, _) in enumerate(self._frame_files):
+                                diff = abs(timestamp - target_timestamp)
+                                if diff < best_diff:
+                                    best_diff = diff
+                                    best_index = i
+                            if best_index != self._current_frame_index:
+                                self._current_frame_index = best_index
+                                self.logger.debug(
+                                    f"Seeked to frame {best_index} (timestamp: {target_timestamp:.3f}s, timeline: {current_timeline:.3f}s)"
+                                )
+                        last_timeline_position = current_timeline
                 else:
                     is_playing = self._playback_state == PlaybackState.PLAYING
 
@@ -636,10 +680,21 @@ class DCA1000Recording(RadarFeed):
                             self._playback_state = PlaybackState.STOPPED
                         continue
 
-                    # Get the current frame information
+                    # Get the current frame information (sequential in full-analysis)
                     filepath, frame_timestamp, _ = self._frame_files[
                         self._current_frame_index
                     ]
+                    if (
+                        full_analysis
+                        and ack_queue is not None
+                        and last_sent_index != -1
+                        and self._current_frame_index != last_sent_index + 1
+                    ):
+                        self.logger.warning(
+                            "REPLAY_SEQ_GAP expected=%d got=%d",
+                            last_sent_index + 1,
+                            self._current_frame_index,
+                        )
 
                     if use_sync:
                         # In full-analysis mode, do not throttle by real-time timeline;
@@ -719,14 +774,28 @@ class DCA1000Recording(RadarFeed):
                     # Read and send the current frame
                     try:
                         frame = self._read_frame_from_file(filepath)
-                        # Avoid blocking if analyzer is shutting down
+                        # Put frame (blocking in full-analysis to align with analyser readiness)
+                        send_start = time.perf_counter()
                         try:
-                            if os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True"):
-                                stream_queue.put({"RADAR_REPLAY_FILEPATH": filepath, "FRAME": frame})
+                            frame_payload = {
+                                "RADAR_REPLAY_FILEPATH": filepath,
+                                "FRAME": frame,
+                                "REPLAY_FRAME_INDEX": self._current_frame_index,
+                            }
+                            if os.environ.get("FULL_ANALYSIS", "0") in (
+                                "1",
+                                "true",
+                                "True",
+                            ):
+                                stream_queue.put(frame_payload)
                             else:
-                                stream_queue.put_nowait({"RADAR_REPLAY_FILEPATH": filepath, "FRAME": frame})
+                                stream_queue.put_nowait(frame_payload)
                         except Exception as e:
-                            if os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True"):
+                            if os.environ.get("FULL_ANALYSIS", "0") in (
+                                "1",
+                                "true",
+                                "True",
+                            ):
                                 self.logger.error(
                                     f"Replay frame queue failure in full-analysis: {e}"
                                 )
@@ -743,6 +812,12 @@ class DCA1000Recording(RadarFeed):
                             f"Sent frame {self._current_frame_index}: {os.path.basename(filepath)} "
                             f"(timestamp: {frame_timestamp:.3f})"
                         )
+                        if ack_queue is not None and full_analysis:
+                            self.logger.info(
+                                "REPLAY_SEND frame_index=%d send_queue_time_ms=%.2f",
+                                self._current_frame_index,
+                                (time.perf_counter() - send_start) * 1000.0,
+                            )
 
                         # Update sync state tracking if available
                         if use_sync:
@@ -750,8 +825,32 @@ class DCA1000Recording(RadarFeed):
                                 frame_timestamp
                             )
 
-                        # Advance to next frame
+                        # ACK pacing: wait for analyser acknowledgement before advancing
+                        if ack_queue is not None and full_analysis:
+                            try:
+                                ack_wait_start = time.perf_counter()
+                                ack = ack_queue.get(timeout=3600)  # very conservative
+                                if not (
+                                    isinstance(ack, dict)
+                                    and ack.get("RADAR_FRAME_PROCESSED")
+                                    == self._current_frame_index
+                                ):
+                                    self.logger.warning(
+                                        f"Unexpected ACK payload: {ack}"
+                                    )
+                                else:
+                                    self.logger.info(
+                                        "REPLAY_ACK  frame_index=%d wait_ms=%.2f",
+                                        self._current_frame_index,
+                                        (time.perf_counter() - ack_wait_start) * 1000.0,
+                                    )
+                            except queue.Empty:
+                                self.logger.error("ACK timeout; stopping playback")
+                                break
+
+                        # Advance to next frame only after ACK (or immediately if no ACK)
                         self._current_frame_index += 1
+                        last_sent_index += 1
 
                         # In full-analysis mode, let the camera catch up to window end before advancing further
                         try:
@@ -762,8 +861,12 @@ class DCA1000Recording(RadarFeed):
                             ):
                                 # Compute the end timestamp of the just-published window
                                 try:
-                                    if self._current_frame_index < len(self._frame_files):
-                                        _, next_ts, _ = self._frame_files[self._current_frame_index]
+                                    if self._current_frame_index < len(
+                                        self._frame_files
+                                    ):
+                                        _, next_ts, _ = self._frame_files[
+                                            self._current_frame_index
+                                        ]
                                     else:
                                         # Last frame already sent; no need to wait
                                         next_ts = frame_timestamp + 1e-6
@@ -775,12 +878,16 @@ class DCA1000Recording(RadarFeed):
                                 while not stop_event.is_set():
                                     # Break if playback paused or stopped
                                     if (
-                                        SyncStateUtils.get_playback_state(self._sync_state)
+                                        SyncStateUtils.get_playback_state(
+                                            self._sync_state
+                                        )
                                         != SyncPlaybackState.PLAYING
                                     ):
                                         break
                                     try:
-                                        cam_ts = float(self._sync_state.last_camera_timestamp.value)
+                                        cam_ts = float(
+                                            self._sync_state.last_camera_timestamp.value
+                                        )
                                     except Exception:
                                         cam_ts = 0.0
                                     if cam_ts >= next_ts - 1e-9:
@@ -918,6 +1025,7 @@ class DCA1000Recording(RadarFeed):
         stop_event,
         control_queue: Optional[multiprocessing.Queue] = None,
         status_queue: Optional[multiprocessing.Queue] = None,
+        ack_queue: Optional[multiprocessing.Queue] = None,
     ):
         """Main run method similar to DCA1000EVM with playback control support"""
         # Initialize logger and scanner in target process
@@ -935,6 +1043,9 @@ class DCA1000Recording(RadarFeed):
 
         # Create and start the frame sender thread
         self._status_queue = status_queue  # Store reference for status updates
+        # Store ack queue if provided (full-analysis replay pacing)
+        if ack_queue is not None:
+            self._ack_queue = ack_queue
         self._send_thread = threading.Thread(
             target=self._send_frame,
             name="DCA1000RecordingSendThread",
@@ -986,6 +1097,20 @@ class DCA1000Recording(RadarFeed):
             self.logger.warning(
                 f"Expected string command, got {type(command)}: {command}"
             )
+            return
+
+        # Accept tuning commands (they are meant for analyser; feed just acknowledges)
+        if command.startswith("TUNING:"):
+            try:
+                import json as _json
+
+                payload = command.split(":", 1)[1]
+                self._tuning = _json.loads(payload)  # stored for potential future use
+                self.logger.debug(
+                    "TUNING command stored in feed (forwarded independently to analyser)"
+                )
+            except Exception:
+                self.logger.warning("Failed to parse TUNING command payload")
             return
 
         # In synchronized mode, controls should update sync_state; otherwise use internal state

@@ -126,6 +126,80 @@ def _virtual_array_positions_1843_in_wavelengths(
     return positions.astype(np.float32)
 
 
+def _prepare_tesseract_assets(
+    adc_params,
+    az_range: Tuple[int, int],
+    el_range: Tuple[int, int],
+    fine_az_step: int,
+    fine_el_step: int,
+):
+    """Prepare assets for full 4D pseudospectrum computation.
+
+    Returns (positions_wl, az_grid, el_grid, A_full) or (None, None, None, None) on failure.
+    """
+    try:
+        positions_wl = _get_positions_wl_cached(adc_params.tx, adc_params.rx)
+        az_grid = np.arange(
+            az_range[0], az_range[1] + 1, max(1, int(fine_az_step)), dtype=np.float32
+        )
+        el_grid = np.arange(
+            el_range[0], el_range[1] + 1, max(1, int(fine_el_step)), dtype=np.float32
+        )
+        A_full, _, _ = _gen_steering_matrix_2d(positions_wl, az_grid, el_grid)
+        return positions_wl, az_grid, el_grid, A_full
+    except Exception:
+        return None, None, None, None
+
+
+def _compute_tesseract(
+    aoa_input: np.ndarray,
+    positions_wl: np.ndarray,
+    A_full: np.ndarray,
+    az_grid: np.ndarray,
+    el_grid: np.ndarray,
+    doppler_halfspan: int,
+    music_diag_load: float,
+):
+    """Compute full 4D MUSIC pseudospectrum tensor (D, R, E, A).
+
+    Returns tensor as float32 or None on error.
+    """
+    try:
+        Nr = aoa_input.shape[0]
+        Nd = aoa_input.shape[2]
+        Na = int(az_grid.size)
+        Ne = int(el_grid.size)
+        A_full = A_full.astype(np.complex64, copy=False)
+        M = positions_wl.shape[0]
+        half = max(0, int(doppler_halfspan))
+        J_fb_full = np.fliplr(np.eye(M, dtype=np.float32))
+        tesseract = np.empty((Nd, Nr, Ne, Na), dtype=np.float32)
+        for r in range(Nr):
+            for k in range(Nd):
+                k0 = max(0, k - half)
+                k1 = min(Nd - 1, k + half)
+                X = aoa_input[r, :, k0 : k1 + 1].astype(np.complex64)
+                if X.ndim == 1:
+                    X = X[:, None]
+                Rxx = (X @ X.conj().T) / max(1, X.shape[1])
+                Rfb = 0.5 * (Rxx + J_fb_full @ Rxx.conj() @ J_fb_full)
+                if music_diag_load and float(music_diag_load) > 0.0:
+                    tr = float(np.trace(Rfb).real)
+                    Rfb = Rfb + np.eye(M, dtype=Rfb.dtype) * (
+                        float(music_diag_load) * tr / M
+                    )
+                # Noise subspace (d=1)
+                _, v = np.linalg.eigh(Rfb)
+                En = v[:, : (M - 1)]
+                vprod = En.conj().T @ A_full
+                denom = np.sum(np.abs(vprod) ** 2, axis=0).real + 1e-12
+                P = (1.0 / denom).astype(np.float32)
+                tesseract[k, r] = P.reshape((Ne, Na), order="C")
+        return tesseract
+    except Exception:
+        return None
+
+
 def _gen_steering_matrix_2d(
     positions_wl: np.ndarray, az_grid: np.ndarray, el_grid: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -357,9 +431,9 @@ def process_3D_radar_frame_music_2d(
     frame,
     adc_params,
     tuning: Optional[dict] = None,
-    az_range: Tuple[int, int] = (-90, 90),
+    az_range: Tuple[int, int] = (-53, 53),
     fine_az_step: int = 2,
-    el_range: Tuple[int, int] = (-30, 30),
+    el_range: Tuple[int, int] = (-18, 18),
     fine_el_step: int = 4,
     doppler_halfspan: int = 2,
     # Coarse-to-fine settings (first optimization)
@@ -368,6 +442,8 @@ def process_3D_radar_frame_music_2d(
     fine_half_win_az: int = 8,
     fine_half_win_el: int = 8,
     music_diag_load: float = 0.01,
+    *,
+    compute_tesseract: bool = False,
 ):
     """3D processing using 2D MUSIC AoA per detection.
 
@@ -427,6 +503,43 @@ def process_3D_radar_frame_music_2d(
     det_matrix = np.fft.fftshift(det_matrix, axes=1)
     aoa_input = np.fft.fftshift(aoa_input, axes=2)
     t_doppler = time.perf_counter() - step_start
+
+    # Optionally precompute full-grid steering for tesseract computation (no CFAR/max)
+    # We do this before CFAR so the 4D tensor reflects raw spectrum across all bins.
+    # NOTE: The tesseract (D,R,E,A) always uses a fixed 1° azimuth/elevation grid, independent
+    # of the fine search steps used for per-detection MUSIC refinement. This guarantees
+    # consistent angular resolution for offline analysis and zyx cube generation.
+    positions_wl_pre, az_grid_pre, el_grid_pre, A_full_pre = (None, None, None, None)
+    tesseract = None
+    tesseract_time_s = None
+    if compute_tesseract:
+        # Force 1° resolution for tesseract irrespective of fine_az_step/fine_el_step
+        positions_wl_pre, az_grid_pre, el_grid_pre, A_full_pre = (
+            _prepare_tesseract_assets(
+                adc_params,
+                az_range,
+                el_range,
+                1,
+                1,
+            )
+        )
+        if (
+            A_full_pre is not None
+            and positions_wl_pre is not None
+            and az_grid_pre is not None
+            and el_grid_pre is not None
+        ):
+            _t0_tess = time.perf_counter()
+            tesseract = _compute_tesseract(
+                aoa_input,
+                positions_wl_pre,
+                A_full_pre,
+                az_grid_pre,
+                el_grid_pre,
+                doppler_halfspan,
+                music_diag_load,
+            )
+            tesseract_time_s = time.perf_counter() - _t0_tess
 
     # 3) CFAR and detections (same as baseline)
     step_start = time.perf_counter()
@@ -503,7 +616,7 @@ def process_3D_radar_frame_music_2d(
     )
     if num_det == 0:
         return {
-            "range_doppler": det_matrix,
+            "range_doppler": det_matrix.T,
             "range_azimuth": None,
             "x_pos": np.array([]),
             "y_pos": np.array([]),
@@ -511,6 +624,10 @@ def process_3D_radar_frame_music_2d(
             "velocities": np.array([]),
             "snrs": np.array([]),
             "cluster_labels": np.array([]),
+            "tesseract": tesseract,
+            "tesseract_az_grid_deg": az_grid_pre if compute_tesseract else None,
+            "tesseract_el_grid_deg": el_grid_pre if compute_tesseract else None,
+            "tesseract_time_s": tesseract_time_s,
         }
 
     step_start = time.perf_counter()
@@ -564,9 +681,7 @@ def process_3D_radar_frame_music_2d(
         Rfb = 0.5 * (Rxx + J_fb @ Rxx.conj() @ J_fb)
         if music_diag_load and float(music_diag_load) > 0.0:
             tr = float(np.trace(Rfb).real)
-            Rfb = Rfb + np.eye(M, dtype=Rfb.dtype) * (
-                float(music_diag_load) * tr / M
-            )
+            Rfb = Rfb + np.eye(M, dtype=Rfb.dtype) * (float(music_diag_load) * tr / M)
         Rfbs[i] = Rfb.astype(np.complex64, copy=False)
 
     # Compute noise subspaces En for all detections, then batch multiply against A_coarse
@@ -612,6 +727,8 @@ def process_3D_radar_frame_music_2d(
     velocities = detObj2D["dopplerIdx"] * adc_params.doppler_resolution
     snrs = detObj2D["SNR"]
 
+    # tesseract already computed earlier if requested
+
     total_time = time.perf_counter() - function_start
     try:
         logger.info(
@@ -641,4 +758,9 @@ def process_3D_radar_frame_music_2d(
         "velocities": velocities,
         "snrs": snrs,
         "cluster_labels": np.array([]),
+        # Optional full 4D MUSIC pseudospectrum tensor: (doppler, range, elevation, azimuth)
+        "tesseract": tesseract if compute_tesseract else None,
+        "tesseract_az_grid_deg": az_grid_pre if compute_tesseract else None,
+        "tesseract_el_grid_deg": el_grid_pre if compute_tesseract else None,
+        "tesseract_time_s": tesseract_time_s if compute_tesseract else None,
     }

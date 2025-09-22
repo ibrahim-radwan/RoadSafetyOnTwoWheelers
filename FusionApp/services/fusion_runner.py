@@ -88,6 +88,9 @@ class FusionRunner:
         self._last_saved_pc_ts: Optional[float] = None
         # Mode flags
         self._full_analysis: bool = False
+        # Artefact toggles (effective only in full mode)
+        self._enable_tesseract: bool = True
+        self._enable_zyx_cube: bool = True
 
         # Runtime tuning (hot) applied by analyser via control queue
         self._tuning: Dict[str, Any] = {
@@ -108,6 +111,8 @@ class FusionRunner:
         radar_config_file: Optional[str] = None,
         mode: str = "live",
         replay_path: Optional[str] = None,
+        enable_tesseract: Optional[bool] = None,
+        enable_zyx_cube: Optional[bool] = None,
     ) -> bool:
         if self._running or self._starting:
             return False
@@ -118,6 +123,11 @@ class FusionRunner:
         self._camera_connected = False
         self._mode = (mode or "live").lower()
         self._full_analysis = self._mode == "full"
+        # Allow overrides from API parameters if provided
+        if enable_tesseract is not None:
+            self._enable_tesseract = bool(enable_tesseract)
+        if enable_zyx_cube is not None:
+            self._enable_zyx_cube = bool(enable_zyx_cube)
 
         try:
             self._stop_event = threading.Event()
@@ -168,6 +178,17 @@ class FusionRunner:
             # Propagate full-analysis mode to engine
             try:
                 setattr(fusion_engine, "full_analysis", bool(self._full_analysis))
+                # Inject analyser artefact toggle flags into analyser config
+                try:
+                    if isinstance(fusion_engine.radar_analyser_config, dict):
+                        fusion_engine.radar_analyser_config["enable_tesseract"] = bool(
+                            self._enable_tesseract
+                        )
+                        fusion_engine.radar_analyser_config["enable_zyx_cube"] = bool(
+                            self._enable_zyx_cube
+                        )
+                except Exception:
+                    pass
             except Exception as e:
                 # In full-analysis mode, this is fatal because downstream components rely on this hint
                 if self._full_analysis:
@@ -189,6 +210,17 @@ class FusionRunner:
                     radar_config_file_override=radar_config_file
                 )
             )
+            # Inject toggles for live modes too (no effect unless full-analysis true later)
+            try:
+                if isinstance(fusion_engine.radar_analyser_config, dict):
+                    fusion_engine.radar_analyser_config["enable_tesseract"] = bool(
+                        self._enable_tesseract
+                    )
+                    fusion_engine.radar_analyser_config["enable_zyx_cube"] = bool(
+                        self._enable_zyx_cube
+                    )
+            except Exception:
+                pass
 
         from multiprocessing import Process
 
@@ -219,6 +251,16 @@ class FusionRunner:
             ),
         )
         try:
+            self.logger.info(
+                "Starting engine: mode=%s full_analysis=%s enable_tesseract=%s enable_zyx_cube=%s",
+                self._mode,
+                str(self._full_analysis),
+                str(self._enable_tesseract),
+                str(self._enable_zyx_cube),
+            )
+        except Exception:
+            pass
+        try:
             # Live: initialize hardware; Replay/Full: skip HW init
             if self._mode not in ("replay", "full"):
                 try:
@@ -227,7 +269,7 @@ class FusionRunner:
                     )
                 except Exception:
                     radar_cfg_path = radar_config_file
-                ok_hw = radar_hw_init(radar_cfg_path)
+                ok_hw = radar_hw_init(radar_cfg_path or "")
                 if not ok_hw:
                     self.logger.error(
                         "Radar HW init failed; proceeding to start engine anyway"
@@ -901,6 +943,11 @@ class FusionRunner:
                             )
                         )
                     ),
+                },
+                "artefacts": {
+                    "full_analysis": bool(self._full_analysis),
+                    "enable_tesseract": bool(self._enable_tesseract),
+                    "enable_zyx_cube": bool(self._enable_zyx_cube),
                 },
             }
         )

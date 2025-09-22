@@ -43,12 +43,16 @@ class FusionRunner:
         radar_only: bool = False,
         radar_config_file: Optional[str] = None,
         replay_path: Optional[str] = None,
+        enable_tesseract: Optional[bool] = None,
+        enable_zyx_cube: Optional[bool] = None,
     ) -> bool:
         return self._impl.start(
             radar_only=radar_only,
             radar_config_file=radar_config_file,
             mode=mode,
             replay_path=replay_path,
+            enable_tesseract=enable_tesseract,
+            enable_zyx_cube=enable_zyx_cube,
         )
 
     def stop(self) -> None:
@@ -186,7 +190,23 @@ def system_start():
     radar_only = bool(request.args.get("radar_only", "0") in ("1", "true", "True"))
     replay_path = request.args.get("replay_path")
     radar_cfg = request.args.get("radar_cfg")
-    ok = runner.start(mode=mode, radar_only=radar_only, radar_config_file=radar_cfg, replay_path=replay_path)
+    # Artefact toggle query params (only effective in full mode, but accept always)
+    enable_tess_q = request.args.get("tesseract")  # expected '1'/'0'
+    enable_cube_q = request.args.get("zyx_cube")
+    enable_tess = None
+    enable_cube = None
+    if enable_tess_q is not None:
+        enable_tess = enable_tess_q in ("1", "true", "True")
+    if enable_cube_q is not None:
+        enable_cube = enable_cube_q in ("1", "true", "True")
+    ok = runner.start(
+        mode=mode,
+        radar_only=radar_only,
+        radar_config_file=radar_cfg,
+        replay_path=replay_path,
+        enable_tesseract=enable_tess,
+        enable_zyx_cube=enable_cube,
+    )
     if not ok and (runner._running or runner._starting):
         return ("already running or starting", 409)
     return (
@@ -226,7 +246,9 @@ def replay_control():
     if runner is None:
         return ("runner not initialized", 503)
     try:
-        cmd = request.args.get("cmd") or (request.get_json(silent=True) or {}).get("cmd")
+        cmd = request.args.get("cmd") or (request.get_json(silent=True) or {}).get(
+            "cmd"
+        )
         if isinstance(cmd, str) and cmd:
             runner.send_control(cmd)
             return ("OK", 200)
@@ -289,7 +311,9 @@ def fs_list():
         with os.scandir(target) as it:
             for e in it:
                 try:
-                    etype = "dir" if e.is_dir() else ("file" if e.is_file() else "other")
+                    etype = (
+                        "dir" if e.is_dir() else ("file" if e.is_file() else "other")
+                    )
                     entries.append({"name": e.name, "path": e.path, "type": etype})
                 except Exception:
                     pass
@@ -420,8 +444,11 @@ def status_stream():
         return ("runner not started", 503)
 
     def gen():
+        # Runner is captured from outer scope and guaranteed non-None here
+        rr = runner
+        assert rr is not None
         while True:
-            data = runner.get_status()
+            data = rr.get_status()
             yield f"data: {json.dumps(data)}\n\n"
             time.sleep(1.0)
 
@@ -470,7 +497,9 @@ def main():
 
     global runner
     runner = FusionRunner()
-    logger.info("FusionRunner ready (idle). Use /system/start to begin (mode=live|replay).")
+    logger.info(
+        "FusionRunner ready (idle). Use /system/start to begin (mode=live|replay)."
+    )
 
     # Store defaults for template rendering
     try:
@@ -484,5 +513,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

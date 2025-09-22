@@ -56,6 +56,8 @@ class PNGCamera(CameraFeed):
         self._last_frame_time = 0.0
         self.logger = None
         self._fps_divisor = 1
+        # Full-analysis pacing helper: remember last radar window sequence we emitted a frame for
+        self._last_sent_radar_seq: int = -1
 
     def _load_frame_files(self):
         """Load all PNG files from the recording directory"""
@@ -304,42 +306,57 @@ class PNGCamera(CameraFeed):
                         "true",
                         "True",
                     ):
+                        # In full-analysis sync mode, emit at most ONE camera frame per radar window sequence.
                         try:
-                            start_ts, end_ts, _, _ = SyncStateUtils.get_radar_window(
-                                self._sync_state
+                            start_ts, end_ts, _, win_seq = (
+                                SyncStateUtils.get_radar_window(self._sync_state)
                             )
-                            # If window is valid, restrict sending to [start_ts, end_ts)
-                            if end_ts > start_ts:
-                                # Fast-forward if this frame is before the current window
-                                while (
-                                    self._current_frame_index < len(self._frame_files)
-                                    and self._frame_files[self._current_frame_index][1]
-                                    < start_ts - 1e-9
-                                ):
-                                    self._advance_frame()
+                            window_valid = end_ts > start_ts
+                            # Only proceed on a new radar window
+                            if win_seq == self._last_sent_radar_seq:
+                                send_frame = False
+                            else:
+                                if window_valid:
+                                    # Seek camera index to closest frame >= start_ts
+                                    while (
+                                        self._current_frame_index
+                                        < len(self._frame_files)
+                                        and self._frame_files[
+                                            self._current_frame_index
+                                        ][1]
+                                        < start_ts - 1e-9
+                                    ):
+                                        self._advance_frame()
                                     if self._current_frame_index >= len(
                                         self._frame_files
                                     ):
-                                        break
-                                if self._current_frame_index < len(self._frame_files):
-                                    _, frame_timestamp, _ = self._frame_files[
-                                        self._current_frame_index
-                                    ]
-                                # If this frame is at or beyond end of window, wait for window update
-                                if frame_timestamp >= end_ts - 1e-9:
-                                    # Wait briefly for a new window; avoid busy spin
-                                    last_seq = SyncStateUtils.get_radar_window(
-                                        self._sync_state
-                                    )[3]
-                                    new_seq = SyncStateUtils.wait_for_window_update(
-                                        self._sync_state, last_seq, timeout=0.2
-                                    )
-                                    if new_seq is None:
-                                        time.sleep(0.01)
-                                    # Defer sending this loop
+                                        send_frame = False
+                                    else:
+                                        frame_timestamp = self._frame_files[
+                                            self._current_frame_index
+                                        ][1]
+                                        # If frame is beyond window end, wait for next radar window update
+                                        if frame_timestamp >= end_ts - 1e-9:
+                                            # Wait for new window sequence (up to short timeout)
+                                            new_seq = (
+                                                SyncStateUtils.wait_for_window_update(
+                                                    self._sync_state,
+                                                    win_seq,
+                                                    timeout=0.2,
+                                                )
+                                            )
+                                            if new_seq is None:
+                                                # No update yet; retry later
+                                                send_frame = False
+                                            else:
+                                                send_frame = False  # Loop again will handle new seq
+                                        # Else frame within window; we'll send exactly once
+                                else:
+                                    # No valid window yet; don't send
                                     send_frame = False
+                            # After sending (below), we'll update _last_sent_radar_seq
                         except Exception:
-                            pass
+                            send_frame = False
 
                     if send_frame:
                         # Read current frame
@@ -361,7 +378,20 @@ class PNGCamera(CameraFeed):
                                 else:
                                     self._last_frame_time = time.perf_counter()
 
-                                # Log every 30 frames to avoid spam
+                                # In full-analysis sync mode mark last window sequence used
+                                if use_sync and os.environ.get(
+                                    "FULL_ANALYSIS", "0"
+                                ) in ("1", "true", "True"):
+                                    try:
+                                        self._last_sent_radar_seq = (
+                                            SyncStateUtils.get_radar_window(
+                                                self._sync_state
+                                            )[3]
+                                        )
+                                    except Exception:
+                                        pass
+
+                                # Log every 30 frames to avoid spam (legacy high-rate mode)
                                 if frame_count % 30 == 0:
                                     self.logger.debug(
                                         f"Sent {frame_count} frames to analyzer"
