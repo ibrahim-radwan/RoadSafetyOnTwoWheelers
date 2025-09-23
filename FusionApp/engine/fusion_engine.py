@@ -4,7 +4,11 @@ from utils import setup_logger
 
 from typing import Optional
 from multiprocessing import Process, Queue, Event
+import os
+from multiprocessing import shared_memory
+from sample_processing.radar_params import ADCParams
 import queue
+from utils import disable_shm_resource_tracker
 
 
 class FusionEngine:
@@ -35,14 +39,16 @@ class FusionEngine:
         self.radar_analyser_config = radar_analyser_config
         self.camera_feed_config = camera_feed_config
         self.camera_analyser_config = camera_analyser_config
+        # Mode hint propagated from runner
+        self.full_analysis: bool = bool(getattr(self, "full_analysis", False))
 
-        # Initialize queues
-        self._radar_stream_queue: Queue = Queue()
+        # Initialize queues (keep radar queue at 1 to avoid backlog; source drops to latest)
+        self._radar_stream_queue: Queue = Queue(maxsize=1)
         self._camera_stream_queue: Optional[Queue] = None
 
         # Initialize camera queue only if camera config is available
         if self.camera_feed_config is not None:
-            self._camera_stream_queue = Queue()
+            self._camera_stream_queue = Queue(maxsize=2)
 
         # Validate that if camera feed config is provided, analyser config must also be provided
         if (self.camera_feed_config is None) != (self.camera_analyser_config is None):
@@ -63,7 +69,9 @@ class FusionEngine:
             radar_config = DCA1000Config(radar_config_file=radar_config_file)
             if "dest_dir" in config:
                 radar_config.dest_dir = config["dest_dir"]
-            return DCA1000EVM(radar_config)
+            return DCA1000EVM(
+                radar_config, prealloc_shm_meta=config.get("prealloc_shm_meta")
+            )
         elif feed_type == "DCA1000Recording":
             from radar.dca1000_awr2243 import DCA1000Recording, DCA1000Config
 
@@ -81,7 +89,19 @@ class FusionEngine:
         if analyser_type == "RadarHeatmapAnalyser":
             from analysis.radar_heatmap_analyser import RadarHeatmapAnalyser
 
-            return RadarHeatmapAnalyser(config.get("config_file"))
+            # Ensure we propagate optional full-analysis flags and output directory
+            # These may have been injected into the config in run() when operating in
+            # replay/full-analysis modes (e.g., output_dir for artefact resolution and
+            # full_analysis to toggle heavy saving logic inside the analyser).
+            return RadarHeatmapAnalyser(
+                config.get("config_file"),
+                prealloc_shm_meta=config.get("prealloc_shm_meta"),
+                prealloc_res_shm_meta=config.get("prealloc_res_shm_meta"),
+                output_dir=config.get("output_dir"),
+                full_analysis=bool(config.get("full_analysis", False)),
+                enable_tesseract=bool(config.get("enable_tesseract", True)),
+                enable_zyx_cube=bool(config.get("enable_zyx_cube", True)),
+            )
         else:
             raise ValueError(f"Unknown radar analyser type: {analyser_type}")
 
@@ -137,11 +157,26 @@ class FusionEngine:
             status_queue: Optional queue for status updates (replay mode)
         """
         self.logger = setup_logger("FusionEngine")
+        # Disable resource_tracker for shared_memory in engine process (owner-managed)
+        try:
+            disable_shm_resource_tracker(self.logger)
+        except Exception:
+            pass
 
         if stop_event is None:
             stop_event = Event()
 
         self.logger.info("FusionEngine starting...")
+
+        # Propagate full-analysis mode to environment for all child processes (used for backpressure decisions)
+        try:
+            if bool(getattr(self, "full_analysis", False)):
+                os.environ["FULL_ANALYSIS"] = "1"
+            else:
+                # Do not forcibly unset if user manually set; only set to 0 if absent
+                os.environ.setdefault("FULL_ANALYSIS", "0")
+        except Exception:
+            pass
 
         # Validate camera requirements
         if self.camera_feed_config is not None and camera_results_queue is None:
@@ -149,14 +184,132 @@ class FusionEngine:
                 "camera_results_queue must be provided when camera_feed_config is available"
             )
 
-        # Create separate control queues for camera and radar
+        # Create separate control queues for camera, radar feed and radar analyser
         radar_control_queue = Queue() if control_queue is not None else None
+        radar_analyser_control_queue = Queue() if control_queue is not None else None
         camera_control_queue = Queue() if control_queue is not None else None
+
+        # Acknowledgement queue (radar replay pacing in full-analysis mode)
+        ack_queue = None
+        try:
+            if (
+                bool(getattr(self, "full_analysis", False))
+                and self.radar_feed_config.get("type") == "DCA1000Recording"
+            ):
+                from multiprocessing import Queue as _Q
+
+                ack_queue = _Q()
+                self.logger.info(
+                    "Created radar replay ACK queue for full-analysis pacing"
+                )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to create ACK queue: {e}")
+
+        # Preallocate shared memory for radar raw frames (engine-owned)
+        prealloc_shm_meta = None
+        prealloc_res_shm_meta = None
+        radar_cfg_file = self.radar_analyser_config.get(
+            "config_file", CFGS.AWR2243_CONFIG_FILE
+        )
+        try:
+            adc = ADCParams(radar_cfg_file)
+            num_elements = adc.chirps * adc.tx * adc.samples * adc.IQ * adc.rx
+            nbytes = num_elements * 2  # int16
+            shm0 = shared_memory.SharedMemory(create=True, size=nbytes)
+            shm1 = shared_memory.SharedMemory(create=True, size=nbytes)
+            prealloc_shm_meta = {
+                "names": [shm0.name, shm1.name],
+                "nbytes": nbytes,
+                "dtype": "int16",
+                "shape": (num_elements,),
+            }
+            # Store for cleanup
+            self._radar_shm_blocks = [shm0, shm1]
+            self.logger.info(
+                f"Preallocated radar SHM in engine: names={prealloc_shm_meta['names']}, bytes={nbytes}, dtype=int16, shape={(num_elements,)}"
+            )
+
+            # Preallocate SHM for radar analyser outputs (range_doppler, range_azimuth)
+            # RD shape ~ (chirps, samples), RA shape ~ (angle_bins, samples) with angle_bins=181 (±90 deg, 1 deg step)
+            angle_bins = (90 * 2) // 1 + 1
+            rd_shape = (adc.chirps, adc.samples)
+            ra_shape = (angle_bins, adc.samples)
+            rd_nbytes = adc.chirps * adc.samples * 4  # float32
+            ra_nbytes = angle_bins * adc.samples * 4  # float32
+            rd0 = shared_memory.SharedMemory(create=True, size=rd_nbytes)
+            rd1 = shared_memory.SharedMemory(create=True, size=rd_nbytes)
+            ra0 = shared_memory.SharedMemory(create=True, size=ra_nbytes)
+            ra1 = shared_memory.SharedMemory(create=True, size=ra_nbytes)
+            prealloc_res_shm_meta = {
+                "rd": {
+                    "names": [rd0.name, rd1.name],
+                    "nbytes": rd_nbytes,
+                    "dtype": "float32",
+                    "shape": rd_shape,
+                },
+                "ra": {
+                    "names": [ra0.name, ra1.name],
+                    "nbytes": ra_nbytes,
+                    "dtype": "float32",
+                    "shape": ra_shape,
+                },
+            }
+            self._radar_res_shm_blocks = {"rd": [rd0, rd1], "ra": [ra0, ra1]}
+            self.logger.info(
+                f"Preallocated radar results SHM: rd={prealloc_res_shm_meta['rd']['names']}, ra={prealloc_res_shm_meta['ra']['names']}"
+            )
+
+            # Pass meta to feed and analyser configs
+            self.radar_feed_config["prealloc_shm_meta"] = prealloc_shm_meta
+            self.radar_analyser_config["prealloc_shm_meta"] = prealloc_shm_meta
+            self.radar_analyser_config["prealloc_res_shm_meta"] = prealloc_res_shm_meta
+
+            # Expose results SHM identifiers to the GUI process via environment variables
+            try:
+                rd_names = ",".join(
+                    [blk.name for blk in self._radar_res_shm_blocks.get("rd", [])]
+                )
+                ra_names = ",".join(
+                    [blk.name for blk in self._radar_res_shm_blocks.get("ra", [])]
+                )
+                if rd_names:
+                    os.environ["RADAR_RD_SHM_NAMES"] = rd_names
+                if ra_names:
+                    os.environ["RADAR_RA_SHM_NAMES"] = ra_names
+                angle_bins = (90 * 2) // 1 + 1
+                os.environ["RADAR_RD_SHAPE"] = f"{adc.chirps},{adc.samples}"
+                os.environ["RADAR_RA_SHAPE"] = f"{angle_bins},{adc.samples}"
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(
+                        f"Failed to export RD/RA SHM env vars for GUI attach: {e}"
+                    )
+        except Exception as e:
+            self.logger.error(
+                f"Failed to preallocate radar SHM in engine (falling back to feed-created): {e}"
+            )
+            self._radar_shm_blocks = []
+            self._radar_res_shm_blocks = {}
 
         # Create instances using configuration in the target process
         self.logger.info("Creating feed and analyzer instances...")
         try:
             radar_feed = self._create_radar_feed(self.radar_feed_config)
+            # Propagate full-analysis and output directory into analyser config
+            try:
+                if (
+                    isinstance(self.radar_feed_config, dict)
+                    and self.radar_feed_config.get("type") == "DCA1000Recording"
+                ):
+                    out_dir = self.radar_feed_config.get("dest_dir")
+                    if out_dir:
+                        self.radar_analyser_config["output_dir"] = out_dir
+                self.radar_analyser_config["full_analysis"] = bool(
+                    getattr(self, "full_analysis", False)
+                )
+            except Exception:
+                pass
             radar_analyser = self._create_radar_analyser(self.radar_analyser_config)
 
             camera_feed = None
@@ -176,6 +329,13 @@ class FusionEngine:
             raise
 
         processes = []
+        timeline_thread = None
+        start_signal_thread = None
+
+        # Create a status queue for radar feed playback info (replay)
+        from multiprocessing import Queue as _MPQueue
+
+        rf_status_queue = _MPQueue()
 
         # Start radar feed process
         self.logger.info("Creating radar feed process...")
@@ -185,7 +345,8 @@ class FusionEngine:
                 self._radar_stream_queue,
                 stop_event,
                 radar_control_queue,
-                status_queue,
+                rf_status_queue,
+                ack_queue,  # may be None (ignored by live feed)
             ),
         )
         processes.append(radar_process)
@@ -198,6 +359,8 @@ class FusionEngine:
                 self._radar_stream_queue,
                 radar_results_queue,
                 stop_event,
+                radar_analyser_control_queue,
+                ack_queue,  # analyser sends ACK after replay frame processing
             ),
         )
         processes.append(radar_analyser_process)
@@ -229,6 +392,82 @@ class FusionEngine:
             )
             processes.append(camera_analyser_process)
 
+        # Optional timeline updater and start-signal threads for replay mode
+        try:
+            if self.radar_feed_config.get("type") == "DCA1000Recording":
+                from engine.sync_state import SyncStateUtils
+                import threading
+
+                sync_state = self.radar_feed_config.get("sync_state")
+                if sync_state is not None:
+
+                    def _timeline_loop():
+                        import time as _t
+
+                        try:
+                            while not stop_event.is_set():
+                                SyncStateUtils.update_timeline(sync_state)
+                                _t.sleep(0.01)
+                        except Exception:
+                            pass
+
+                    def _start_signal_loop():
+                        try:
+                            # Wait up to 30s for feeds to report readiness, then signal start
+                            from engine.sync_state import SyncStateUtils as _SSU
+
+                            if _SSU.wait_for_feeds_ready(sync_state, timeout=30):
+                                _SSU.signal_start_playback(sync_state)
+                            else:
+                                # Proceed anyway to avoid deadlock
+                                _SSU.signal_start_playback(sync_state)
+                        except Exception:
+                            pass
+
+                    timeline_thread = threading.Thread(
+                        target=_timeline_loop, name="TimelineUpdater", daemon=True
+                    )
+                    start_signal_thread = threading.Thread(
+                        target=_start_signal_loop, name="StartSignal", daemon=True
+                    )
+                    timeline_thread.start()
+                    start_signal_thread.start()
+        except Exception:
+            pass
+
+        # Forward radar feed status to results queue for UI consumption
+        import threading
+
+        def _status_forward_loop():
+            import time as _t
+
+            while not stop_event.is_set():
+                try:
+                    st = rf_status_queue.get_nowait()
+                    try:
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            radar_results_queue.put({"RADAR_PLAYBACK_STATUS": st})
+                        else:
+                            radar_results_queue.put_nowait(
+                                {"RADAR_PLAYBACK_STATUS": st}
+                            )
+                    except Exception:
+                        pass
+                except queue.Empty:
+                    pass
+                except Exception:
+                    pass
+                _t.sleep(0.05)
+
+        status_forward_thread = threading.Thread(
+            target=_status_forward_loop, name="StatusForward", daemon=True
+        )
+        status_forward_thread.start()
+
         # Start all processes
         self.logger.info(f"Starting {len(processes)} processes...")
         for i, process in enumerate(processes):
@@ -258,13 +497,25 @@ class FusionEngine:
                     command = control_queue.get_nowait()
                     self.logger.info(f"Received control command: {command}")
 
-                    # Forward command to radar
+                    # Forward command to radar feed
                     if radar_control_queue is not None:
                         try:
                             radar_control_queue.put(command)
                             self.logger.debug(f"Forwarded command to radar: {command}")
                         except Exception as e:
                             self.logger.error(f"Error forwarding command to radar: {e}")
+
+                    # Forward command to radar analyser
+                    if radar_analyser_control_queue is not None:
+                        try:
+                            radar_analyser_control_queue.put(command)
+                            self.logger.debug(
+                                f"Forwarded command to radar analyser: {command}"
+                            )
+                        except Exception as e:
+                            self.logger.error(
+                                f"Error forwarding command to radar analyser: {e}"
+                            )
 
                     # Forward command to camera
                     if camera_control_queue is not None:
@@ -285,6 +536,28 @@ class FusionEngine:
 
         self.logger.info("FusionEngine stopping...")
 
+        # Give children a grace period to exit on their own
+        time.sleep(0.5)
+
+        # Attempt to join/terminate/kill all child processes robustly (join analysers first)
+        for i in reversed(range(len(processes))):
+            process = processes[i]
+            try:
+                if process.is_alive():
+                    self.logger.info(f"Joining process {i}...")
+                    process.join(timeout=3)
+                else:
+                    self.logger.info(f"Process {i} already done.")
+
+                if process.is_alive():
+                    self.logger.error(f"Process {i} did not terminate, killing...")
+                    process.kill()
+                    process.join()
+
+                self.logger.info(f"Process {i} joined, exit_code: {process.exitcode}")
+            except Exception as e:
+                self.logger.error(f"Error while shutting down process {i}: {e}")
+
         # Final process status check
         self.logger.info("Final process status:")
         for i, process in enumerate(processes):
@@ -292,10 +565,90 @@ class FusionEngine:
                 f"Process {i}: PID: {process.pid}, alive: {process.is_alive()}, exit_code: {process.exitcode}"
             )
 
-        # Join all processes
-        for i, process in enumerate(processes):
-            self.logger.info(f"Joining process {i}...")
-            process.join(1)
-            self.logger.info(f"Process {i} joined, exit_code: {process.exitcode}")
+        # Close internal queues owned by the engine to help GC
+        try:
+            if self._radar_stream_queue is not None:
+                self._radar_stream_queue.close()
+                self._radar_stream_queue.join_thread()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: radar_stream_queue close/join_thread failed: {e}"
+                )
+        try:
+            if self._camera_stream_queue is not None:
+                self._camera_stream_queue.close()
+                self._camera_stream_queue.join_thread()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: camera_stream_queue close/join_thread failed: {e}"
+                )
+        try:
+            if control_queue is not None and radar_control_queue is not None:
+                radar_control_queue.close()
+                radar_control_queue.join_thread()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: radar_control_queue close/join_thread failed: {e}"
+                )
+        try:
+            if control_queue is not None and radar_analyser_control_queue is not None:
+                radar_analyser_control_queue.close()
+                radar_analyser_control_queue.join_thread()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: radar_analyser_control_queue close/join_thread failed: {e}"
+                )
+        try:
+            if control_queue is not None and camera_control_queue is not None:
+                camera_control_queue.close()
+                camera_control_queue.join_thread()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Engine: camera_control_queue close/join_thread failed: {e}"
+                )
+
+        # Cleanup engine-owned shared memory blocks
+        try:
+            for shm in getattr(self, "_radar_shm_blocks", []) or []:
+                try:
+                    shm.close()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            f"Engine: SHM close failed for raw block ({getattr(shm,'name','?')}): {e}"
+                        )
+                try:
+                    shm.unlink()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            f"Engine: SHM unlink failed for raw block ({getattr(shm,'name','?')}): {e}"
+                        )
+            for group in getattr(self, "_radar_res_shm_blocks", {}).values():
+                for shm in group:
+                    try:
+                        shm.close()
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.error(
+                                f"Engine: SHM close failed for res block ({getattr(shm,'name','?')}): {e}"
+                            )
+                    try:
+                        shm.unlink()
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.error(
+                                f"Engine: SHM unlink failed for res block ({getattr(shm,'name','?')}): {e}"
+                            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Engine: unexpected error cleaning SHM: {e}")
+
+        # Threads are daemons; they exit with process
 
         self.logger.info("FusionEngine stopped successfully.")

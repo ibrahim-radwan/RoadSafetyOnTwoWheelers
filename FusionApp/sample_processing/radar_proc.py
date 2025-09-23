@@ -301,43 +301,44 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     ANGLE_BINS = (ANGLE_RANGE * 2) // ANGLE_RES + 1
 
     # Initialize timing
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
 
     range_azimuth = np.zeros((ANGLE_BINS, adc_params.samples))
     num_vec, steering_vec = dsp.gen_steering_vec(
         ANGLE_RANGE, ANGLE_RES, adc_params.tx * adc_params.rx
     )
-    # steering_time = time.perf_counter() - step_start
-    # logger.debug(
-    #     f"    [RADAR_PROFILE] Steering vector generation: {steering_time:.4f}s"
-    # )
+
+    steering_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Steering vector generation: {steering_time:.4f}s"
+    )
 
     # Reshape frame
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
     frame = frame.reshape(frame.shape[0] * frame.shape[1], frame.shape[2], -1)
-    # reshape_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] Frame reshape: {reshape_time:.4f}s")
+    reshape_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] Frame reshape: {reshape_time:.4f}s")
 
     # Range processing
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
     radar_cube = dsp.range_processing(frame, window_type_1d=dsp.utils.Window.HANNING)
-    # range_processing_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] Range processing: {range_processing_time:.4f}s")
+    range_processing_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] Range processing: {range_processing_time:.4f}s")
 
     # Static clutter removal
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
     mean = radar_cube.mean(0)
     radar_cube = radar_cube - mean
-    # clutter_removal_time = time.perf_counter() - step_start
-    # logger.debug(
-    #     f"    [RADAR_PROFILE] Static clutter removal: {clutter_removal_time:.4f}s"
-    # )
+    clutter_removal_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Static clutter removal: {clutter_removal_time:.4f}s"
+    )
 
     # --- capon beamforming
     # step_start = time.perf_counter()
     beamWeights = np.zeros(
         (adc_params.tx * adc_params.rx, adc_params.samples),
-        dtype=np.complex128,
+        dtype=np.complex64,
     )
 
     if adc_params.tx == 2:
@@ -365,37 +366,41 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     range_doppler_log = np.log(
         range_doppler + 1e-8
     )  # Add small epsilon to avoid log(0)
-    range_doppler_softmax = scipy.special.softmax(range_doppler_log.flatten()).reshape(
-        range_doppler.shape
-    )
+    # range_doppler_softmax = scipy.special.softmax(range_doppler_log.flatten()).reshape(
+    #     range_doppler.shape
+    # )
     # range_doppler[:, :, :2] = 1
     # zs_bin = range_doppler.shape[0]//2
     # range_doppler[zs_bin:zs_bin+1, :, :] = 1
-    range_doppler = np.abs(range_doppler_softmax).sum(axis=1)
+    range_doppler = np.abs(range_doppler_log).sum(axis=1)
 
     # concat_time = time.perf_counter() - step_start
     # logger.debug(f"    [RADAR_PROFILE] Radar cube concatenation: {concat_time:.4f}s")
 
     # Note that when replacing with generic doppler estimation functions, radarCube is interleaved and
     # has doppler at the last dimension.
-    # capon_start = time.perf_counter()
+    capon_start = time.perf_counter()
     for i in range(adc_params.samples):
         range_azimuth[:, i], beamWeights[:, i] = dsp.aoa_capon(
             radar_cube[:, :, i].T, steering_vec, magnitude=True
         )
-    # capon_time = time.perf_counter() - capon_start
-    # logger.debug(
-    #     f"    [RADAR_PROFILE] Capon beamforming ({adc_params.samples} iterations): {capon_time:.4f}s"
+
+    # range_azimuth, beamWeights = dsp.aoa_capon_jitted(
+    #     radar_cube, adc_params.tx, adc_params.rx, adc_params.samples, magnitude=True
     # )
-    # logger.debug(
-    #     f"    [RADAR_PROFILE] Average per Capon iteration: {capon_time/adc_params.samples:.6f}s"
-    # )
+    capon_time = time.perf_counter() - capon_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Capon beamforming ({adc_params.samples} iterations): {capon_time:.4f}s"
+    )
+    logger.debug(
+        f"    [RADAR_PROFILE] Average per Capon iteration: {capon_time/adc_params.samples:.6f}s"
+    )
 
     """ 3 (Object Detection) """
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
     heatmap_log = np.log2(range_azimuth)
-    # heatmap_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] Heatmap log computation: {heatmap_time:.4f}s")
+    heatmap_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] Heatmap log computation: {heatmap_time:.4f}s")
 
     # logger.debug(f"Range-Doppler shape: {range_doppler.shape}")
     # logger.debug(f"Range-Azimuth shape: {range_azimuth.shape}")
@@ -416,7 +421,7 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
         R_NOISE_LEN = 10
 
     # --- cfar in azimuth direction
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
     first_pass, _ = np.apply_along_axis(
         func1d=dsp.ca_,
         axis=0,
@@ -425,11 +430,11 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
         guard_len=AZ_GUARD_LEN,
         noise_len=AZ_NOISE_LEN,
     )
-    # cfar_az_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] CFAR azimuth direction: {cfar_az_time:.4f}s")
+    cfar_az_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] CFAR azimuth direction: {cfar_az_time:.4f}s")
 
     # --- cfar in range direction
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
     second_pass, noise_floor = np.apply_along_axis(
         func1d=dsp.ca_,
         axis=0,
@@ -438,11 +443,11 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
         guard_len=R_GUARD_LEN,
         noise_len=R_NOISE_LEN,
     )
-    # cfar_range_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] CFAR range direction: {cfar_range_time:.4f}s")
+    cfar_range_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] CFAR range direction: {cfar_range_time:.4f}s")
 
     # --- classify peaks and caclulate snrs
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
     noise_floor = noise_floor.T
     first_pass = heatmap_log > first_pass
     second_pass = heatmap_log > second_pass.T
@@ -452,20 +457,21 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     peaks[:, : CFGS.RADAR_SKIP_SIZE] = 0
     peaks[:, -CFGS.RADAR_SKIP_SIZE :] = 0
     pairs = np.argwhere(peaks)
-    # peak_classification_time = time.perf_counter() - step_start
-    # logger.debug(
-    #     f"    [RADAR_PROFILE] Peak classification: {peak_classification_time:.4f}s"
-    # )
+
+    peak_classification_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Peak classification: {peak_classification_time:.4f}s"
+    )
     logger.debug(f"[DEBUG] CFAR detected {len(pairs)} peaks")
 
     if len(pairs) == 0:
         logger.debug("[DEBUG] No peaks detected - returning empty results")
 
         # Profile logging every 10 frames
-        if openradar_pd_process_frame.frame_count % 10 == 0:
+        if openradar_pd_process_frame.frame_count % 50 == 0:
             total_time = time.perf_counter() - function_start
             logger.info(
-                f"    [RADAR_PROFILE] TOTAL openradar_pd_process_frame time: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
+                f"AVG Runtime: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
             )
         return {
             "range_doppler": np.array([]),
@@ -482,7 +488,7 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     snrs = heatmap_log[pairs[:, 0], pairs[:, 1]] - noise_floor[pairs[:, 0], pairs[:, 1]]
 
     """ 4 (Doppler Estimation) """
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
 
     # --- get peak indices
     # beamWeights should be selected based on the range indices from CFAR.
@@ -500,13 +506,13 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     dopplerEst = np.argmax(dopplerEst, axis=0)
     dopplerEst[dopplerEst[:] >= adc_params.chirps / 2] -= adc_params.chirps
 
-    # doppler_estimation_time = time.perf_counter() - step_start
-    # logger.debug(
-    #     f"    [RADAR_PROFILE] Doppler estimation: {doppler_estimation_time:.4f}s"
-    # )
+    doppler_estimation_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Doppler estimation: {doppler_estimation_time:.4f}s"
+    )
 
     # --- convert bins to units
-    # step_start = time.perf_counter()
+    step_start = time.perf_counter()
     ranges = ranges * adc_params.range_resolution
     azimuths = azimuths - (ANGLE_BINS // 2)
     dopplers = dopplerEst * adc_params.doppler_resolution
@@ -519,10 +525,10 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     x_pos, y_pos = ranges_angles_to_xy(ranges, azimuths)
     z_pos = np.zeros_like(x_pos)  # Assuming targets are at ground level
     velocities = dopplers
-    # conversion_time = time.perf_counter() - step_start
-    # logger.debug(
-    #     f"    [RADAR_PROFILE] Unit conversion and coordinate transform: {conversion_time:.4f}s"
-    # )
+    conversion_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Unit conversion and coordinate transform: {conversion_time:.4f}s"
+    )
 
     # cluster_labels, n_clusters, n_noise = apply_radar_clustering(
     #     x_pos, y_pos, dopplers, eps=0.2, min_samples=2, velocity_weight=0.0
@@ -548,10 +554,10 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     #     velocities = np.append(velocities, velocity)
 
     # Profile logging every 10 frames
-    if openradar_pd_process_frame.frame_count % 10 == 0:
+    if openradar_pd_process_frame.frame_count % 50 == 0:
         total_time = time.perf_counter() - function_start
         logger.info(
-            f"    [RADAR_PROFILE] TOTAL openradar_pd_process_frame time: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
+            f"AVG Runtime: {total_time:.4f}s (frame {openradar_pd_process_frame.frame_count})"
         )
 
     return {
@@ -566,20 +572,335 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     }
 
 
-def openradar_rt_process_frame(frame, adc_params):
+def process_2D_radar_frame(
+    frame, adc_params: ADCParams, IS_INDOOR=True, tuning: Optional[dict] = None
+):
+    """
+    Process a radar frame to produce a 2D range-azimuth heatmap and a 2D point cloud
+    (x, y; z is None), along with Doppler velocities and SNR values.
+
+    Pipeline summary:
+        - range processing
+        - static clutter removal
+        - Capon beamforming (azimuth)
+        - two-stage CA-CFAR detection and SNR computation
+        - Doppler estimation for detected peaks
+        - conversion from polar (range, azimuth) to Cartesian (x, y)
+
+    Note:
+        Conceptually aligned with OpenRadar's "people detector" sample; not a direct copy.
+
+    This function performs range processing, static clutter removal, Capon beamforming for
+    angle estimation, CFAR detection for target identification, and Doppler estimation.
+
+    Args:
+        frame (numpy.ndarray): Input radar frame data with shape (chirps, tx, rx, samples).
+                              Expected to be complex-valued data from radar ADC.
+        adc_params (ADCParams): ADC parameters object containing:
+                               - tx: Number of transmit antennas
+                               - rx: Number of receive antennas
+                               - samples: Number of range samples
+                               - chirps: Number of chirps per frame
+                               - range_resolution: Range resolution in meters
+                               - doppler_resolution: Doppler resolution in m/s
+        IS_INDOOR (bool, optional): Flag indicating indoor vs outdoor environment.
+                                   Affects CFAR parameters and processing. Defaults to True.
+
+    Returns:
+        dict: A dictionary containing:
+            - "range_doppler": None (not computed in this method)
+            - "range_azimuth" (numpy.ndarray): Range-azimuth heatmap with shape (angle_bins, samples)
+            - "x_pos" (numpy.ndarray): X coordinates of detected targets in meters
+            - "y_pos" (numpy.ndarray): Y coordinates of detected targets in meters
+            - "z_pos" (numpy.ndarray): Z coordinates of detected targets in meters (zeros for ground-level targets)
+            - "velocities" (numpy.ndarray): Doppler velocities of detected targets in m/s
+            - "snrs" (numpy.ndarray): Signal-to-noise ratios of detected targets in dB
+            - "cluster_labels" (numpy.ndarray): DBSCAN cluster labels for detected targets
+
+    Note:
+        This function uses the mmwave.dsp module for range processing and Capon beamforming.
+        The frame is reshaped internally to (chirps*tx, rx, samples) for processing.
+        Static clutter removal is performed by subtracting the mean across chirps.
+    """
+    import time
+    from mmwave import dsp
+    from config_params import CFGS
+
+    function_start = time.perf_counter()
+
+    # Validate configuration: this pipeline expects 2 TX (2D)
+    assert (
+        int(getattr(adc_params, "tx", 0)) == 2
+    ), "process_2D_radar_frame requires adc_params.tx == 2"
+
+    # Frame counter for profile logging cadence
+    if not hasattr(process_2D_radar_frame, "frame_count"):
+        process_2D_radar_frame.frame_count = 0
+    process_2D_radar_frame.frame_count += 1
+
+    logger.debug(
+        f"process_2D_radar_frame: Processing frame with shape {frame.shape}, IS_INDOOR={IS_INDOOR}"
+    )
+    logger.debug(
+        f"ADC Params - tx: {adc_params.tx}, rx: {adc_params.rx}, samples: {adc_params.samples}, chirps: {adc_params.chirps}, range_resolution: {adc_params.range_resolution}, doppler_resolution: {adc_params.doppler_resolution}"
+    )
+
+    ANGLE_RANGE = 90
+    ANGLE_RES = 1
+    ANGLE_BINS = (ANGLE_RANGE * 2) // ANGLE_RES + 1
+
+    # Initialize timing
+    step_start = time.perf_counter()
+
+    steering_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Steering vector generation: {steering_time:.4f}s"
+    )
+
+    # Reshape frame
+    step_start = time.perf_counter()
+    frame = frame.reshape(frame.shape[0] * frame.shape[1], frame.shape[2], -1)
+    reshape_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] Frame reshape: {reshape_time:.4f}s")
+
+    # Range processing
+    step_start = time.perf_counter()
+    radar_cube = dsp.range_processing(frame, window_type_1d=dsp.utils.Window.HANNING)
+    range_processing_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] Range processing: {range_processing_time:.4f}s")
+
+    # Static clutter removal
+    step_start = time.perf_counter()
+    mean = radar_cube.mean(0)
+    radar_cube = radar_cube - mean
+    clutter_removal_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Static clutter removal: {clutter_removal_time:.4f}s"
+    )
+
+    if adc_params.tx == 2:
+        radar_cube = np.concatenate(
+            (radar_cube[0::2, ...], radar_cube[1::2, ...]),
+            axis=1,
+        )
+    elif adc_params.tx == 3:
+        radar_cube = np.concatenate(
+            (radar_cube[0::3, ...], radar_cube[1::3, ...], radar_cube[2::3, ...]),
+            axis=1,
+        )
+
+    # Range-Doppler FFT
+    # This is not used in this method, but kept for compatibility
+    # with the original function signature.
+    # e.g. for visualization purposes.
+    range_doppler = np.fft.fft(radar_cube, axis=0)
+    range_doppler = np.fft.fftshift(range_doppler, axes=0)
+
+    # Take log first (similar to what you do for CFAR)
+    range_doppler_log = np.log(
+        range_doppler + 1e-8
+    )  # Add small epsilon to avoid log(0)
+
+    range_doppler = np.abs(range_doppler_log).sum(axis=1)
+
+    # Note that when replacing with generic doppler estimation functions, radarCube is interleaved and
+    # has doppler at the last dimension.
+    capon_start = time.perf_counter()
+
+    range_azimuth, beamWeights = dsp.aoa_capon_jitted(
+        radar_cube, adc_params.tx, adc_params.rx, adc_params.samples
+    )
+
+    capon_time = time.perf_counter() - capon_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Capon beamforming ({adc_params.samples} iterations): {capon_time:.4f}s"
+    )
+    logger.debug(
+        f"    [RADAR_PROFILE] Average per Capon iteration: {capon_time/adc_params.samples:.6f}s"
+    )
+
+    """ 3 (Object Detection) """
+    step_start = time.perf_counter()
+    heatmap_log = np.log2(range_azimuth)
+    heatmap_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] Heatmap log computation: {heatmap_time:.4f}s")
+
+    t2d = (tuning or {}).get("cfar_2d", {}) if isinstance(tuning, dict) else {}
+    t2d_az = t2d.get("az", {})
+    t2d_r = t2d.get("range", {})
+    if IS_INDOOR:
+        AZ_LBOUND = float(t2d_az.get("l_bound", 1.5))
+        AZ_GUARD_LEN = int(t2d_az.get("guard_len", 2))
+        AZ_NOISE_LEN = int(t2d_az.get("noise_len", 10))
+        R_LBOUND = float(t2d_r.get("l_bound", 3.0))
+        R_GUARD_LEN = int(t2d_r.get("guard_len", 2))
+        R_NOISE_LEN = int(t2d_r.get("noise_len", 10))
+    else:
+        AZ_LBOUND = float(t2d_az.get("l_bound", 1.0))
+        AZ_GUARD_LEN = int(t2d_az.get("guard_len", 2))
+        AZ_NOISE_LEN = int(t2d_az.get("noise_len", 10))
+        R_LBOUND = float(t2d_r.get("l_bound", 1.5))
+        R_GUARD_LEN = int(t2d_r.get("guard_len", 2))
+        R_NOISE_LEN = int(t2d_r.get("noise_len", 10))
+
+    # --- cfar in azimuth direction
+    step_start = time.perf_counter()
+    first_pass, _ = np.apply_along_axis(
+        func1d=dsp.ca_,
+        axis=0,
+        arr=heatmap_log,
+        l_bound=AZ_LBOUND,
+        guard_len=AZ_GUARD_LEN,
+        noise_len=AZ_NOISE_LEN,
+    )
+    cfar_az_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] CFAR azimuth direction: {cfar_az_time:.4f}s")
+
+    # --- cfar in range direction
+    step_start = time.perf_counter()
+    second_pass, noise_floor = np.apply_along_axis(
+        func1d=dsp.ca_,
+        axis=0,
+        arr=heatmap_log.T,
+        l_bound=R_LBOUND,
+        guard_len=R_GUARD_LEN,
+        noise_len=R_NOISE_LEN,
+    )
+    cfar_range_time = time.perf_counter() - step_start
+    logger.debug(f"    [RADAR_PROFILE] CFAR range direction: {cfar_range_time:.4f}s")
+
+    # --- classify peaks and caclulate snrs
+    step_start = time.perf_counter()
+    noise_floor = noise_floor.T
+    first_pass = heatmap_log > first_pass
+    second_pass = heatmap_log > second_pass.T
+    peaks = first_pass & second_pass
+    peaks[: CFGS.RADAR_SKIP_SIZE, :] = 0
+    peaks[-CFGS.RADAR_SKIP_SIZE :, :] = 0
+    peaks[:, : CFGS.RADAR_SKIP_SIZE] = 0
+    peaks[:, -CFGS.RADAR_SKIP_SIZE :] = 0
+    pairs = np.argwhere(peaks)
+
+    peak_classification_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Peak classification: {peak_classification_time:.4f}s"
+    )
+    logger.debug(f"[DEBUG] CFAR detected {len(pairs)} peaks")
+
+    if len(pairs) == 0:
+        logger.debug("[DEBUG] No peaks detected - returning empty results")
+
+        # Profile logging every 10 frames
+        if process_2D_radar_frame.frame_count % 50 == 0:
+            total_time = time.perf_counter() - function_start
+            logger.info(
+                f"AVG Runtime: {total_time:.4f}s (frame {process_2D_radar_frame.frame_count})"
+            )
+        return {
+            "range_doppler": np.array([]),
+            "range_azimuth": range_azimuth,
+            "x_pos": np.array([]),
+            "y_pos": np.array([]),
+            "z_pos": np.array([]),
+            "velocities": np.array([]),
+            "snrs": np.array([]),
+            "cluster_labels": np.array([]),
+        }
+
+    azimuths, ranges = pairs.T
+    snrs = heatmap_log[pairs[:, 0], pairs[:, 1]] - noise_floor[pairs[:, 0], pairs[:, 1]]
+
+    """ 4 (Doppler Estimation) """
+    step_start = time.perf_counter()
+
+    # --- get peak indices
+    # beamWeights should be selected based on the range indices from CFAR.
+    dopplerFFTInput = radar_cube[:, :, ranges]
+    beamWeights = beamWeights[:, ranges]
+
+    # --- estimate doppler values
+    # For each detected object and for each chirp combine the signals from 4 Rx, i.e.
+    # For each detected object, matmul (numChirpsPerFrame, numRxAnt) with (numRxAnt) to (numChirpsPerFrame)
+    dopplerFFTInput = np.einsum("ijk,jk->ik", dopplerFFTInput, beamWeights)
+    logger.debug(f"[DEBUG] dopplerFFTInput shape: {dopplerFFTInput.shape}")
+    assert dopplerFFTInput.shape[-1], "Doppler FFT input should not be empty"
+
+    dopplerEst = np.fft.fft(dopplerFFTInput, axis=0)
+    dopplerEst = np.argmax(dopplerEst, axis=0)
+    dopplerEst[dopplerEst[:] >= adc_params.chirps / 2] -= adc_params.chirps
+
+    doppler_estimation_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Doppler estimation: {doppler_estimation_time:.4f}s"
+    )
+
+    # --- convert bins to units
+    step_start = time.perf_counter()
+    ranges = ranges * adc_params.range_resolution
+    azimuths = azimuths - (ANGLE_BINS // 2)
+    dopplers = dopplerEst * adc_params.doppler_resolution
+    snrs = snrs
+
+    logger.debug(
+        f"[DEBUG] Detected {ranges.shape} targets with ranges, azimuths, dopplers, snrs"
+    )
+
+    x_pos, y_pos = ranges_angles_to_xy(ranges, azimuths)
+    z_pos = None  # This algorithm does not provide z_pos
+    velocities = dopplers
+    conversion_time = time.perf_counter() - step_start
+    logger.debug(
+        f"    [RADAR_PROFILE] Unit conversion and coordinate transform: {conversion_time:.4f}s"
+    )
+
+    cluster_labels = np.array([])
+
+    # Profile logging every 10 frames
+    if process_2D_radar_frame.frame_count % 50 == 0:
+        total_time = time.perf_counter() - function_start
+        logger.info(
+            f"AVG Runtime: {total_time:.4f}s (frame {process_2D_radar_frame.frame_count})"
+        )
+    else:
+        total_time = time.perf_counter() - function_start
+        logger.debug(f"[RADAR_PROFILE] TOTAL time: {total_time:.4f}s")
+
+    return {
+        "range_doppler": range_doppler,
+        "range_azimuth": range_azimuth,
+        "x_pos": x_pos,
+        "y_pos": y_pos,
+        "z_pos": z_pos,
+        "velocities": velocities,
+        "snrs": snrs,
+        "cluster_labels": cluster_labels,
+    }
+
+
+def process_3D_radar_frame(frame, adc_params, tuning: Optional[dict] = None):
+    """
+    Process a radar frame to produce a 3D point cloud (x, y, z) and a range-doppler heatmap,
+    including Doppler velocities and SNR values for detections.
+
+    Note:
+        Inspired by OpenRadar's "realtime detector" sample; not a direct copy.
+    """
     from mmwave import dsp
     import time
 
     function_start = time.perf_counter()
 
-    # Frame counter for profile logging every 10 frames
-    if not hasattr(openradar_rt_process_frame, "frame_count"):
-        openradar_rt_process_frame.frame_count = 0
-    openradar_rt_process_frame.frame_count += 1
+    # Validate configuration: this pipeline expects 3 TX (3D)
+    assert (
+        int(getattr(adc_params, "tx", 0)) == 3
+    ), "process_3D_radar_frame requires adc_params.tx == 3"
 
-    logger.debug(
-        f"openradar_rt_process_frame: Processing frame with shape {frame.shape}"
-    )
+    # Frame counter for profile logging cadence control
+    if not hasattr(process_3D_radar_frame, "frame_count"):
+        process_3D_radar_frame.frame_count = 0
+    process_3D_radar_frame.frame_count += 1
+
+    logger.debug(f"process_3D_radar_frame: Processing frame with shape {frame.shape}")
     logger.debug(
         f"ADC Params - tx: {adc_params.tx}, rx: {adc_params.rx}, samples: {adc_params.samples}, chirps: {adc_params.chirps}, range_resolution: {adc_params.range_resolution}, doppler_resolution: {adc_params.doppler_resolution}"
     )
@@ -664,23 +985,54 @@ def openradar_rt_process_frame(frame, adc_params):
     step_start = time.perf_counter()
     # --- CFAR, SNR is calculated as well.
     fft2d_sum = det_matrix.astype(np.int64)
+    # Apply optional tuning for 3D CFAR (uniform handling)
+    t3d = (tuning or {}).get("cfar_3d", {}) if isinstance(tuning, dict) else {}
+    t3d_d = t3d.get("doppler", {})
+    t3d_r = t3d.get("range", {})
+    lb_d = float(t3d_d.get("l_bound", 1.5))
+    gl_d = int(t3d_d.get("guard_len", 4))
+    nl_d = int(t3d_d.get("noise_len", 16))
+    lb_r = float(t3d_r.get("l_bound", 2.5))
+    gl_r = int(t3d_r.get("guard_len", 4))
+    nl_r = int(t3d_r.get("noise_len", 16))
+
     thresholdDoppler, noiseFloorDoppler = np.apply_along_axis(
         func1d=dsp.ca_,
         axis=0,
         arr=fft2d_sum.T,
-        l_bound=1.5,
-        guard_len=4,
-        noise_len=16,
+        l_bound=lb_d,
+        guard_len=gl_d,
+        noise_len=nl_d,
     )
 
     thresholdRange, noiseFloorRange = np.apply_along_axis(
         func1d=dsp.ca_,
         axis=0,
         arr=fft2d_sum,
-        l_bound=2.5,
-        guard_len=4,
-        noise_len=16,
+        l_bound=lb_r,
+        guard_len=gl_r,
+        noise_len=nl_r,
     )
+
+    # thresholdDoppler, noiseFloorDoppler = np.apply_along_axis(
+    #     func1d=dsp.os_,
+    #     axis=0,
+    #     arr=fft2d_sum.T,
+    #     scale=1.0,
+    #     k=12,
+    #     guard_len=4,
+    #     noise_len=16,
+    # )
+
+    # thresholdRange, noiseFloorRange = np.apply_along_axis(
+    #     func1d=dsp.os_,
+    #     axis=0,
+    #     arr=fft2d_sum,
+    #     scale=1.0,
+    #     k=12,
+    #     guard_len=4,
+    #     noise_len=16,
+    # )
 
     thresholdDoppler, noiseFloorDoppler = thresholdDoppler.T, noiseFloorDoppler.T
 
@@ -732,7 +1084,7 @@ def openradar_rt_process_frame(frame, adc_params):
         f"    [RADAR_PROFILE] Data structure creation: {data_structure_time:.4f}s"
     )
 
-    logger.debug(f"detObj2DRaw['rangeIdx'] = {len(detObj2DRaw['rangeIdx'])}")
+    logger.info(f"detObj2DRaw['rangeIdx'] = {len(detObj2DRaw['rangeIdx'])}")
     logger.debug(f"detObj2DRaw['peakVal'] = {len(detObj2DRaw['peakVal'])}")
 
     # Further peak pruning. This increases the point cloud density but helps avoid having too many detections around one object.
@@ -746,7 +1098,7 @@ def openradar_rt_process_frame(frame, adc_params):
     prune_time = time.perf_counter() - step_start
     logger.debug(f"    [RADAR_PROFILE] Peak pruning: {prune_time:.4f}s")
 
-    logger.debug(
+    logger.info(
         f"detObj2D['rangeIdx'] after peak pruning = {len(detObj2D['rangeIdx'])}"
     )
 
@@ -756,14 +1108,18 @@ def openradar_rt_process_frame(frame, adc_params):
     peak_grouping_time = time.perf_counter() - step_start
     logger.debug(f"    [RADAR_PROFILE] Peak grouping: {peak_grouping_time:.4f}s")
 
-    logger.debug(
+    logger.info(
         f"detObj2D['rangeIdx'] after peak grouping = {len(detObj2D['rangeIdx'])}"
     )
 
-    SNRThresholds2 = np.array([[2, 30], [10, 20], [35, 16.0]])
-    # SNRThresholds2 = np.array([[2, 0.5], [10, 6.5], [35, 16.0]])
-    # peakValThresholds2 = np.array([[4, 275], [1, 400], [500, 0]])
-    peakValThresholds2 = np.array([[4, 100], [1, 400], [500, 0]])
+    # Threshold tables (tunable)
+    th3d = (tuning or {}).get("thresholds_3d", {}) if isinstance(tuning, dict) else {}
+    SNRThresholds2 = np.array(
+        th3d.get("snr_table", [[2, 5.5], [10, 2.5], [35, 10.0]]), dtype=np.float32
+    )
+    peakValThresholds2 = np.array(
+        th3d.get("peak_table", [[4, 100], [1, 400], [500, 0]]), dtype=np.float32
+    )
 
     step_start = time.perf_counter()
     detObj2D = dsp.range_based_pruning(
@@ -792,7 +1148,7 @@ def openradar_rt_process_frame(frame, adc_params):
         f"    [RADAR_PROFILE] Azimuth input preparation: {azimuth_input_time:.4f}s"
     )
 
-    logger.debug(f"Azimuth input shape: {azimuthInput.shape}")
+    logger.info(f"Azimuth input shape: {azimuthInput.shape}")
 
     step_start = time.perf_counter()
     x, y, z = dsp.naive_xyz(
@@ -823,6 +1179,14 @@ def openradar_rt_process_frame(frame, adc_params):
 
     cluster_labels = np.array([])
     snrs = detObj2D["SNR"]  # Use the SNR values from the detected objects
+
+    if snrs.size > 0:
+        logger.info(
+            f"Min, Mean and max snr: {np.min(snrs)}, {np.mean(snrs)}, {np.max(snrs)}"
+        )
+    else:
+        logger.info("No detections: empty SNR array")
+
     velocities = (
         detObj2D["dopplerIdx"] * adc_params.doppler_resolution
     )  # Convert Doppler bins to velocities
@@ -832,11 +1196,13 @@ def openradar_rt_process_frame(frame, adc_params):
     )
 
     # Profile logging every 10 frames
-    if openradar_rt_process_frame.frame_count % 10 == 0:
+    if process_3D_radar_frame.frame_count % 50 == 0:
         total_time = time.perf_counter() - function_start
         logger.info(
-            f"    [RADAR_PROFILE] TOTAL openradar_rt_process_frame time: {total_time:.4f}s (frame {openradar_rt_process_frame.frame_count})"
+            f"AVG Runtime: {total_time:.4f}s (frame {process_3D_radar_frame.frame_count})"
         )
+
+    logger.info(f"xyzVec shape: {xyzVec.shape}")
 
     return {
         "range_doppler": det_matrix.T,
@@ -1007,10 +1373,9 @@ def pyradar_process_frame(frame, adc_params, doa_method="MUSIC", IS_INDOOR=True)
     clustering_time = time.perf_counter() - step_start
     logger.debug(f"    [RADAR_PROFILE] Clustering (disabled): {clustering_time:.4f}s")
 
-    total_time = time.perf_counter() - function_start
-    logger.info(
-        f"    [RADAR_PROFILE] TOTAL pyradar_process_frame time: {total_time:.4f}s"
-    )
+    # Optional concise profile (disabled by default)
+    # total_time = time.perf_counter() - function_start
+    # logger.info(f"AVG Runtime: {total_time:.4f}s (frame 1)")
 
     return {
         "range_doppler": range_doppler,

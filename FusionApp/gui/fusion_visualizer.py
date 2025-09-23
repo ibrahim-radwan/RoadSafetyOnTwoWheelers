@@ -3,22 +3,13 @@ Unified PyQt5-based fusion visualizer for both live and replay modes.
 Supports radar visualization, camera display, and adaptive controls.
 """
 
-import os
-import time
-import glob
-import re
-import logging
-import traceback
-import queue
-import numpy as np
-
-# Fix OpenCV Qt plugin conflicts before importing cv2 - only on Linux
-if os.name != 'nt':  # Not Windows
-    os.environ.pop('QT_QPA_PLATFORM_PLUGIN_PATH', None)
-import cv2
-
-from typing import Optional, Callable, Dict, Any, List
-
+from multiprocessing import shared_memory
+from camera.d455 import D455Frame
+from utils import setup_logger
+from config_params import CFGS
+from PyQt5.QtGui import QOpenGLContext, QSurfaceFormat, QOffscreenSurface
+from PyQt5.QtCore import QTimer, Qt, QRectF
+from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -30,15 +21,32 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QGridLayout,
 )
-from PyQt5.QtGui import QPixmap, QImage
-from PyQt5.QtCore import QTimer, Qt
+from typing import Optional, Callable, Dict, Any, List
+import os
+import time
+import glob
+import re
+import logging
+import traceback
+import queue
+import numpy as np
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
+# Fix OpenCV Qt plugin conflicts before importing cv2 - only on Linux
+import pyqtgraph as pg
 
-from config_params import CFGS
-from utils import setup_logger
-from camera.d455 import D455Frame
+if os.name != "nt":  # Not Windows
+    os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+    # Prefer software rendering on NVIDIA Jetson to avoid GLX/EGL issues
+    if os.path.exists("/etc/nv_tegra_release"):
+        os.environ.setdefault("QT_OPENGL", "software")
+import cv2
+from collections import deque
+
+# Configure pyqtgraph defaults; force software to avoid GLX/EGL issues on Jetson
+pg.setConfigOptions(antialias=False, imageAxisOrder="row-major", useOpenGL=False)
+
+
+# Matplotlib removed from visualizer rendering; pyqtgraph is used for speed
 
 
 class FusionVisualizer(QWidget):
@@ -62,6 +70,9 @@ class FusionVisualizer(QWidget):
         self.recording_dir = recording_dir
         self.adc_params = adc_params
         self.use_3d = use_3d
+        # Feature gates from environment to isolate crashes
+        self._disable_radar = os.environ.get("DISABLE_RADAR", "0") == "1"
+        self._disable_camera = os.environ.get("DISABLE_CAMERA", "0") == "1"
 
         # Data access callbacks
         self.radar_data_callback: Optional[Callable] = None
@@ -87,15 +98,44 @@ class FusionVisualizer(QWidget):
         self._last_log_time = time.time()
         self._plot_updates = 0
 
+        # Visualizer profiling accumulators
+        self._profile_enabled = True
+        self._profile_step = 150  # reduced frequency (5x previous 30)
+        self._profile_count = 0
+        self._prof_sum_total = 0.0
+        self._prof_sum_get_data = 0.0
+        self._prof_sum_status = 0.0
+        self._prof_sum_camera = 0.0
+        self._prof_sum_rd = 0.0
+        self._prof_sum_ra = 0.0
+        self._prof_sum_pc = 0.0
+
         # Setup UI
         self._setup_ui()
 
-        # Start update timer at 30 FPS (33ms)
+        # Start update timer at ~50 FPS (20ms)
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_display)
-        self.timer.start(20)  # 30 FPS
+        self.timer.start(20)
 
         self.logger.info(f"FusionVisualizer initialized in {mode} mode")
+
+        # Track last processed timestamps to avoid redundant updates
+        self._last_radar_ts = None
+        self._last_camera_ts = None
+        # FPS tracking over a 1-second window
+        self._fps_window_s = 1.0
+        self._cam_times = deque()
+        self._rad_times = deque()
+        self._cam_fps_text = ""
+        # Attach to analyser results SHM if engine passes meta via environment (simple handoff)
+        self._rd_blocks = []
+        self._rd_shape = None
+        self._rd_dtype = None
+        self._ra_blocks = []
+        self._ra_shape = None
+        self._ra_dtype = None
+        self._res_shm_attached = False
 
     def _setup_ui(self):
         """Setup the complete user interface"""
@@ -111,40 +151,53 @@ class FusionVisualizer(QWidget):
         # Create main layout
         main_layout = QVBoxLayout()
 
-        # Setup plots
+        # Choose rendering backend and then setup plots and widgets
+        self._configure_pyqtgraph_backend()
         self._setup_plots()
 
         # Create 2x2 grid layout for all modes
         plots_layout = QGridLayout()
-        plots_layout.addWidget(self.camera_widget, 0, 0)  # Upper-left: Camera/Video
+        # Upper-left: Camera/Video
+        plots_layout.addWidget(self.camera_widget, 0, 0)
         plots_layout.addWidget(
-            self.point_cloud_canvas, 0, 1
+            self.point_cloud_widget, 0, 1
         )  # Upper-right: Point cloud
         plots_layout.addWidget(
-            self.range_doppler_canvas, 1, 0
+            self.range_doppler_widget, 1, 0
         )  # Lower-left: Range-Doppler
         plots_layout.addWidget(
-            self.range_azimuth_canvas, 1, 1
+            self.range_azimuth_widget, 1, 1
         )  # Lower-right: Range-Azimuth
 
         # Set equal row and column stretch factors for 50/50 split
-        plots_layout.setRowStretch(0, 1)  # First row gets 50% of height
-        plots_layout.setRowStretch(1, 1)  # Second row gets 50% of height
-        plots_layout.setColumnStretch(0, 1)  # First column gets 50% of width
-        plots_layout.setColumnStretch(1, 1)  # Second column gets 50% of width
+        plots_layout.setRowStretch(0, 1)
+        plots_layout.setRowStretch(1, 1)
+        plots_layout.setColumnStretch(0, 1)
+        plots_layout.setColumnStretch(1, 1)
 
         # Add plots layout with stretch factor so it takes most of the space
-        main_layout.addLayout(plots_layout, 1)  # stretch factor of 1
+        main_layout.addLayout(plots_layout, 1)
 
         # Setup controls
         self._setup_controls()
-        # Add controls layout with no stretch factor and fixed height
-        main_layout.addLayout(self.controls_layout, 0)  # stretch factor of 0
+        main_layout.addLayout(self.controls_layout)
 
+        # Finalize
         self.setLayout(main_layout)
 
+    def _configure_pyqtgraph_backend(self) -> None:
+        """Force software rendering; do not attempt any OpenGL context creation."""
+        try:
+            pg.setConfigOptions(useOpenGL=False)
+            if hasattr(self, "logger"):
+                self.logger.warning(
+                    "pyqtgraph OpenGL not available; using software rendering"
+                )
+        except Exception:
+            pass
+
     def _setup_plots(self):
-        """Setup matplotlib figures and camera display"""
+        """Setup camera display and pyqtgraph plots"""
         # Camera/Video widget - always present
         self.camera_widget = QLabel()
         self.camera_widget.setMinimumSize(400, 400)
@@ -152,38 +205,6 @@ class FusionVisualizer(QWidget):
         self.camera_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.camera_widget.setText("No video stream available")
         self.camera_widget.setScaledContents(True)
-
-        # Range-Doppler plot
-        self.rd_figure = Figure(figsize=(6, 6))
-        self.rd_ax = self.rd_figure.add_subplot(111)
-        self.rd_ax.set_title("Range-Doppler Heatmap")
-        self.rd_ax.set_xlabel("Doppler (m/s)")
-        self.rd_ax.set_ylabel("Range (m)")
-        self.range_doppler_canvas = FigureCanvas(self.rd_figure)
-
-        # Range-Azimuth plot
-        self.ra_figure = Figure(figsize=(6, 6))
-        self.ra_ax = self.ra_figure.add_subplot(111)
-        self.ra_ax.set_title("Range-Azimuth Heatmap")
-        self.ra_ax.set_xlabel("Azimuth (degrees)")
-        self.ra_ax.set_ylabel("Range (m)")
-        self.range_azimuth_canvas = FigureCanvas(self.ra_figure)
-
-        # Point Cloud plot (2D or 3D)
-        self.pc_figure = Figure(figsize=(6, 6))
-        if self.use_3d:
-            self.pc_ax = self.pc_figure.add_subplot(111, projection="3d")
-            self.pc_ax.set_title("3D Point Cloud")
-            self.pc_ax.set_xlabel("X (m)")
-            self.pc_ax.set_ylabel("Y (m)")
-            if hasattr(self.pc_ax, "set_zlabel"):
-                self.pc_ax.set_zlabel("Z (m)")  # type: ignore
-        else:
-            self.pc_ax = self.pc_figure.add_subplot(111)
-            self.pc_ax.set_title("2D Point Cloud")
-            self.pc_ax.set_xlabel("X (m)")
-            self.pc_ax.set_ylabel("Y (m)")
-        self.point_cloud_canvas = FigureCanvas(self.pc_figure)
 
         # Calculate max range for point cloud axis limits
         if self.adc_params:
@@ -203,18 +224,61 @@ class FusionVisualizer(QWidget):
                 "No ADC params provided, using default max range: 10.0 m"
             )
 
-        # Initialize plot references
-        self.rd_im = None
-        self.ra_im = None
-        self.pc_scatter = None
-        self.rd_cbar = None
-        self.ra_cbar = None
-        self.pc_cbar = None
+        # Precompute LUT similar to 'jet'
+        try:
+            self._lut_jet = pg.colormap.get("jet").getLookupTable(0.0, 1.0, 256)
+        except Exception:
+            self._lut_jet = None
 
-        # Use tight layout
-        self.rd_figure.tight_layout()
-        self.ra_figure.tight_layout()
-        self.pc_figure.tight_layout()
+        # Range-Doppler plot (pyqtgraph)
+        self.range_doppler_widget = pg.GraphicsLayoutWidget()
+        try:
+            self.range_doppler_widget.setMinimumSize(400, 400)
+        except Exception:
+            pass
+        self.rd_plot = self.range_doppler_widget.addPlot(title="Range-Doppler Heatmap")
+        self.rd_plot.setLabel("bottom", "Doppler (m/s)")
+        self.rd_plot.setLabel("left", "Range (m)")
+        self.rd_image = pg.ImageItem()
+        self.rd_plot.addItem(self.rd_image)
+        self.rd_plot.invertY(False)
+        try:
+            vb = self.rd_plot.getViewBox()
+            vb.setAspectLocked(lock=True, ratio=1)
+        except Exception:
+            pass
+        # FPS text overlay for radar (top-left)
+        self._rd_fps_item = pg.TextItem(color="w", anchor=(0, 1))
+        self.rd_plot.addItem(self._rd_fps_item)
+
+        # Range-Azimuth plot (pyqtgraph)
+        self.range_azimuth_widget = pg.GraphicsLayoutWidget()
+        try:
+            self.range_azimuth_widget.setMinimumSize(400, 400)
+        except Exception:
+            pass
+        self.ra_plot = self.range_azimuth_widget.addPlot(title="Range-Azimuth Heatmap")
+        self.ra_plot.setLabel("bottom", "Azimuth (degrees)")
+        self.ra_plot.setLabel("left", "Range (m)")
+        self.ra_image = pg.ImageItem()
+        self.ra_plot.addItem(self.ra_image)
+        self.ra_plot.invertY(False)
+        try:
+            vb = self.ra_plot.getViewBox()
+            vb.setAspectLocked(lock=True, ratio=1)
+        except Exception:
+            pass
+
+        # Point Cloud plot (2D, pyqtgraph)
+        self.point_cloud_widget = pg.GraphicsLayoutWidget()
+        title = "3D Point Cloud" if self.use_3d else "2D Point Cloud"
+        self.pc_plot = self.point_cloud_widget.addPlot(title=title)
+        self.pc_plot.setLabel("bottom", "X (m)")
+        self.pc_plot.setLabel("left", "Y (m)")
+        self.pc_scatter_item = pg.ScatterPlotItem(pen=None, size=4)
+        self.pc_plot.addItem(self.pc_scatter_item)
+        self.pc_plot.setXRange(-self.pc_max_range, self.pc_max_range, padding=0)
+        self.pc_plot.setYRange(0, self.pc_max_range, padding=0)
 
     def _setup_controls(self):
         """Setup control buttons and status display"""
@@ -269,6 +333,28 @@ class FusionVisualizer(QWidget):
         # Internal state
         self.is_playing = False
         self.is_recording = False
+
+    def _skip_rdra(self) -> bool:
+        # Allow disabling RD/RA rendering to isolate crashes
+        return os.environ.get("DISABLE_RDRA", "0") == "1"
+
+    def _safe_levels(self, arr: np.ndarray):
+        try:
+            finite = np.isfinite(arr)
+            if not np.any(finite):
+                return None
+            vals = arr[finite]
+            # Use robust percentiles to avoid outliers
+            vmin = float(np.percentile(vals, 1.0))
+            vmax = float(np.percentile(vals, 99.0))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin >= vmax:
+                vmin = float(np.min(vals))
+                vmax = float(np.max(vals))
+                if vmin >= vmax:
+                    vmax = vmin + 1.0
+            return (vmin, vmax)
+        except Exception:
+            return None
 
     def _configure_controls_for_mode(self):
         """Enable/disable controls based on mode"""
@@ -384,13 +470,27 @@ class FusionVisualizer(QWidget):
             return
 
         try:
+            total_t0 = time.perf_counter()
+
             # Get current data
+            get_t0 = time.perf_counter()
             radar_data = (
-                self.radar_data_callback() if self.radar_data_callback else None
+                self.radar_data_callback()
+                if (
+                    self.radar_data_callback
+                    and not os.environ.get("DISABLE_RADAR", "0") == "1"
+                )
+                else None
             )
             camera_data = (
-                self.camera_data_callback() if self.camera_data_callback else None
+                self.camera_data_callback()
+                if (
+                    self.camera_data_callback
+                    and not os.environ.get("DISABLE_CAMERA", "0") == "1"
+                )
+                else None
             )
+            t_get_data = time.perf_counter() - get_t0
 
             # Set extents if needed
             rd_extents = [-5, 5, 0, 10]
@@ -403,14 +503,284 @@ class FusionVisualizer(QWidget):
                     pass
 
             # Update status for replay mode
+            status_dt = 0.0
             if self.mode == "replay":
+                st_t0 = time.perf_counter()
                 self._update_playback_status()
+                status_dt = time.perf_counter() - st_t0
 
-            # Update displays
-            self._update_camera_display(camera_data)
-            self._update_radar_displays(radar_data, rd_extents, ra_extents)
+            # Update displays only when new frames arrive
+            # Camera update
+            t_camera = 0.0
+            cam_ts = (
+                getattr(getattr(camera_data, "frame", None), "timestamp", None)
+                if camera_data is not None
+                else None
+            )
+            if not os.environ.get("DISABLE_CAMERA", "0") == "1" and (
+                cam_ts is None or cam_ts != self._last_camera_ts
+            ):
+                cam_t0 = time.perf_counter()
+                self._update_camera_display(camera_data)
+                t_camera = time.perf_counter() - cam_t0
+                if cam_ts is not None:
+                    self._last_camera_ts = cam_ts
+                # Update camera FPS window and build overlay text
+                now_s = time.perf_counter()
+                self._cam_times.append(now_s)
+                # Drop times older than window
+                while (
+                    self._cam_times and now_s - self._cam_times[0] > self._fps_window_s
+                ):
+                    self._cam_times.popleft()
+                cam_fps = len(self._cam_times) / self._fps_window_s
+                self._cam_fps_text = f"{cam_fps:.1f} FPS"
+
+            # Radar update
+            rdra_times = {"rd": 0.0, "ra": 0.0, "pc": 0.0}
+            radar_ts = None
+            new_radar_frame = False
+            if isinstance(radar_data, dict):
+                radar_ts = radar_data.get("frame_timestamp")
+                new_radar_frame = radar_ts is None or radar_ts != self._last_radar_ts
+            if (
+                radar_data is not None
+                and new_radar_frame
+                and not os.environ.get("DISABLE_RADAR", "0") == "1"
+            ):
+                # If metadata indicates results are in SHM, attach and read
+                # Handle results SHM init (names/shapes)
+                if isinstance(radar_data, dict) and radar_data.get(
+                    "RADAR_RES_SHM_INIT"
+                ):
+                    try:
+                        if not self._res_shm_attached:
+                            rd = radar_data.get("rd")
+                            ra = radar_data.get("ra")
+                            if rd:
+                                self._rd_blocks = [
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in rd.get("names", [])
+                                ]
+                                # Do not unregister in GUI; analyser handles writer-side unregister.
+                                self._rd_shape = tuple(rd.get("shape", ()))
+                                self._rd_dtype = rd.get("dtype", "float32")
+                            if ra:
+                                self._ra_blocks = [
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in ra.get("names", [])
+                                ]
+                                # Do not unregister in GUI; analyser handles writer-side unregister.
+                                self._ra_shape = tuple(ra.get("shape", ()))
+                                self._ra_dtype = ra.get("dtype", "float32")
+                            self._res_shm_attached = True
+                            self.logger.info("Attached results SHM via init meta")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to attach RD/RA SHM via init: {e}")
+                    radar_data = None  # consume init item
+                # Render from SHM frame metadata
+                if isinstance(radar_data, dict) and radar_data.get(
+                    "RADAR_RES_SHM_FRAME"
+                ):
+                    try:
+                        # Lazy attach on first use via environment variables set by engine
+                        if (not self._res_shm_attached) and (
+                            (not self._rd_blocks)
+                            or (self._rd_shape is None)
+                            or (self._ra_shape is None)
+                        ):
+                            rd_names = os.environ.get("RADAR_RD_SHM_NAMES")
+                            ra_names = os.environ.get("RADAR_RA_SHM_NAMES")
+                            rd_shape = os.environ.get("RADAR_RD_SHAPE")
+                            ra_shape = os.environ.get("RADAR_RA_SHAPE")
+                            if rd_names and rd_shape:
+                                self._rd_blocks = [
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in rd_names.split(",")
+                                ]
+                                # Do not unregister in GUI; analyser handles writer-side unregister.
+                                self._rd_shape = tuple(
+                                    int(x) for x in rd_shape.split(",")
+                                )
+                                self._rd_dtype = "float32"
+                            if ra_names and ra_shape:
+                                self._ra_blocks = [
+                                    shared_memory.SharedMemory(name=n)
+                                    for n in ra_names.split(",")
+                                ]
+                                # Do not unregister in GUI; analyser handles writer-side unregister.
+                                self._ra_shape = tuple(
+                                    int(x) for x in ra_shape.split(",")
+                                )
+                                self._ra_dtype = "float32"
+                            if self._rd_blocks or self._ra_blocks:
+                                self._res_shm_attached = True
+                        slot = int(radar_data.get("slot", 0)) & 1
+                        rd_data = None
+                        ra_data = None
+                        if (
+                            self._rd_blocks
+                            and self._rd_shape
+                            and slot < len(self._rd_blocks)
+                        ):
+                            expected_elems = int(np.prod(self._rd_shape))
+                            expected_bytes = expected_elems * 4
+                            buf = self._rd_blocks[slot].buf
+                            if len(buf) >= expected_bytes:
+                                mv = memoryview(buf)[:expected_bytes]
+                                rd_view = np.frombuffer(
+                                    mv, dtype=np.float32, count=expected_elems
+                                ).reshape(self._rd_shape)
+                                try:
+                                    mv.release()
+                                except Exception as e:
+                                    self.logger.error(
+                                        f"Failed to release memoryview: {e}"
+                                    )
+                            else:
+                                rd_view = np.array([], dtype=np.float32)
+                            rd_data = rd_view.copy()
+                        if (
+                            self._ra_blocks
+                            and self._ra_shape
+                            and slot < len(self._ra_blocks)
+                        ):
+                            try:
+                                expected_elems = int(np.prod(self._ra_shape))
+                                expected_bytes = expected_elems * 4
+                                buf = self._ra_blocks[slot].buf
+                                if len(buf) >= expected_bytes:
+                                    mv = memoryview(buf)[:expected_bytes]
+                                    ra_view = np.frombuffer(
+                                        mv, dtype=np.float32, count=expected_elems
+                                    ).reshape(self._ra_shape)
+                                    try:
+                                        mv.release()
+                                    except Exception as e:
+                                        self.logger.error(
+                                            f"Failed to release memoryview: {e}"
+                                        )
+                                else:
+                                    ra_view = np.array([], dtype=np.float32)
+                            except Exception:
+                                ra_view = np.array([], dtype=np.float32)
+                            ra_data = ra_view.copy()
+                        payload = {"range_doppler": rd_data, "range_azimuth": ra_data}
+                        # Pass through point cloud if provided in metadata
+                        if (
+                            isinstance(radar_data, dict)
+                            and radar_data.get("point_cloud") is not None
+                        ):
+                            payload["point_cloud"] = radar_data.get("point_cloud")
+                        rdra_times = self._update_radar_displays(
+                            payload, rd_extents, ra_extents
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to read results from SHM: {e}")
+                        rdra_times = self._update_radar_displays(
+                            radar_data, rd_extents, ra_extents
+                        )
+                else:
+                    rdra_times = self._update_radar_displays(
+                        radar_data, rd_extents, ra_extents
+                    )
+                if radar_ts is not None:
+                    self._last_radar_ts = radar_ts
+                # Update radar FPS window
+                now_s = time.perf_counter()
+                self._rad_times.append(now_s)
+                while (
+                    self._rad_times and now_s - self._rad_times[0] > self._fps_window_s
+                ):
+                    self._rad_times.popleft()
+                rad_fps = len(self._rad_times) / self._fps_window_s
+                # Position and update FPS overlay on RD plot (top-left in data coords)
+                x0, x1, y0, y1 = (
+                    rd_extents[0],
+                    rd_extents[1],
+                    rd_extents[2],
+                    rd_extents[3],
+                )
+                self._rd_fps_item.setText(f"{rad_fps:.1f} FPS")
+                self._rd_fps_item.setPos(x0 + 0.02 * (x1 - x0), y1 - 0.02 * (y1 - y0))
+
+            t_rd = rdra_times.get("rd", 0.0)
+            t_ra = rdra_times.get("ra", 0.0)
+            t_pc = rdra_times.get("pc", 0.0)
 
             # Performance logging
+            t_total = time.perf_counter() - total_t0
+            self._record_profile(
+                t_total=t_total,
+                t_get=t_get_data,
+                t_status=status_dt,
+                t_camera=t_camera,
+                t_rd=t_rd,
+                t_ra=t_ra,
+                t_pc=t_pc,
+            )
+            # Latency logging (only for new radar frames) using absolute monotonic ns
+            if isinstance(radar_data, dict) and new_radar_frame:
+                # if CFGS.LOG_LEVEL == logging.DEBUG and isinstance(radar_data, dict) and new_radar_frame:
+                now_disp_ns = time.perf_counter_ns()
+                cap_ns = radar_data.get("capture_monotonic_ns")
+                enq_ns = radar_data.get("enqueue_monotonic_ns")
+                ana_recv_ns = radar_data.get("analyser_receive_ns")
+                ana_end_ns = radar_data.get("analyser_end_ns")
+                main_recv_ns = radar_data.get("main_received_ns")
+                if all(
+                    isinstance(v, int) and v > 0
+                    for v in [cap_ns, enq_ns, ana_recv_ns, ana_end_ns, main_recv_ns]
+                ):
+                    e2e_ms = (now_disp_ns - cap_ns) / 1e6
+                    q0_ms = (enq_ns - cap_ns) / 1e6
+                    q1_ms = (ana_recv_ns - enq_ns) / 1e6
+                    ana_ms = (ana_end_ns - ana_recv_ns) / 1e6
+                    q2_ms = (main_recv_ns - ana_end_ns) / 1e6
+                    gui_poll_ms = (now_disp_ns - main_recv_ns) / 1e6
+                    # Extra analyser stats if present
+                    drained = radar_data.get("drained_count")
+                    dropped_total = radar_data.get("total_dropped_frames")
+                    qhint = radar_data.get("input_queue_size_hint")
+                    drain_ns = radar_data.get("drain_ns")
+                    wait_ns = radar_data.get("first_dequeue_wait_ns")
+                    # Log compact line every ~50 updates
+                    if not hasattr(self, "_lat_count"):
+                        self._lat_count = 0
+                    self._lat_count += 1
+                    # if self._lat_count % 50 == 0:
+                    if True:
+                        frame_ts = radar_data.get("frame_timestamp", None)
+                        ts_str = (
+                            f"{frame_ts:.3f}s"
+                            if isinstance(frame_ts, (int, float))
+                            else "NA"
+                        )
+                        # Absolute stage times (seconds, monotonic origin) for cross-frame comparison
+                        cap_s = cap_ns / 1e9
+                        enq_s = enq_ns / 1e9
+                        ana_recv_s = ana_recv_ns / 1e9
+                        ana_end_s = ana_end_ns / 1e9
+                        main_s = main_recv_ns / 1e9
+                        disp_s = now_disp_ns / 1e9
+                        # Optional extras
+                        extras = []
+                        if isinstance(drain_ns, int) and drain_ns > 0:
+                            extras.append(f"drain={drain_ns/1e6:.1f}ms")
+                        if isinstance(wait_ns, int) and wait_ns > 0:
+                            extras.append(f"wait={wait_ns/1e6:.1f}ms")
+                        if isinstance(drained, int):
+                            extras.append(f"drained={drained}")
+                        if isinstance(dropped_total, int):
+                            extras.append(f"dropped_total={dropped_total}")
+                        if isinstance(qhint, int) and qhint >= 0:
+                            extras.append(f"in_q={qhint}")
+                        extras_str = (" | " + " | ".join(extras)) if extras else ""
+                        # Unified pipeline line for cross-frame timing comparison
+                        self.logger.debug(
+                            f"PIPE ts={ts_str} | cap={cap_s:.6f} | q_start={enq_s:.6f} | ana_recv={ana_recv_s:.6f} | ana_end={ana_end_s:.6f} | main={main_s:.6f} | disp={disp_s:.6f} | "
+                            f"e2e={e2e_ms:.1f}ms | cap→q={q0_ms:.1f}ms | q→ana={q1_ms:.1f}ms | ana={ana_ms:.1f}ms | ana→main={q2_ms:.1f}ms | main→GUI={gui_poll_ms:.1f}ms | render={((t_rd+t_ra+t_pc)*1000):.1f}ms{extras_str}"
+                        )
             self._log_performance()
 
         except Exception as e:
@@ -444,160 +814,152 @@ class FusionVisualizer(QWidget):
             self.logger.error(f"Error updating camera display: {e}")
 
     def _update_radar_displays(self, radar_data, rd_extents, ra_extents):
-        """Update all radar plots"""
+        """Update all radar plots. Returns dict of timings for rd/ra/pc."""
+        t_rd = t_ra = t_pc = 0.0
         try:
             # Update Range-Doppler plot
             if radar_data and radar_data.get("range_doppler") is not None:
-                self._update_range_doppler(radar_data["range_doppler"], rd_extents)
+                t_rd = self._update_range_doppler(
+                    radar_data["range_doppler"], rd_extents
+                )
 
             # Update Range-Azimuth plot
             if radar_data and radar_data.get("range_azimuth") is not None:
-                self._update_range_azimuth(radar_data["range_azimuth"], ra_extents)
+                t_ra = self._update_range_azimuth(
+                    radar_data["range_azimuth"], ra_extents
+                )
 
             # Update Point Cloud
             if radar_data and radar_data.get("point_cloud") is not None:
-                self._update_point_cloud(radar_data["point_cloud"])
+                t_pc = self._update_point_cloud(radar_data["point_cloud"])
 
         except Exception as e:
             self.logger.error(f"Error updating radar displays: {e}")
+        return {"rd": t_rd, "ra": t_ra, "pc": t_pc}
 
     def _update_range_doppler(self, rd_data, extents):
-        """Update range-doppler heatmap"""
+        """Update range-doppler heatmap (pyqtgraph). Returns time spent (s)."""
+        t0 = time.perf_counter()
         try:
-            if rd_data is not None and rd_data.size > 0:
+            if self._skip_rdra():
+                return time.perf_counter() - t0
+            if rd_data is not None and getattr(rd_data, "size", 0) > 0:
                 # Handle 3D data by summing over virtual antenna axis
                 if rd_data.ndim == 3:
                     rd_data = np.sum(rd_data, axis=1)
 
-                # Convert to dB scale
-                rd_db = 20 * np.log10(np.abs(rd_data) + 1e-10)
-                rd_db = rd_db.T  # Transpose for correct orientation
+                # Convert to dB scale and orient as (rows, cols), origin lower
+                rd_db = 20.0 * np.log10(
+                    np.abs(rd_data.astype(np.float32, copy=False)) + 1e-10
+                )
+                rd_db = np.nan_to_num(rd_db, nan=0.0, posinf=0.0, neginf=0.0)
+                rd_db = rd_db.T
 
-                # Update or create image
-                if self.rd_im is None:
-                    self.rd_ax.set_title("Range-Doppler Heatmap")
-                    self.rd_ax.set_xlabel("Doppler (m/s)")
-                    self.rd_ax.set_ylabel("Range (m)")
-                    self.rd_im = self.rd_ax.imshow(
-                        rd_db, aspect="auto", origin="lower", cmap="jet", extent=extents
-                    )
-                    if self.rd_cbar is None:
-                        self.rd_cbar = self.rd_figure.colorbar(
-                            self.rd_im, ax=self.rd_ax
-                        )
-                        self.rd_cbar.set_label("Magnitude (dB)")
-                else:
-                    self.rd_im.set_array(rd_db)
-                    self.rd_im.set_extent(extents)
-                    self.rd_im.set_clim(vmin=rd_db.min(), vmax=rd_db.max())
+                # Update image with LUT and levels
+                levels = self._safe_levels(rd_db)
+                if levels is None:
+                    return time.perf_counter() - t0
+                vmin, vmax = levels
+                self.rd_image.setImage(
+                    rd_db,
+                    autoLevels=False,
+                    levels=(vmin, vmax),
+                    lut=self._lut_jet,
+                )
 
-            self.range_doppler_canvas.draw()
-
+                # Map image to physical extents with a rect
+                x0, x1, y0, y1 = extents[0], extents[1], extents[2], extents[3]
+                self.rd_image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
         except Exception as e:
             self.logger.error(f"Error updating range-doppler plot: {e}")
+        return time.perf_counter() - t0
 
     def _update_range_azimuth(self, ra_data, extents):
-        """Update range-azimuth heatmap"""
+        """Update range-azimuth heatmap (pyqtgraph). Returns time spent (s)."""
+        t0 = time.perf_counter()
         try:
-            if ra_data is not None and ra_data.size > 0:
+            if self._skip_rdra():
+                return time.perf_counter() - t0
+            if ra_data is not None and getattr(ra_data, "size", 0) > 0:
                 # Handle 3D data by summing over virtual antenna axis
                 if ra_data.ndim == 3:
                     ra_data = np.sum(ra_data, axis=1)
 
-                # Convert to dB scale
-                ra_db = 20 * np.log10(np.abs(ra_data) + 1e-10)
-                ra_db = ra_db.T  # Transpose for correct orientation
+                # Convert to dB scale and orient as (rows, cols), origin lower
+                ra_db = 20.0 * np.log10(
+                    np.abs(ra_data.astype(np.float32, copy=False)) + 1e-10
+                )
+                ra_db = np.nan_to_num(ra_db, nan=0.0, posinf=0.0, neginf=0.0)
+                ra_db = ra_db.T
 
-                # Update or create image
-                if self.ra_im is None:
-                    self.ra_ax.set_title("Range-Azimuth Heatmap")
-                    self.ra_ax.set_xlabel("Azimuth (degrees)")
-                    self.ra_ax.set_ylabel("Range (m)")
-                    self.ra_im = self.ra_ax.imshow(
-                        ra_db, aspect="auto", origin="lower", cmap="jet", extent=extents
-                    )
-                    if self.ra_cbar is None:
-                        self.ra_cbar = self.ra_figure.colorbar(
-                            self.ra_im, ax=self.ra_ax
-                        )
-                        self.ra_cbar.set_label("Magnitude (dB)")
-                else:
-                    self.ra_im.set_array(ra_db)
-                    self.ra_im.set_extent(extents)
-                    self.ra_im.set_clim(vmin=ra_db.min(), vmax=ra_db.max())
+                # Update image with LUT and levels
+                levels = self._safe_levels(ra_db)
+                if levels is None:
+                    return time.perf_counter() - t0
+                vmin, vmax = levels
+                self.ra_image.setImage(
+                    ra_db,
+                    autoLevels=False,
+                    levels=(vmin, vmax),
+                    lut=self._lut_jet,
+                )
 
-            self.range_azimuth_canvas.draw()
-
+                # Map image to physical extents with a rect
+                x0, x1, y0, y1 = extents[0], extents[1], extents[2], extents[3]
+                self.ra_image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
         except Exception as e:
             self.logger.error(f"Error updating range-azimuth plot: {e}")
+        return time.perf_counter() - t0
 
     def _update_point_cloud(self, point_cloud_data):
-        """Update point cloud plot"""
+        """Update point cloud plot (pyqtgraph). Returns time spent (s)."""
+        t0 = time.perf_counter()
         try:
             if point_cloud_data is not None and len(point_cloud_data.get("x", [])) > 0:
-                x_data = point_cloud_data["x"]
-                y_data = point_cloud_data["y"]
-                z_data = point_cloud_data.get("z", []) if self.use_3d else None
+                x_data = np.asarray(point_cloud_data["x"], dtype=float)
+                y_data = np.asarray(point_cloud_data["y"], dtype=float)
 
-                # Validate data consistency
-                if (
-                    self.use_3d
-                    and z_data is not None
-                    and (len(x_data) != len(y_data) or len(x_data) != len(z_data))
-                ):
+                if x_data.shape[0] != y_data.shape[0]:
                     self.logger.warning(
                         "Point cloud coordinate arrays have inconsistent lengths"
                     )
-                    return
-                elif not self.use_3d and len(x_data) != len(y_data):
-                    self.logger.warning(
-                        "Point cloud coordinate arrays have inconsistent lengths"
-                    )
-                    return
+                    return time.perf_counter() - t0
 
-                # Get colors
+                # Colors: use snr or intensity; fallback to index
                 colors = point_cloud_data.get(
                     "snr", point_cloud_data.get("intensity", None)
                 )
                 if colors is None or len(colors) != len(x_data):
-                    colors = np.arange(len(x_data), dtype=np.float64)
+                    colors = np.arange(len(x_data), dtype=float)
+                colors = np.asarray(colors, dtype=float)
 
-                # Update or create scatter plot
-                if self.pc_scatter is not None:
-                    self.pc_scatter.remove()
+                cmin = float(colors.min()) if colors.size else 0.0
+                cmax = float(colors.max()) if colors.size else 1.0
+                if cmax - cmin < 1e-9:
+                    cmax = cmin + 1.0
+                norm = (colors - cmin) / (cmax - cmin)
+                idx = np.clip((norm * 255).astype(np.int32), 0, 255)
 
-                if self.use_3d:
-                    self.pc_scatter = self.pc_ax.scatter(
-                        x_data, y_data, z_data, c=colors, cmap="jet", alpha=0.8
-                    )
-                    self.pc_ax.set_xlim(-self.pc_max_range, self.pc_max_range)
-                    self.pc_ax.set_ylim(0, self.pc_max_range)
-                    if hasattr(self.pc_ax, "set_zlim"):
-                        self.pc_ax.set_zlim(-self.pc_max_range, self.pc_max_range)  # type: ignore
+                if self._lut_jet is not None:
+                    lut = self._lut_jet
+                    # Build per-point brushes
+                    brushes = [
+                        pg.mkBrush(int(lut[i, 0]), int(lut[i, 1]), int(lut[i, 2]), 255)
+                        for i in idx
+                    ]
                 else:
-                    self.pc_scatter = self.pc_ax.scatter(
-                        x_data, y_data, c=colors, cmap="jet", alpha=0.8
-                    )
-                    self.pc_ax.set_xlim(-self.pc_max_range, self.pc_max_range)
-                    self.pc_ax.set_ylim(0, self.pc_max_range)
+                    brushes = pg.mkBrush(0, 200, 255, 255)
 
-                # Create colorbar if needed
-                if self.pc_cbar is None:
-                    self.pc_cbar = self.pc_figure.colorbar(
-                        self.pc_scatter, ax=self.pc_ax
-                    )
-                    self.pc_cbar.set_label("SNR (dB)")
+                self.pc_scatter_item.setData(
+                    x=x_data, y=y_data, brush=brushes, pen=None
+                )
 
-                # Update colorbar limits
-                if colors is not None:
-                    self.pc_scatter.set_clim(
-                        vmin=float(np.min(colors)), vmax=float(np.max(colors))
-                    )
-
-            self.point_cloud_canvas.draw()
-
+                # Keep ranges steady
+                self.pc_plot.setXRange(-self.pc_max_range, self.pc_max_range, padding=0)
+                self.pc_plot.setYRange(0, self.pc_max_range, padding=0)
         except Exception as e:
             self.logger.error(f"Error updating point cloud plot: {e}")
+        return time.perf_counter() - t0
 
     def _update_playback_status(self):
         """Update playback controls based on status"""
@@ -605,28 +967,50 @@ class FusionVisualizer(QWidget):
             try:
                 status = self.status_callback()
                 if status:
-                    # Update progress
+                    # Throttle UI updates to reduce overhead on embedded devices
+                    now = time.perf_counter()
+                    if not hasattr(self, "_last_status_ui"):
+                        self._last_status_ui = {
+                            "t": 0.0,
+                            "state": None,
+                            "current_frame": None,
+                            "total_frames": None,
+                            "progress": None,
+                        }
+
+                    # Only update at most every 50 ms
+                    if now - self._last_status_ui.get("t", 0.0) < 0.05:
+                        return
+
+                    total_frames = int(status.get("total_frames", 0))
+                    current_frame = int(status.get("current_frame", 0))
                     progress = int(status.get("progress_percent", 0))
-                    self.progress_bar.setValue(progress)
-
-                    # Update slider maximum
-                    total_frames = status.get("total_frames", 0)
-                    if total_frames > 0 and self.seek_slider.maximum() != total_frames:
-                        self.seek_slider.setMaximum(total_frames)
-                        self.progress_bar.setMaximum(total_frames)
-
-                    # Update slider position
-                    if not self.seek_slider.isSliderDown():
-                        current_frame = status.get("current_frame", 0)
-                        self.seek_slider.setValue(current_frame)
-                        self.progress_bar.setValue(current_frame)
-
-                    # Update status label
                     state = status.get("state", "UNKNOWN")
-                    current_frame = status.get("current_frame", 0)
-                    self.status_label.setText(
-                        f"{state} - Frame {current_frame}/{total_frames}"
-                    )
+
+                    # Update slider maximum once when it changes
+                    if (
+                        total_frames > 0
+                        and self._last_status_ui.get("total_frames") != total_frames
+                    ):
+                        if self.seek_slider.maximum() != total_frames:
+                            self.seek_slider.setMaximum(total_frames)
+                            self.progress_bar.setMaximum(total_frames)
+
+                    # Update slider position only when not interacting and when changed
+                    if not self.seek_slider.isSliderDown():
+                        if self._last_status_ui.get("current_frame") != current_frame:
+                            self.seek_slider.setValue(current_frame)
+                            self.progress_bar.setValue(current_frame)
+
+                    # Update status label only when changed
+                    if (
+                        self._last_status_ui.get("state") != state
+                        or self._last_status_ui.get("current_frame") != current_frame
+                        or self._last_status_ui.get("total_frames") != total_frames
+                    ):
+                        self.status_label.setText(
+                            f"{state} - Frame {current_frame}/{total_frames}"
+                        )
 
                     # Update button state - but don't override user actions immediately
                     if state == "PLAYING" and not self.is_playing:
@@ -640,6 +1024,17 @@ class FusionVisualizer(QWidget):
                         if state == "STOPPED":
                             self.seek_slider.setValue(0)
                             self.progress_bar.setValue(0)
+
+                    # Record last update snapshot and timestamp
+                    self._last_status_ui.update(
+                        {
+                            "t": now,
+                            "state": state,
+                            "current_frame": current_frame,
+                            "total_frames": total_frames,
+                            "progress": progress,
+                        }
+                    )
 
             except Exception as e:
                 self.logger.debug(f"No status update available: {e}")
@@ -701,6 +1096,32 @@ class FusionVisualizer(QWidget):
             else:
                 cv_image_with_boxes = rgb_image
 
+            # Overlay camera FPS text (top-left)
+            if self._cam_fps_text:
+                try:
+                    cv2.putText(
+                        cv_image_with_boxes,
+                        self._cam_fps_text,
+                        (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 0),
+                        3,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        cv_image_with_boxes,
+                        self._cam_fps_text,
+                        (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                except Exception:
+                    pass
+
             # Convert BGR to RGB for Qt
             rgb_image = cv2.cvtColor(cv_image_with_boxes, cv2.COLOR_BGR2RGB)
             height, width, channel = rgb_image.shape
@@ -719,7 +1140,7 @@ class FusionVisualizer(QWidget):
                 self.camera_widget.setPixmap(scaled_pixmap)
             else:
                 self.camera_widget.setText(
-                    f"Camera\n{len(detected_objects)} objects detected"
+                    f"Camera\n{len(detected_objects) if detected_objects else 0} objects detected"
                 )
 
         except Exception as e:
@@ -739,10 +1160,70 @@ class FusionVisualizer(QWidget):
             self._plot_updates = 0
             self._last_log_time = current_time
 
+    def _record_profile(
+        self,
+        *,
+        t_total: float,
+        t_get: float,
+        t_status: float,
+        t_camera: float,
+        t_rd: float,
+        t_ra: float,
+        t_pc: float,
+    ) -> None:
+        if not self._profile_enabled:
+            return
+        self._profile_count += 1
+        self._prof_sum_total += t_total
+        self._prof_sum_get_data += t_get
+        self._prof_sum_status += t_status
+        self._prof_sum_camera += t_camera
+        self._prof_sum_rd += t_rd
+        self._prof_sum_ra += t_ra
+        self._prof_sum_pc += t_pc
+
+        if self._profile_count % self._profile_step == 0:
+            n = self._profile_step
+            avg_total = self._prof_sum_total / n
+            fps = 1.0 / avg_total if avg_total > 0 else 0.0
+            # Compact INFO line
+            self.logger.info(f"AVG Runtime: {avg_total:.4f}s (frame {n})")
+
+            # Reset sums for the next window
+            self._prof_sum_total = 0.0
+            self._prof_sum_get_data = 0.0
+            self._prof_sum_status = 0.0
+            self._prof_sum_camera = 0.0
+            self._prof_sum_rd = 0.0
+            self._prof_sum_ra = 0.0
+            self._prof_sum_pc = 0.0
+
     def closeEvent(self, a0):
         """Handle window close event"""
         self.logger.info("FusionVisualizer closing...")
         self.timer.stop()
+        # Detach from results SHM if attached
+        try:
+            if getattr(self, "_rd_blocks", None):
+                for shm in self._rd_blocks:
+                    try:
+                        shm.close()
+                    except Exception as e:
+                        self.logger.error(
+                            f"GUI: SHM close failed for RD block ({getattr(shm,'name','?')}): {e}"
+                        )
+                self._rd_blocks = []
+            if getattr(self, "_ra_blocks", None):
+                for shm in self._ra_blocks:
+                    try:
+                        shm.close()
+                    except Exception as e:
+                        self.logger.error(
+                            f"GUI: SHM close failed for RA block ({getattr(shm,'name','?')}): {e}"
+                        )
+                self._ra_blocks = []
+        except Exception as e:
+            self.logger.error(f"GUI: unexpected error detaching SHM: {e}")
         if self.stop_event:
             self.stop_event.set()
         if a0:

@@ -53,6 +53,18 @@ def create_sync_state(manager):
     sync_state.last_camera_timestamp = manager.Value("d", 0.0)
     sync_state.last_radar_timestamp = manager.Value("d", 0.0)
 
+    # Boss-mode (radar-driven) windowing state
+    # Defines the currently active processing window [radar_window_start, radar_window_end)
+    # Camera is allowed to process frames whose timestamps fall within this window.
+    # Radar feed advances the window when starting rf(N) and sets end to ts(rf(N+1)).
+    sync_state.radar_window_start = manager.Value("d", 0.0)
+    sync_state.radar_window_end = manager.Value("d", 0.0)
+    sync_state.radar_frame_index = manager.Value("i", -1)  # current rf(N) index
+    sync_state.radar_window_seq = manager.Value(
+        "i", 0
+    )  # increments on each window update
+    sync_state.window_update = manager.Event()  # signaled whenever window updates
+
     return sync_state
 
 
@@ -73,6 +85,18 @@ class SyncStateUtils:
 
         sync_state.feeds_ready.clear()
         sync_state.sync_start.clear()
+
+        # Reset stats and boss-mode windowing
+        sync_state.last_camera_timestamp.value = 0.0
+        sync_state.last_radar_timestamp.value = 0.0
+        sync_state.radar_window_start.value = 0.0
+        sync_state.radar_window_end.value = 0.0
+        sync_state.radar_frame_index.value = -1
+        sync_state.radar_window_seq.value = 0
+        try:
+            sync_state.window_update.clear()
+        except Exception:
+            pass
 
     @staticmethod
     def set_start_timestamp(sync_state, timestamp: float):
@@ -165,6 +189,66 @@ class SyncStateUtils:
     def wait_for_start_signal(sync_state, timeout: Optional[float] = None) -> bool:
         """Wait for the synchronized start signal"""
         return sync_state.sync_start.wait(timeout)
+
+    # ----------------------
+    # Boss-mode gating utils
+    # ----------------------
+
+    @staticmethod
+    def set_radar_window(sync_state, start_ts: float, end_ts: float, index: int):
+        """Update the current radar-driven processing window [start_ts, end_ts)."""
+        sync_state.radar_window_start.value = float(start_ts)
+        sync_state.radar_window_end.value = float(end_ts)
+        sync_state.radar_frame_index.value = int(index)
+        # bump sequence and signal event
+        try:
+            seq = sync_state.radar_window_seq.value + 1
+            sync_state.radar_window_seq.value = seq
+        except Exception:
+            pass
+        try:
+            sync_state.window_update.set()
+        except Exception:
+            pass
+        logger = setup_logger("SyncStateUtils")
+        logger.debug(
+            f"Radar window updated: idx={index}, start={start_ts:.6f}, end={end_ts:.6f}"
+        )
+
+    @staticmethod
+    def get_radar_window(sync_state) -> Tuple[float, float, int, int]:
+        """Return (start_ts, end_ts, frame_index, window_seq)."""
+        return (
+            sync_state.radar_window_start.value,
+            sync_state.radar_window_end.value,
+            sync_state.radar_frame_index.value,
+            sync_state.radar_window_seq.value,
+        )
+
+    @staticmethod
+    def wait_for_window_update(
+        sync_state, last_seq: int, timeout: Optional[float] = None
+    ) -> Optional[int]:
+        """Wait until a new radar window is published (sequence increases). Returns new seq or None on timeout."""
+        # quick check first
+        try:
+            if sync_state.radar_window_seq.value != last_seq:
+                return sync_state.radar_window_seq.value
+        except Exception:
+            pass
+        # then wait on event
+        event_ok = sync_state.window_update.wait(timeout)
+        if not event_ok:
+            return None
+        try:
+            # clear event so subsequent waits can block again
+            sync_state.window_update.clear()
+        except Exception:
+            pass
+        try:
+            return sync_state.radar_window_seq.value
+        except Exception:
+            return None
 
 
 class TimestampScanner:

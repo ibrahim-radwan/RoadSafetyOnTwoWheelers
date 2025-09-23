@@ -1,0 +1,1086 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fusion Live Server</title>
+  <script>
+    // Initialize; populated below from embedded JSON if available
+    window.radar_config_options = [];
+  </script>
+  <script id="cfg-data" type="application/json">
+{{ radar_config_options | tojson if radar_config_options is defined else '[]' }}
+  </script>
+  <script id="defaults-data" type="application/json">
+{"default_replay_path": {{ default_replay_path | tojson if default_replay_path is defined else '""' }},
+ "default_replay_cfg": {{ default_replay_cfg | tojson if default_replay_cfg is defined else '""' }}}
+  </script>
+  <script>
+    try {
+      var __cfgEl = document.getElementById('cfg-data');
+      if (__cfgEl && __cfgEl.textContent && __cfgEl.textContent.trim().length) {
+        window.radar_config_options = JSON.parse(__cfgEl.textContent);
+      }
+    } catch (e) { }
+    try {
+      var __dEl = document.getElementById('defaults-data');
+      if (__dEl && __dEl.textContent && __dEl.textContent.trim().length) {
+        var d = JSON.parse(__dEl.textContent) || {};
+        window.__defaults = d;
+      }
+    } catch (e) { }
+  </script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 12px;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .col {
+      flex: 1;
+    }
+
+    .panel {
+      border: 1px solid #ccc;
+      padding: 8px;
+      border-radius: 6px;
+    }
+
+    button {
+      padding: 8px 12px;
+      margin-right: 8px;
+    }
+
+    img {
+      max-width: 100%;
+      height: auto;
+    }
+
+    pre {
+      background: #f6f8fa;
+      padding: 8px;
+      overflow: auto;
+    }
+
+    .proc-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+    }
+
+    .proc {
+      display: inline-block;
+      min-height: 48px;
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      padding: 8px;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .proc.white {
+      background: #fff;
+      color: #333;
+    }
+
+    .proc.red {
+      background: #ffebeb;
+      border-color: #e55;
+      color: #900;
+    }
+
+    .proc.yellow {
+      background: #fff7db;
+      border-color: #e5c100;
+      color: #8a6d00;
+    }
+
+    .proc.green {
+      background: #e8ffe8;
+      border-color: #6c6;
+      color: #060;
+    }
+
+    .meta {
+      font-size: 12px;
+      font-weight: normal;
+      margin-top: 4px;
+      color: #555;
+    }
+
+
+    .gap {
+      display: inline-block;
+      width: 16px;
+    }
+
+    #radar_view {
+      display: block;
+      width: 640px;
+      height: 480px;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .picker {
+      border: 1px solid #ccc;
+      padding: 0;
+      border-radius: 6px;
+      background: #fafafa;
+    }
+
+    .picker .picker-toolbar {
+      position: sticky;
+      top: 0;
+      background: #f0f0f0;
+      padding: 6px;
+      border-bottom: 1px solid #ddd;
+      z-index: 1;
+    }
+
+    .picker .list {
+      max-height: 240px;
+      overflow: auto;
+      padding: 6px;
+    }
+
+    .picker .entry {
+      padding: 4px 6px;
+      cursor: pointer;
+    }
+
+    .picker .entry.dir {
+      font-weight: 600;
+    }
+
+    .picker .entry:hover {
+      background: #eef;
+    }
+
+    .picker .entry.selected {
+      background: #cfe3ff;
+    }
+  </style>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script>
+    let streamActive = false;
+    let isRunning = false;
+    // Replay tracking
+    let rpPlaying = false;
+    let rpLastTs = 0;
+    let rpCur = 0;
+    async function systemStart() {
+      const params = [];
+      const radarOnly = document.getElementById('radar_only').checked;
+      if (radarOnly) params.push('radar_only=1');
+      const mode = document.querySelector('input[name="server_mode"]:checked').value;
+      params.push('mode=' + encodeURIComponent(mode));
+      // Artefact toggles only meaningful for full-analysis mode; only append when mode==='full'
+      if (mode === 'full') {
+        try {
+          const tcb = document.getElementById('af_tesseract');
+          // default to enabled if checkbox missing
+          const tval = (tcb ? tcb.checked : true) ? '1' : '0';
+          const zcb = document.getElementById('af_zyx_cube');
+          const zval = (zcb ? zcb.checked : true) ? '1' : '0';
+          params.push('tesseract=' + tval);
+          params.push('zyx_cube=' + zval);
+        } catch (e) { /* ignore */ }
+      }
+      if (mode === 'live') {
+        const sel = document.getElementById('radar_cfg_sel');
+        const cfg = sel && sel.value ? sel.value : '';
+        if (cfg) params.push('radar_cfg=' + encodeURIComponent(cfg));
+      } else {
+        const rpath = document.getElementById('replay_path').value || '';
+        const rcfg = document.getElementById('replay_cfg').value || '';
+        if (rpath) params.push('replay_path=' + encodeURIComponent(rpath));
+        if (rcfg) params.push('radar_cfg=' + encodeURIComponent(rcfg));
+        // Reset replay counters on new start
+        rpCur = 0; rpLastTs = 0; rpPlaying = false;
+        const seekEl = document.getElementById('rp_seek'); if (seekEl) seekEl.value = '0';
+        // Ensure tuning is pushed to replay analyser immediately
+        try { if (typeof window.__sendTuning === 'function') await window.__sendTuning(); } catch (e) { }
+      }
+      const url = '/system/start' + (params.length ? ('?' + params.join('&')) : '');
+      await fetch(url, { method: 'POST' });
+    }
+    async function systemStop() {
+      await fetch('/system/stop', { method: 'POST' });
+    }
+    async function systemRetry() {
+      await fetch('/system/retry', { method: 'POST' });
+    }
+    async function refreshStatus() {
+      try {
+        const r = await fetch('/status');
+        const j = await r.json();
+        document.getElementById('status').textContent = JSON.stringify(j, null, 2);
+        fetchProcesses();
+        renderTimes(j);
+        // Sync artefact checkboxes when running or after status pull (do not override user edits if not full mode)
+        try {
+          const art = j && j.artefacts ? j.artefacts : {};
+          if (typeof art.enable_tesseract === 'boolean') {
+            const tcb = document.getElementById('af_tesseract');
+            if (tcb && isRunning) tcb.checked = art.enable_tesseract;
+          }
+          if (typeof art.enable_zyx_cube === 'boolean') {
+            const zcb = document.getElementById('af_zyx_cube');
+            if (zcb && isRunning) zcb.checked = art.enable_zyx_cube;
+          }
+        } catch (e) { }
+        try {
+          if (typeof j.running === 'boolean') {
+            isRunning = j.running;
+            if (!isRunning) { if (videoTimer) clearInterval(videoTimer); if (radarTimer) clearInterval(radarTimer); }
+          }
+        } catch (e) { }
+      } catch (e) { console.error(e); }
+    }
+    function setupStatusSSE() {
+      if (!!window.EventSource) {
+        try {
+          const es = new EventSource('/status/stream');
+          es.onmessage = (ev) => {
+            let j = null;
+            try { j = JSON.parse(ev.data); document.getElementById('status').textContent = JSON.stringify(j, null, 2); renderTimes(j); } catch (e) { }
+            // Gate polling based on running state
+            try {
+              if (j && typeof j.running === 'boolean') {
+                if (j.running && !isRunning) {
+                  isRunning = true;
+                  scheduleVideoPoll();
+                  scheduleRadarPoll();
+                } else if (!j.running && isRunning) {
+                  isRunning = false;
+                  if (videoTimer) clearInterval(videoTimer);
+                  if (radarTimer) clearInterval(radarTimer);
+                  // When engine stops, reset replay playing flag
+                  rpPlaying = false;
+                }
+              }
+            } catch (e) { }
+            // Sync artefact checkbox states while engine running
+            try {
+              const art = j && j.artefacts ? j.artefacts : {};
+              if (isRunning) {
+                if (typeof art.enable_tesseract === 'boolean') {
+                  const tcb = document.getElementById('af_tesseract'); if (tcb) tcb.checked = art.enable_tesseract;
+                }
+                if (typeof art.enable_zyx_cube === 'boolean') {
+                  const zcb = document.getElementById('af_zyx_cube'); if (zcb) zcb.checked = art.enable_zyx_cube;
+                }
+              }
+            } catch (e) { }
+            // Track replay frame progress using reported current_frame when available
+            try {
+              const rj = j && j.replay ? j.replay : null;
+              if (rj && typeof rj.current_frame === 'number') {
+                rpCur = rj.current_frame >>> 0;
+                const seekEl = document.getElementById('rp_seek');
+                if (seekEl) seekEl.value = String(rpCur);
+                const tot = document.getElementById('rp_total');
+                if (tot && typeof rj.total_frames === 'number') tot.textContent = String(rj.total_frames >>> 0);
+              }
+            } catch (e) { }
+            // Refresh processes grid every tick
+            fetchProcesses();
+          };
+          es.onerror = (e) => { console.warn('SSE error; falling back to polling'); es.close(); setInterval(refreshStatus, 1000); };
+        } catch (e) { setInterval(refreshStatus, 1000); }
+      } else {
+        setInterval(refreshStatus, 1000);
+      }
+    }
+    // Replay controls
+    async function replayCmd(cmd) {
+      try { await fetch('/replay/control?cmd=' + encodeURIComponent(cmd), { method: 'POST' }); } catch (e) { console.error(e); }
+    }
+    function bindReplayControls() {
+      const playBtn = document.getElementById('rp_play');
+      const pauseBtn = document.getElementById('rp_pause');
+      const stopBtn = document.getElementById('rp_stop');
+      const seekBtn = document.getElementById('rp_seek_btn');
+      if (playBtn) playBtn.addEventListener('click', async () => {
+        try {
+          // If the system isn't started, start it in replay mode with current inputs
+          if (!isRunning) {
+            await systemStart();
+            // Brief delay to allow process to initialize queues
+            await new Promise(r => setTimeout(r, 300));
+          }
+        } catch (e) { }
+        rpPlaying = true;
+        await replayCmd('play');
+      });
+      if (pauseBtn) pauseBtn.addEventListener('click', async () => { rpPlaying = false; await replayCmd('pause'); });
+      if (stopBtn) stopBtn.addEventListener('click', async () => {
+        rpPlaying = false; rpCur = 0; rpLastTs = 0;
+        const seekEl = document.getElementById('rp_seek'); if (seekEl) seekEl.value = '0';
+        // Stop playback state in feeds, then stop engine for a clean reset like live mode
+        try { await replayCmd('stop'); } catch (e) { }
+        try { await fetch('/system/stop', { method: 'POST' }); } catch (e) { }
+      });
+      if (seekBtn) seekBtn.addEventListener('click', () => {
+        const v = document.getElementById('rp_seek').value || '0';
+        const n = parseInt(v || '0');
+        if (!isNaN(n)) { rpCur = n; replayCmd('seek:' + n); }
+      });
+    }
+    // File picker helpers
+    async function listDir(target, path) {
+      const r = await fetch('/fs/list?path=' + encodeURIComponent(path || ''));
+      const j = await r.json();
+      const cont = document.getElementById(target);
+      if (!cont) return;
+      cont.innerHTML = '';
+      const upBtn = document.createElement('div');
+      upBtn.className = 'entry dir';
+      upBtn.textContent = '..';
+      upBtn.title = 'Go to parent folder';
+      upBtn.addEventListener('click', () => {
+        const parent = j.cwd.replace(/\\/g, '/').split('/').slice(0, -1).join('/') || j.cwd;
+        listDir(target, parent);
+      });
+      cont.appendChild(upBtn);
+      (j.entries || []).forEach(e => {
+        const d = document.createElement('div');
+        d.className = 'entry ' + (e.type || 'other');
+        d.textContent = (e.type === 'dir' ? '[DIR] ' : '') + e.name;
+        // single click selects
+        d.addEventListener('click', () => {
+          cont.querySelectorAll('.entry').forEach(x => x.classList.remove('selected'));
+          d.classList.add('selected');
+        });
+        // double click opens directories
+        d.addEventListener('dblclick', () => { if (e.type === 'dir') { listDir(target, e.path); } });
+        d.dataset.path = e.path;
+        cont.appendChild(d);
+      });
+      cont.dataset.cwd = j.cwd || '';
+    }
+    async function pickCurrent(targetListId, inputId) {
+      const cont = document.getElementById(targetListId);
+      if (!cont) return;
+      // Prefer selected file, otherwise current directory
+      const sel = cont.querySelector('.entry.selected');
+      const path = sel ? (sel.dataset.path || '') : (cont.dataset.cwd || '');
+      document.getElementById(inputId).value = path;
+      // If picking recording dir, fetch replay info to display total frames
+      if (inputId === 'replay_path') {
+        try {
+          const r = await fetch('/replay/info?path=' + encodeURIComponent(path));
+          const j = await r.json();
+          const el = document.getElementById('rp_total');
+          if (el) {
+            const total = (document.getElementById('radar_only').checked ? (j.radar_frames || 0) : Math.max(j.radar_frames || 0, j.camera_frames || 0));
+            el.dataset.total = String(total || 0);
+            el.textContent = String(total || 0);
+          }
+        } catch (e) { }
+      }
+    }
+    async function startRecord() {
+      await fetch('/control/start_record', { method: 'POST' });
+    }
+    async function stopRecord() {
+      await fetch('/control/stop_record', { method: 'POST' });
+    }
+    // Two-viewer polling logic
+    let radarMode = 'rd';
+    let videoTimer = null;
+    let radarTimer = null;
+    // Unified poller to better align UI updates of video and radar
+    let unifiedTimer = null;
+    let lastVideoTick = 0;
+    let lastRadarTick = 0;
+    let procTimer = null;
+    let pc3dInitialized = false; // preserve 3D camera across frames
+    let pc3dResetOnNext = false; // force reset camera when switching to 3D
+    // Unified scheduler: fires frequently, honors per-stream FPS
+    function scheduleUnifiedPoll() {
+      if (videoTimer) { clearInterval(videoTimer); videoTimer = null; }
+      if (radarTimer) { clearInterval(radarTimer); radarTimer = null; }
+      if (unifiedTimer) { clearInterval(unifiedTimer); unifiedTimer = null; }
+      if (!isRunning) return;
+      lastVideoTick = 0; lastRadarTick = 0;
+      const basePeriod = 50; // ms cadence
+      unifiedTimer = setInterval(() => {
+        if (!isRunning) return;
+        const now = Date.now();
+        try {
+          const vMode = document.querySelector('input[name="video_mode"]:checked').value;
+          if (vMode === 'live') {
+            let vfps = parseInt((document.getElementById('video_fps').value || '1'), 10);
+            vfps = Math.max(1, vfps);
+            const vPeriod = Math.max(50, Math.floor(1000 / vfps));
+            if (now - lastVideoTick >= vPeriod) { fetchVideoFrame(); lastVideoTick = now; }
+          }
+        } catch (e) { }
+        try {
+          const rMode = document.querySelector('input[name="radar_mode"]:checked').value;
+          if (rMode === 'live') {
+            let rfps = parseInt((document.getElementById('radar_fps').value || '1'), 10);
+            rfps = Math.max(1, rfps);
+            const rPeriod = Math.max(50, Math.floor(1000 / rfps));
+            if (now - lastRadarTick >= rPeriod) { fetchRadarFrame(); lastRadarTick = now; }
+          }
+        } catch (e) { }
+      }, basePeriod);
+    }
+    // Backward-compatible shims
+    function scheduleVideoPoll() { scheduleUnifiedPoll(); }
+    function scheduleRadarPoll() { scheduleUnifiedPoll(); }
+    async function fetchVideoFrame() {
+      if (!isRunning) return;
+      const el = document.getElementById('video_view');
+      el.src = '/video/frame.jpg?_=' + Date.now();
+    }
+    async function fetchRadarFrame() {
+      if (!isRunning) return;
+      if (radarMode === 'pc2d' || radarMode === 'pc3d') {
+        await renderPlotlyPC(radarMode === 'pc3d');
+        return;
+      }
+      const el = document.getElementById('radar_view');
+      const url = '/radar/frame.png?mode=' + encodeURIComponent(radarMode) + '&_=' + Date.now();
+      el.src = url;
+    }
+    function bindViewerControls() {
+      // Defaults to 1 fps
+      const vSel = document.getElementById('video_fps');
+      if (vSel) vSel.value = '1';
+      const rSel = document.getElementById('radar_fps');
+      if (rSel) rSel.value = '1';
+      document.querySelectorAll('input[name="video_mode"]').forEach(r => r.addEventListener('change', () => { scheduleVideoPoll(); }));
+      document.querySelectorAll('input[name="radar_mode"]').forEach(r => r.addEventListener('change', () => { scheduleRadarPoll(); }));
+      document.getElementById('video_fps').addEventListener('change', () => { scheduleVideoPoll(); });
+      document.getElementById('radar_fps').addEventListener('change', () => { scheduleRadarPoll(); });
+      document.getElementById('video_next').addEventListener('click', () => { clearInterval(videoTimer); fetchVideoFrame(); });
+      document.getElementById('radar_next').addEventListener('click', () => { clearInterval(radarTimer); fetchRadarFrame(); });
+      document.querySelectorAll('[data-rmode]').forEach(b => b.addEventListener('click', (e) => {
+        const m = e.target.getAttribute('data-rmode');
+        if (m) {
+          radarMode = m;
+          if (m === 'pc3d') { pc3dResetOnNext = true; pc3dInitialized = false; }
+          toggleRadarTargets(m);
+          fetchRadarFrame();
+          scheduleRadarPoll();
+        }
+      }));
+    }
+
+    function toggleRadarTargets(mode) {
+      const img = document.getElementById('radar_view');
+      const div = document.getElementById('radar_plot');
+      if (mode === 'pc2d' || mode === 'pc3d') {
+        img.style.display = 'none';
+        div.style.display = 'block';
+      } else {
+        img.style.display = 'block';
+        div.style.display = 'none';
+      }
+    }
+
+    async function renderPlotlyPC(is3D) {
+      try {
+        const r = await fetch('/radar/pc.json?_=' + Date.now());
+        if (!r.ok) { return; }
+        const j = await r.json();
+        console.log('PC json keys', Object.keys(j || {}));
+        const x = j.x || [];
+        const y = j.y || [];
+        const z = j.z || null;
+        const inten = j.intensity || null;
+        // Round up max range to two significant digits so mr/10 has at most one decimal
+        function roundUpTwoSig(v) {
+          if (!(typeof v === 'number') || !isFinite(v) || v <= 0) return 10.0;
+          const e = Math.floor(Math.log10(v));
+          const pow = Math.pow(10, e - 1);
+          return Math.ceil(v / pow) * pow;
+        }
+        const mrRaw = (typeof j.max_range === 'number' && isFinite(j.max_range) && j.max_range > 0) ? j.max_range : 10.0;
+        const mr = roundUpTwoSig(mrRaw);
+        const div = document.getElementById('radar_plot');
+        if (typeof Plotly === 'undefined') { div.innerHTML = 'Plotly not loaded'; return; }
+        // Build filtered point arrays (ensure x/y[/z] and intensity stay aligned)
+        const fx = []; const fy = []; const fz = [];
+        const fint = [];
+        const hasZ = Array.isArray(z) && z.length === x.length;
+        const hasI = Array.isArray(inten);
+        for (let i = 0; i < x.length; i++) {
+          const xi = x[i];
+          const yi = y[i];
+          const zi = hasZ ? z[i] : 0;
+          const iv = hasI ? inten[i] : null;
+          if (!is3D) {
+            if (isFinite(xi) && isFinite(yi)) { fx.push(xi); fy.push(yi); if (hasI) fint.push(iv); }
+          } else {
+            if (isFinite(xi) && isFinite(yi) && isFinite(zi)) { fx.push(xi); fy.push(yi); fz.push(zi); if (hasI) fint.push(iv); }
+          }
+        }
+        // Prepare numeric color mapping (use all finite intensities present, not just filtered set)
+        let vmin = 0, vmax = 1;
+        const finiteValsAll = (hasI ? inten : []).filter(v => Number.isFinite(v));
+        const haveIntensity = finiteValsAll.length > 0;
+        if (haveIntensity) {
+          vmin = Math.min(...finiteValsAll);
+          vmax = Math.max(...finiteValsAll);
+          if (!(isFinite(vmin) && isFinite(vmax)) || vmin >= vmax) { vmax = vmin + 1; }
+        }
+        console.log('PC plot', { n: fx.length, is3D, mr, vmin, vmax });
+        // Build explicit grayscale colors for robust rendering in both modes
+        let colorsArr = 'rgb(0,0,0)';
+        if (haveIntensity) {
+          colorsArr = fint.map(v => {
+            const t = Math.max(0, Math.min(1, (v - vmin) / (vmax - vmin + 1e-6)));
+            const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
+            return `rgb(${g},${g},${g})`;
+          });
+        }
+        if (!is3D) {
+          const traces = [];
+          if (haveIntensity && fx.length > 0) {
+            const bins = 6;
+            const bxDef = []; const byDef = [];
+            for (let b = 0; b < bins; b++) {
+              const b0 = vmin + (b / bins) * (vmax - vmin);
+              const b1 = vmin + ((b + 1) / bins) * (vmax - vmin) + 1e-9;
+              const bx = []; const by = [];
+              for (let i = 0; i < fx.length; i++) {
+                const iv = fint[i];
+                if (!Number.isFinite(iv)) { bxDef.push(fx[i]); byDef.push(fy[i]); continue; }
+                if (iv >= b0 && iv < b1) { bx.push(fx[i]); by.push(fy[i]); }
+              }
+              const t = (b + 0.5) / bins;
+              const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
+              traces.push({ x: bx, y: by, mode: 'markers', type: 'scattergl', marker: { size: 3, color: `rgb(${g},${g},${g})` }, hoverinfo: 'skip', showlegend: false });
+            }
+            if (bxDef.length) { traces.push({ x: bxDef, y: byDef, mode: 'markers', type: 'scattergl', marker: { size: 3, color: 'rgb(160,160,160)' }, hoverinfo: 'skip', showlegend: false }); }
+          } else {
+            traces.push({ x: fx, y: fy, mode: 'markers', type: 'scattergl', marker: { size: 3, color: 'rgb(0,0,0)' }, hoverinfo: 'skip', showlegend: false });
+          }
+          const layout = {
+            paper_bgcolor: 'white',
+            plot_bgcolor: 'white',
+            xaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'X (m)', font: { size: 10 }, standoff: 6 }, showticklabels: true, ticklabelposition: 'outside', ticklabeloverflow: 'allow', automargin: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true },
+            yaxis: { range: [0, +mr], tickmode: 'linear', tick0: 0, dtick: mr / 10, title: { text: 'Y (m)', font: { size: 10 }, standoff: 6 }, showticklabels: true, ticklabelposition: 'outside', ticklabeloverflow: 'allow', automargin: true, showline: true, linecolor: 'black', linewidth: 2, mirror: true, scaleanchor: 'x', scaleratio: 1 },
+            margin: { l: 48, r: 24, t: 20, b: 44 },
+            showlegend: false,
+          };
+          Plotly.react(div, traces, layout, { staticPlot: true, displayModeBar: false });
+        } else {
+          console.log('PC3D filtered lengths', { x: fx.length, y: fy.length, z: fz.length });
+          const traces = [];
+          if (haveIntensity && fx.length > 0) {
+            const bins = 6;
+            const bxDef = []; const byDef = []; const bzDef = [];
+            for (let b = 0; b < bins; b++) {
+              const b0 = vmin + (b / bins) * (vmax - vmin);
+              const b1 = vmin + ((b + 1) / bins) * (vmax - vmin) + 1e-9;
+              const bx = []; const by = []; const bz = [];
+              for (let i = 0; i < fx.length; i++) {
+                const iv = fint[i];
+                if (!Number.isFinite(iv)) { bxDef.push(fx[i]); byDef.push(fy[i]); bzDef.push(fz[i]); continue; }
+                if (iv >= b0 && iv < b1) { bx.push(fx[i]); by.push(fy[i]); bz.push(fz[i]); }
+              }
+              const t = (b + 0.5) / bins;
+              const g = Math.round((1 - (0.86 * t + 0.08)) * 255);
+              traces.push({ x: bx, y: by, z: bz, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: `rgb(${g},${g},${g})` }, hoverinfo: 'skip', showlegend: false });
+            }
+            if (bxDef.length) { traces.push({ x: bxDef, y: byDef, z: bzDef, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: 'rgb(160,160,160)' }, hoverinfo: 'skip', showlegend: false }); }
+          } else {
+            traces.push({ x: fx, y: fy, z: fz, mode: 'markers', type: 'scatter3d', marker: { size: 2, color: 'rgb(0,0,0)' }, hoverinfo: 'skip', showlegend: false });
+          }
+          // Dummy transparent anchors to force axes to appear even if no points
+          const anchor = {
+            x: [-mr, +mr], y: [0, 0], z: [0, 0], mode: 'markers', type: 'scatter3d',
+            marker: { size: 1, color: 'rgba(0,0,0,0)' }, hoverinfo: 'skip', showlegend: false
+          };
+          // Visible axis guide lines
+          const axisX = { x: [-mr, +mr], y: [0, 0], z: [0, 0], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
+          const axisY = { x: [0, 0], y: [0, +mr], z: [0, 0], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
+          const axisZ = { x: [0, 0], y: [0, 0], z: [-mr, +mr], mode: 'lines', type: 'scatter3d', line: { color: 'black', width: 3 }, hoverinfo: 'skip', showlegend: false };
+          // Capture current camera to preserve user interactions
+          let prevCam = null;
+          try { prevCam = (div && div._fullLayout && div._fullLayout.scene) ? div._fullLayout.scene.camera : null; } catch (e) { prevCam = null; }
+          const layout = {
+            paper_bgcolor: 'white',
+            scene: {
+              xaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'X (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              yaxis: { range: [0, +mr], tickmode: 'linear', tick0: 0, dtick: mr / 10, title: { text: 'Y (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              zaxis: { range: [-mr, +mr], tickmode: 'linear', tick0: -mr, dtick: (2 * mr) / 20, title: { text: 'Z (m)', font: { size: 10 } }, showticklabels: true, showline: true, linecolor: 'black' },
+              bgcolor: 'white',
+              aspectmode: 'manual',
+              aspectratio: { x: 2, y: 1, z: 1 },
+            },
+            margin: { l: 0, r: 0, t: 0, b: 0 },
+            showlegend: false,
+            uirevision: 'pc3d',
+            dragmode: 'orbit',
+          };
+          // Apply camera: reset if requested; else preserve previous; else set initial default
+          if (pc3dResetOnNext) {
+            layout.scene.camera = { eye: { x: -0.1, y: -1.0, z: 0.1 }, center: { x: 0, y: 0, z: 0 }, up: { x: -0.1, y: -1.0, z: 1 } };
+            pc3dResetOnNext = false;
+          } else if (prevCam) {
+            layout.scene.camera = prevCam;
+          } else if (!pc3dInitialized) {
+            layout.scene.camera = { eye: { x: -0.1, y: -1.0, z: 0.1 }, center: { x: 0, y: 0, z: 0 }, up: { x: -0.1, y: -1.0, z: 1 } };
+          }
+          Plotly.react(div, traces.concat([axisX, axisY, axisZ, anchor]), layout, { staticPlot: false, displayModeBar: false, scrollZoom: true });
+          pc3dInitialized = true;
+        }
+      } catch (e) { console.error(e); }
+    }
+    // Do not schedule until running becomes true (via SSE/status)
+    async function fetchProcesses() {
+      try {
+        const r = await fetch('/status/processes');
+        if (!r.ok) { renderProcesses([]); return; }
+        const j = await r.json();
+        renderProcesses(j.process_statuses || []);
+      } catch (e) { renderProcesses([]); }
+    }
+    function renderProcesses(list) {
+      const container = document.getElementById('proc_grid');
+      if (!container) return;
+      container.innerHTML = '';
+      const colorMap = {
+        'not_exists': 'white',
+        'unknown': 'white',
+        'dead': 'red',
+        'sleeping': 'yellow',
+        'running': 'green',
+      };
+      const expected = [
+        'WebServer', 'FusionEngine', 'RadarFeed', 'RadarAnalyser', 'CameraFeed', 'CameraAnalyser'
+      ];
+      const byLabel = {}; (list || []).forEach(p => { if (p && p.label) byLabel[p.label] = p; });
+      expected.forEach(name => {
+        const p = byLabel[name] || { label: name, status: 'not_exists', pid: null };
+        const div = document.createElement('div');
+        const color = colorMap[p.status] || 'white';
+        div.className = 'proc ' + color;
+        div.innerHTML = name + '<div class="meta">' + (p.status || 'not_exists') + (p.pid ? (' · pid ' + p.pid) : '') + '</div>';
+        container.appendChild(div);
+      });
+    }
+    function renderTimes(j) {
+      const el = document.getElementById('times');
+      if (!el) return;
+      const items = [];
+      if (j.uptime) items.push('uptime: ' + j.uptime);
+      if (j.start_time) items.push('started: ' + j.start_time);
+      if (typeof j.camera_fps_60s === 'number') items.push('camera FPS: ' + j.camera_fps_60s.toFixed(2));
+      if (typeof j.radar_fps_60s === 'number') items.push('radar FPS: ' + j.radar_fps_60s.toFixed(2));
+      el.textContent = items.join(' | ');
+      // Recording stats
+      try {
+        document.getElementById('rec_dir').textContent = j.recording_dir ? ('dir: ' + j.recording_dir) : 'dir: -';
+        document.getElementById('cam_total').textContent = j.camera_frames_total || 0;
+        document.getElementById('rad_total').textContent = j.radar_frames_total || 0;
+        document.getElementById('cam_fps').textContent = (j.camera_write_fps_5s || 0).toFixed(2);
+        document.getElementById('rad_fps').textContent = (j.radar_write_fps_5s || 0).toFixed(2);
+        const mb = (j.total_bytes_written || 0) / (1024 * 1024);
+        const mbs = (j.avg_bandwidth_5s_bps || 0) / (1024 * 1024);
+        document.getElementById('bytes_total').textContent = mb.toFixed(2);
+        document.getElementById('bw_bps').textContent = mbs.toFixed(2);
+        document.getElementById('rec_dur').textContent = j.recording_duration_hms || '00:00:00';
+      } catch (e) { }
+    }
+    // Init binds
+    function init() {
+      refreshStatus();
+      setupStatusSSE();
+      bindViewerControls();
+      bindReplayControls();
+      // Ensure processes grid updates even if SSE is delayed
+      procTimer = setInterval(fetchProcesses, 1000);
+      // Fetch initial tuning and populate minimal UI if present
+      try {
+        fetch('/tuning').then(r => r.json()).then(j => {
+          window._tuning = j || {};
+          try {
+            const cf1 = (j.cfar_2d && j.cfar_2d.az) || (j.cfar_3d && j.cfar_3d.doppler) || {};
+            const cf2 = (j.cfar_2d && j.cfar_2d.range) || (j.cfar_3d && j.cfar_3d.range) || {};
+            document.getElementById('cf1_lb').value = cf1.l_bound ?? '';
+            document.getElementById('cf1_g').value = cf1.guard_len ?? '';
+            document.getElementById('cf1_n').value = cf1.noise_len ?? '';
+            document.getElementById('cf2_lb').value = cf2.l_bound ?? '';
+            document.getElementById('cf2_g').value = cf2.guard_len ?? '';
+            document.getElementById('cf2_n').value = cf2.noise_len ?? '';
+            const s = (j.thresholds_3d && j.thresholds_3d.snr_table) || [[2, 5.5], [10, 2.5], [35, 10.0]];
+            const p = (j.thresholds_3d && j.thresholds_3d.peak_table) || [[4, 100], [1, 400], [500, 0]];
+            document.getElementById('snr_x0').value = s[0]?.[0] ?? ''; document.getElementById('snr_y0').value = s[0]?.[1] ?? '';
+            document.getElementById('snr_x1').value = s[1]?.[0] ?? ''; document.getElementById('snr_y1').value = s[1]?.[1] ?? '';
+            document.getElementById('snr_x2').value = s[2]?.[0] ?? ''; document.getElementById('snr_y2').value = s[2]?.[1] ?? '';
+            document.getElementById('pk_x0').value = p[0]?.[0] ?? ''; document.getElementById('pk_y0').value = p[0]?.[1] ?? '';
+            document.getElementById('pk_x1').value = p[1]?.[0] ?? ''; document.getElementById('pk_y1').value = p[1]?.[1] ?? '';
+            document.getElementById('pk_x2').value = p[2]?.[0] ?? ''; document.getElementById('pk_y2').value = p[2]?.[1] ?? '';
+          } catch (e) { }
+        });
+      } catch (e) { }
+      // Bind apply
+      const btn = document.getElementById('t_apply');
+      if (btn) {
+        function collectTuning() {
+          return {
+            cfar_2d: {
+              az: {
+                l_bound: parseFloat(document.getElementById('cf1_lb').value || '1.5'),
+                guard_len: parseInt(document.getElementById('cf1_g').value || '2'),
+                noise_len: parseInt(document.getElementById('cf1_n').value || '10'),
+              },
+              range: {
+                l_bound: parseFloat(document.getElementById('cf2_lb').value || '3.0'),
+                guard_len: parseInt(document.getElementById('cf2_g').value || '2'),
+                noise_len: parseInt(document.getElementById('cf2_n').value || '10'),
+              }
+            },
+            cfar_3d: {
+              doppler: {
+                l_bound: parseFloat(document.getElementById('cf1_lb').value || '1.5'),
+                guard_len: parseInt(document.getElementById('cf1_g').value || '4'),
+                noise_len: parseInt(document.getElementById('cf1_n').value || '16'),
+              },
+              range: {
+                l_bound: parseFloat(document.getElementById('cf2_lb').value || '2.5'),
+                guard_len: parseInt(document.getElementById('cf2_g').value || '4'),
+                noise_len: parseInt(document.getElementById('cf2_n').value || '16'),
+              }
+            },
+            thresholds_3d: {
+              snr_table: [
+                [parseFloat(document.getElementById('snr_x0').value || '2'), parseFloat(document.getElementById('snr_y0').value || '5.5')],
+                [parseFloat(document.getElementById('snr_x1').value || '10'), parseFloat(document.getElementById('snr_y1').value || '2.5')],
+                [parseFloat(document.getElementById('snr_x2').value || '35'), parseFloat(document.getElementById('snr_y2').value || '10.0')]
+              ],
+              peak_table: [
+                [parseFloat(document.getElementById('pk_x0').value || '4'), parseFloat(document.getElementById('pk_y0').value || '100')],
+                [parseFloat(document.getElementById('pk_x1').value || '1'), parseFloat(document.getElementById('pk_y1').value || '400')],
+                [parseFloat(document.getElementById('pk_x2').value || '500'), parseFloat(document.getElementById('pk_y2').value || '0')]
+              ]
+            }
+          };
+        }
+        async function sendTuning() {
+          const body = collectTuning();
+          try { await fetch('/tuning', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); } catch (e) { console.error(e); }
+        }
+        // expose for systemStart
+        window.__sendTuning = sendTuning;
+        btn.addEventListener('click', sendTuning);
+      }
+      // Disable 3D-only boxes if 2D profile detected in options
+      try {
+        const dis = (flag) => { document.getElementById('snr_box').disabled = flag; document.getElementById('peak_box').disabled = flag; };
+        const liveSel = document.getElementById('radar_cfg_sel');
+        if (liveSel) {
+          const optSel = liveSel.value || '';
+          dis(optSel.toLowerCase().includes('2d'));
+          liveSel.addEventListener('change', () => {
+            const val = liveSel.value || '';
+            dis(val.toLowerCase().includes('2d'));
+          });
+        }
+        const replayCfg = document.getElementById('replay_cfg');
+        if (replayCfg) {
+          const val0 = replayCfg.value || '';
+          if (val0) dis(val0.toLowerCase().includes('2d'));
+          replayCfg.addEventListener('change', () => {
+            const v = replayCfg.value || '';
+            dis(v.toLowerCase().includes('2d'));
+          });
+        }
+      } catch (e) { }
+    }
+    window.addEventListener('load', init);
+    // Mode toggle: live vs replay (bind after DOM is ready)
+    window.addEventListener('load', function () {
+      function setModeUI() {
+        const modeEl = document.querySelector('input[name="server_mode"]:checked');
+        const mode = modeEl ? modeEl.value : 'live';
+        const liveOnlyEls = document.querySelectorAll('.live-only');
+        const replayOnlyEls = document.querySelectorAll('.replay-only');
+        liveOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'live'));
+        // Treat 'full' like 'replay' for UI purposes
+        replayOnlyEls.forEach(el => el.classList.toggle('hidden', mode === 'live'));
+        // Prefill defaults when switching into replay/full mode
+        if ((mode === 'replay' || mode === 'full') && window.__defaults) {
+          try {
+            if (window.__defaults.default_replay_path) {
+              const rp = document.getElementById('replay_path');
+              if (rp && !rp.value) rp.value = window.__defaults.default_replay_path;
+            }
+            if (window.__defaults.default_replay_cfg) {
+              const rc = document.getElementById('replay_cfg');
+              if (rc && !rc.value) rc.value = window.__defaults.default_replay_cfg;
+            }
+          } catch (e) { }
+        }
+      }
+      document.querySelectorAll('input[name="server_mode"]').forEach(r => r.addEventListener('change', setModeUI));
+      setModeUI();
+    });
+  </script>
+  <script>
+    // Auto-apply on change (only when not running)
+    (function bindAutoApply() {
+      const sel = document.getElementById('radar_cfg_sel');
+      if (!sel) return;
+      async function apply(val) {
+        try {
+          if (isRunning) return; // guarded by disabled state too
+          const ro = document.getElementById('radar_only').checked ? '?radar_only=1' : '';
+          const sep = ro.includes('?') ? '&' : '?';
+          const url = '/system/start' + ro + sep + 'radar_cfg=' + encodeURIComponent(val || sel.value || '');
+          await fetch(url, { method: 'POST' });
+        } catch (e) { console.error(e); }
+      }
+      sel.addEventListener('change', () => apply(sel.value));
+    })();
+    // Disable config control while running
+    (function gateCfgByRunning() {
+      function setState(running) {
+        const sel = document.getElementById('radar_cfg_sel');
+        if (sel) sel.disabled = !!running;
+      }
+      setState(isRunning);
+      const _oldRenderTimes = window.renderTimes;
+      window.renderTimes = function (j) {
+        try { if (j && typeof j.running === 'boolean') setState(j.running); } catch (e) { }
+        if (typeof _oldRenderTimes === 'function') return _oldRenderTimes(j);
+      };
+    })();
+  </script>
+</head>
+
+<body>
+  <h2>Fusion Live Server</h2>
+  <div class="row">
+    <div class="col panel" style="flex:2;">
+      <h3>Controls</h3>
+      <div style="margin-bottom:6px;">
+        <label>Server Mode:</label>
+        <label><input type="radio" name="server_mode" value="live" checked> Live</label>
+        <label><input type="radio" name="server_mode" value="replay"> Replay</label>
+        <label><input type="radio" name="server_mode" value="full"> Full-Analysis</label>
+      </div>
+      <label><input type="checkbox" id="radar_only"> Radar only</label>
+      <div class="replay-only hidden" style="margin-top:6px;">
+        <fieldset style="display:inline-block; min-width:220px;">
+          <legend>Full Analysis Artefacts</legend>
+          <label style="display:block; margin-bottom:4px;"><input type="checkbox" id="af_tesseract" checked> Tesseract
+            (4D MUSIC)</label>
+          <label style="display:block; margin-bottom:4px;"><input type="checkbox" id="af_zyx_cube" checked> ZYX Cube
+            (Cartesian)</label>
+          <div class="meta">Effective only in Full-Analysis mode.</div>
+        </fieldset>
+      </div>
+      <div class="live-only">
+        <button onclick="systemStart()">Start System</button>
+        <button onclick="systemStop()">Stop System</button>
+        <button onclick="systemRetry()">Retry</button>
+        <button onclick="startRecord()">Start Recording</button>
+        <button onclick="stopRecord()">Stop Recording</button>
+      </div>
+      <div class="live-only" style="margin-top:8px;">
+        <label>Radar Config:</label>
+        <select id="radar_cfg_sel">
+          {% if radar_config_options %}
+          {% for o in radar_config_options %}
+          <option value="{{ o.path }}" {% if o.mode=='2D' and ('10m' in (o.label|lower)) %}selected{% endif %}>{{
+            o.label }}</option>
+          {% endfor %}
+          {% endif %}
+        </select>
+        <span class="meta">(only when not running)</span>
+      </div>
+      <div class="replay-only hidden" style="margin-top:8px;">
+        <h4>Replay Inputs</h4>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <div style="min-width:320px;">
+            <div class="meta">Recording directory</div>
+            <div style="display:flex; gap:6px;">
+              <input id="replay_path" style="flex:1;" placeholder="/home/user/recording_dir" />
+              <button
+                onclick="document.getElementById('picker_dir').classList.toggle('hidden'); listDir('picker_dir_list','');">Browse</button>
+            </div>
+            <div id="picker_dir" class="picker hidden">
+              <div class="picker-toolbar">
+                <button
+                  onclick="pickCurrent('picker_dir_list','replay_path'); document.getElementById('picker_dir').classList.add('hidden');">Use
+                  This</button>
+                <span class="meta">Tip: single-click to select, double-click to open</span>
+              </div>
+              <div id="picker_dir_list" class="list"></div>
+            </div>
+          </div>
+          <div style="min-width:320px;">
+            <div class="meta">Radar config file</div>
+            <div style="display:flex; gap:6px;">
+              <input id="replay_cfg" style="flex:1;" placeholder="/home/user/configs/AWR...txt" />
+              <button
+                onclick="document.getElementById('picker_cfg').classList.toggle('hidden'); listDir('picker_cfg_list','');">Browse</button>
+            </div>
+            <div id="picker_cfg" class="picker hidden">
+              <div class="picker-toolbar">
+                <button
+                  onclick="pickCurrent('picker_cfg_list','replay_cfg'); document.getElementById('picker_cfg').classList.add('hidden');">Use
+                  This</button>
+                <span class="meta">Tip: single-click to select, double-click to open</span>
+              </div>
+              <div id="picker_cfg_list" class="list"></div>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:8px;">
+          <h4>Playback</h4>
+          <button id="rp_play">Play</button>
+          <button id="rp_pause">Pause</button>
+          <button id="rp_stop">Stop</button>
+          <span class="gap"></span>
+          <label>Frame</label>
+          <input id="rp_seek" type="number" value="0" style="width:100px;" />
+          <button id="rp_seek_btn">Seek</button>
+          <span class="meta">/ <span id="rp_total" data-total="0">0</span></span>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:8px;">
+        <h4>Tuning</h4>
+        <div class="meta">CFAR#1 feeds first CFAR (2D: Azimuth, 3D: Doppler). CFAR#2 feeds second CFAR (2D: Range, 3D:
+          Range).</div>
+        <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:6px;">
+          <fieldset style="min-width:156px;">
+            <legend>CFAR #1</legend>
+            <div class="meta">l_bound</div>
+            <input id="cf1_lb" type="number" step="0.1" style="width:90px;">
+            <div class="meta">guard_len</div>
+            <input id="cf1_g" type="number" step="1" style="width:90px;">
+            <div class="meta">noise_len</div>
+            <input id="cf1_n" type="number" step="1" style="width:90px;">
+          </fieldset>
+          <fieldset style="min-width:156px;">
+            <legend>CFAR #2</legend>
+            <div class="meta">l_bound</div>
+            <input id="cf2_lb" type="number" step="0.1" style="width:90px;">
+            <div class="meta">guard_len</div>
+            <input id="cf2_g" type="number" step="1" style="width:90px;">
+            <div class="meta">noise_len</div>
+            <input id="cf2_n" type="number" step="1" style="width:90px;">
+          </fieldset>
+          <fieldset id="snr_box" style="min-width:208px;">
+            <legend>3D SNR thresholds table</legend>
+            <div class="meta">Row 1: x, y</div>
+            <input id="snr_x0" type="number" step="1" style="width:70px;">
+            <input id="snr_y0" type="number" step="0.1" style="width:70px;">
+            <div class="meta">Row 2: x, y</div>
+            <input id="snr_x1" type="number" step="1" style="width:70px;">
+            <input id="snr_y1" type="number" step="0.1" style="width:70px;">
+            <div class="meta">Row 3: x, y</div>
+            <input id="snr_x2" type="number" step="1" style="width:70px;">
+            <input id="snr_y2" type="number" step="0.1" style="width:70px;">
+          </fieldset>
+          <fieldset id="peak_box" style="min-width:208px;">
+            <legend>3D Peak thresholds table</legend>
+            <div class="meta">Row 1: x, y</div>
+            <input id="pk_x0" type="number" step="1" style="width:70px;">
+            <input id="pk_y0" type="number" step="1" style="width:70px;">
+            <div class="meta">Row 2: x, y</div>
+            <input id="pk_x1" type="number" step="1" style="width:70px;">
+            <input id="pk_y1" type="number" step="1" style="width:70px;">
+            <div class="meta">Row 3: x, y</div>
+            <input id="pk_x2" type="number" step="1" style="width:70px;">
+            <input id="pk_y2" type="number" step="1" style="width:70px;">
+          </fieldset>
+        </div>
+        <div style="margin-top:8px;"><button id="t_apply">Apply</button></div>
+      </div>
+    </div>
+    <div class="col panel" style="flex:1;">
+      <h3>Recording Stats</h3>
+      <div id="rec_dir" class="meta"></div>
+      <div class="meta">Camera frames: <span id="cam_total">0</span> | write FPS(5s): <span id="cam_fps">0.00</span>
+      </div>
+      <div class="meta">Radar frames: <span id="rad_total">0</span> | write FPS(5s): <span id="rad_fps">0.00</span>
+      </div>
+      <div class="meta">Total data: <span id="bytes_total">0.00</span> MB | Duration: <span id="rec_dur">00:00:00</span>
+      </div>
+      <div class="meta">Avg bandwidth(5s): <span id="bw_bps">0.00</span> MB/s</div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col panel">
+      <h3>Processes</h3>
+      <div id="proc_grid" class="proc-grid"></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col panel">
+      <h3>Video</h3>
+      <div>
+        <label>Mode: </label>
+        <label><input type="radio" name="video_mode" value="live" checked> Live</label>
+        <label>FPS:</label>
+        <select id="video_fps">
+          <option selected>1</option>
+          <option>3</option>
+          <option>5</option>
+          <option>10</option>
+          <option>15</option>
+          <option>30</option>
+        </select>
+        <span class="gap"></span>
+        <label><input type="radio" name="video_mode" value="manual"> Manual</label>
+        <button id="video_next">Next frame</button>
+      </div>
+      <img id="video_view" alt="Video" />
+    </div>
+    <div class="col panel">
+      <h3>Radar</h3>
+      <div>
+        <label>Mode: </label>
+        <button data-rmode="rd">RD</button>
+        <button data-rmode="ra">RA</button>
+        <button data-rmode="pc2d">PC-2D</button>
+        <button data-rmode="pc3d">PC-3D</button>
+        <label><input type="radio" name="radar_mode" value="live" checked> Live</label>
+        <label>FPS:</label>
+        <select id="radar_fps">
+          <option selected>1</option>
+          <option>2</option>
+          <option>5</option>
+          <option>10</option>
+        </select>
+        <span class="gap"></span>
+        <label><input type="radio" name="radar_mode" value="manual"> Manual</label>
+        <button id="radar_next">Next frame</button>
+      </div>
+      <div style="margin:8px 0;">
+
+      </div>
+      <img id="radar_view" alt="Radar" />
+      <div id="radar_plot" style="width:640px;height:480px;display:none;"></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col panel">
+      <h3>Status</h3>
+      <div id="times" class="meta"></div>
+      <pre id="status">{}</pre>
+    </div>
+  </div>
+</body>
+
+</html>

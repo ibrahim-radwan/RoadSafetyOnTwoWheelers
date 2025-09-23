@@ -15,6 +15,22 @@ import threading
 import queue
 import logging
 
+from mmwave import dsp
+
+# Ensure Qt platform and GL settings are compatible on embedded/Linux (e.g., Jetson)
+if os.name != "nt":
+    os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("QT_DEBUG_PLUGINS", "0")
+    # Prevent Qt xcb plugin from attempting GLX/EGL integrations on systems without them
+    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+    # Silence XInput2 warnings on Jetson/Xorg configurations lacking XI2
+    os.environ.setdefault("QT_XCB_NO_XI2", "1")
+
+# Suppress ttyACM warnings in replay mode (no serial ports needed)
+os.environ.setdefault("FUSION_SUPPRESS_TTYACM_WARNING", "1")
+
 from PyQt5.QtWidgets import QApplication
 
 from engine.fusion_factory import FusionFactory
@@ -198,9 +214,6 @@ class ReplayFusionApp:
                         try:
                             while True:
                                 camera_result = self.camera_results_queue.get_nowait()
-                                self.logger.debug(
-                                    f"GUI received camera result for frame: {getattr(getattr(camera_result, 'frame', None), 'timestamp', 'N/A')}, type={type(camera_result)}, frame type={type(getattr(camera_result, 'frame', None))}"
-                                )
                                 self._current_camera_data = camera_result
                         except queue.Empty:
                             pass
@@ -255,9 +268,6 @@ class ReplayFusionApp:
             data_thread.start()
             timeline_thread.start()
 
-            # Note: Playback will be controlled by GUI buttons
-            # Initial state is stopped - user must press play to start
-
             # Run GUI event loop
             try:
                 app.exec_()
@@ -269,12 +279,20 @@ class ReplayFusionApp:
             self.stop_event.set()
 
         finally:
-            # Clean shutdown
+            # Clean shutdown with extended grace period before force
             print("Shutting down...")
-            fusion_process.join(timeout=5)
-
+            total_wait = 0
+            while fusion_process.is_alive() and total_wait < 20:
+                fusion_process.join(timeout=2)
+                total_wait += 2
             if fusion_process.is_alive():
+                print("Fusion process still alive, terminating...")
                 fusion_process.terminate()
+                fusion_process.join(timeout=5)
+            if fusion_process.is_alive():
+                print("Fusion process did not terminate, killing...")
+                fusion_process.kill()
+                fusion_process.join()
 
             # Clean up manager
             self.manager.shutdown()
@@ -282,7 +300,7 @@ class ReplayFusionApp:
             print("Shutdown complete.")
 
     def run_replay_radar_only(self, use_3d: bool = False):
-        """Run replay radar-only mode with GUI"""
+        """Run replay radar-only mode with GUI (no camera)."""
         print(f"Starting Replay Radar-Only Mode from: {self.recording_dir}")
 
         # Initialize ADC parameters
@@ -301,7 +319,7 @@ class ReplayFusionApp:
             target=fusion_engine.run,
             args=(
                 self.radar_results_queue,
-                None,  # No camera results queue
+                None,  # No camera results queue in radar-only mode
                 self.stop_event,
                 self.control_queue,
                 self.status_queue,
@@ -350,7 +368,7 @@ class ReplayFusionApp:
 
             # Start data processing thread
             def data_processor():
-                """Process data from queues and update visualizer"""
+                """Process radar results and update visualizer"""
                 try:
                     while not self.stop_event.is_set():
                         # Process status updates
@@ -369,7 +387,7 @@ class ReplayFusionApp:
                         except queue.Empty:
                             pass
 
-                        time.sleep(0.01)  # Small sleep to prevent busy waiting
+                        time.sleep(0.01)
 
                 except Exception as e:
                     print(f"Error in data processor: {e}")
@@ -378,9 +396,6 @@ class ReplayFusionApp:
             # Start data processing thread
             data_thread = threading.Thread(target=data_processor, daemon=True)
             data_thread.start()
-
-            # Don't auto-start - let user control playback
-            # self.control_queue.put("play")
 
             # Run GUI event loop
             try:
@@ -393,12 +408,20 @@ class ReplayFusionApp:
             self.stop_event.set()
 
         finally:
-            # Clean shutdown
+            # Clean shutdown with extended grace period before force
             print("Shutting down...")
-            fusion_process.join(timeout=5)
-
+            total_wait = 0
+            while fusion_process.is_alive() and total_wait < 20:
+                fusion_process.join(timeout=2)
+                total_wait += 2
             if fusion_process.is_alive():
+                print("Fusion process still alive, terminating...")
                 fusion_process.terminate()
+                fusion_process.join(timeout=5)
+            if fusion_process.is_alive():
+                print("Fusion process did not terminate, killing...")
+                fusion_process.kill()
+                fusion_process.join()
 
             # Clean up manager
             self.manager.shutdown()
@@ -413,6 +436,8 @@ def main():
     )
     parser.add_argument(
         "--file-path",
+        "--file",
+        dest="file_path",
         type=str,
         required=True,
         help="Path to recorded radar data directory",
@@ -447,7 +472,11 @@ def main():
         sys.exit(1)
 
     try:
+        # Use spawn start method to avoid inheriting background threads that can block shutdown
+        multiprocessing.set_start_method("spawn", force=True)
         app = ReplayFusionApp(args.file_path, args.config_file)
+
+        dsp.precompile_kernels()
 
         if args.radar_only:
             app.run_replay_radar_only(args.use_3d)

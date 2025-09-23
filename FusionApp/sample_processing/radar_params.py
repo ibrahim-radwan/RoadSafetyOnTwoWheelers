@@ -73,7 +73,7 @@ class ADCParams:
             f"Max Doppler: {self.max_doppler:.2f} m/s"
         )
 
-        self.max_azimuth = 60  # degrees, typical for radar systems
+        self.max_azimuth = 90  # degrees per requirement
 
         # Pre-calculated extents for imshow/plotting
         self.range_doppler_extents = [

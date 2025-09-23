@@ -7,6 +7,7 @@ import glob
 from typing import Optional, List, Tuple
 import threading
 import multiprocessing
+import os
 import numpy as np
 import cv2
 from enum import Enum
@@ -55,6 +56,8 @@ class PNGCamera(CameraFeed):
         self._last_frame_time = 0.0
         self.logger = None
         self._fps_divisor = 1
+        # Full-analysis pacing helper: remember last radar window sequence we emitted a frame for
+        self._last_sent_radar_seq: int = -1
 
     def _load_frame_files(self):
         """Load all PNG files from the recording directory"""
@@ -128,7 +131,7 @@ class PNGCamera(CameraFeed):
         self,
         stream_queue: multiprocessing.Queue,
         stop_event,
-        _: Optional[multiprocessing.Queue] = None,
+        control_queue: Optional[multiprocessing.Queue] = None,
     ):
         """Main playback loop for recorded camera frames with synchronized timing"""
 
@@ -156,6 +159,7 @@ class PNGCamera(CameraFeed):
         self._last_frame_time = time.perf_counter()
         frame_count = 0
         last_timeline_position = 0.0  # Track timeline position for seeking detection
+        last_sync_playback_state = None
 
         # DEBUG: Log initial state
         self.logger.debug(
@@ -164,12 +168,47 @@ class PNGCamera(CameraFeed):
 
         while not stop_event.is_set():
             try:
+                # Handle external control commands if provided
+                if control_queue is not None:
+                    try:
+                        cmd = control_queue.get_nowait()
+                        if isinstance(cmd, dict) and cmd.get("STOP"):
+                            self.logger.info("Received STOP sentinel; exiting")
+                            break
+                        if isinstance(cmd, str):
+                            # In synchronized mode, GUI updates SyncState; ignore here.
+                            # In legacy mode, handle basic controls locally.
+                            if not use_sync:
+                                if cmd == "play":
+                                    self._playback_state = PlaybackState.PLAYING
+                                    self._last_frame_time = time.perf_counter()
+                                elif cmd == "pause":
+                                    self._playback_state = PlaybackState.PAUSED
+                                elif cmd == "stop":
+                                    self._playback_state = PlaybackState.STOPPED
+                                    self._current_frame_index = 0
+                                elif cmd.startswith("seek:"):
+                                    try:
+                                        frame_index = int(cmd.split(":")[1])
+                                        if 0 <= frame_index < len(self._frame_files):
+                                            self._current_frame_index = frame_index
+                                    except Exception:
+                                        pass
+                    except queue.Empty:
+                        pass
                 # Check synchronized playback state if available
                 if use_sync:
                     sync_playback_state = SyncStateUtils.get_playback_state(
                         self._sync_state
                     )
+                    # Reset index when transitioning to STOPPED so restart begins at frame 0
+                    if (
+                        sync_playback_state == SyncPlaybackState.STOPPED
+                        and last_sync_playback_state != SyncPlaybackState.STOPPED
+                    ):
+                        self._current_frame_index = 0
                     is_playing = sync_playback_state == SyncPlaybackState.PLAYING
+                    last_sync_playback_state = sync_playback_state
                 else:
                     is_playing = self._playback_state == PlaybackState.PLAYING
 
@@ -178,10 +217,12 @@ class PNGCamera(CameraFeed):
                     current_timeline = SyncStateUtils.get_current_timeline_position(
                         self._sync_state
                     )
-                    # Detect seeking (timeline position jumped significantly) or reset to beginning
+                    # Detect seeking or timeline reset (backward move, large jump, or reset)
                     timeline_diff = abs(current_timeline - last_timeline_position)
-                    if timeline_diff > 1.0 or (
-                        current_timeline == 0.0 and last_timeline_position > 1.0
+                    if (
+                        current_timeline < last_timeline_position - 0.05
+                        or timeline_diff > 0.5
+                        or current_timeline == 0.0
                     ):
                         # Timeline jumped or reset - find the correct frame to seek to
                         start_timestamp = SyncStateUtils.get_start_timestamp(
@@ -199,7 +240,7 @@ class PNGCamera(CameraFeed):
                                 best_index = i
 
                         self._current_frame_index = best_index
-                        self.logger.info(
+                        self.logger.debug(
                             f"Seeked to frame {best_index} (timestamp: {target_timestamp:.3f}s, timeline: {current_timeline:.3f}s)"
                         )
 
@@ -230,18 +271,28 @@ class PNGCamera(CameraFeed):
                     send_frame = False
 
                     if use_sync:
-                        # Synchronized timing mode
-                        start_timestamp = SyncStateUtils.get_start_timestamp(
-                            self._sync_state
-                        )
-                        relative_frame_time = frame_timestamp - start_timestamp
-
-                        # Check if it's time to send this frame (or past time)
-                        current_timeline = SyncStateUtils.get_current_timeline_position(
-                            self._sync_state
-                        )
-                        if current_timeline >= relative_frame_time:
+                        # In full-analysis mode, don't throttle by timeline; gating below will enforce correctness
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
                             send_frame = True
+                        else:
+                            # Synchronized timing mode (real-time replay)
+                            start_timestamp = SyncStateUtils.get_start_timestamp(
+                                self._sync_state
+                            )
+                            relative_frame_time = frame_timestamp - start_timestamp
+
+                            # Check if it's time to send this frame (or past time)
+                            current_timeline = (
+                                SyncStateUtils.get_current_timeline_position(
+                                    self._sync_state
+                                )
+                            )
+                            if current_timeline >= relative_frame_time:
+                                send_frame = True
                     else:
                         # Legacy frame rate-based timing mode
                         current_time = time.perf_counter()
@@ -249,12 +300,71 @@ class PNGCamera(CameraFeed):
                         if time_since_last_frame >= (1.0 / self._frame_rate):
                             send_frame = True
 
+                    # In full-analysis synchronized mode, enforce radar-driven window gating
+                    if use_sync and os.environ.get("FULL_ANALYSIS", "0") in (
+                        "1",
+                        "true",
+                        "True",
+                    ):
+                        # In full-analysis sync mode, emit at most ONE camera frame per radar window sequence.
+                        try:
+                            start_ts, end_ts, _, win_seq = (
+                                SyncStateUtils.get_radar_window(self._sync_state)
+                            )
+                            window_valid = end_ts > start_ts
+                            # Only proceed on a new radar window
+                            if win_seq == self._last_sent_radar_seq:
+                                send_frame = False
+                            else:
+                                if window_valid:
+                                    # Seek camera index to closest frame >= start_ts
+                                    while (
+                                        self._current_frame_index
+                                        < len(self._frame_files)
+                                        and self._frame_files[
+                                            self._current_frame_index
+                                        ][1]
+                                        < start_ts - 1e-9
+                                    ):
+                                        self._advance_frame()
+                                    if self._current_frame_index >= len(
+                                        self._frame_files
+                                    ):
+                                        send_frame = False
+                                    else:
+                                        frame_timestamp = self._frame_files[
+                                            self._current_frame_index
+                                        ][1]
+                                        # If frame is beyond window end, wait for next radar window update
+                                        if frame_timestamp >= end_ts - 1e-9:
+                                            # Wait for new window sequence (up to short timeout)
+                                            new_seq = (
+                                                SyncStateUtils.wait_for_window_update(
+                                                    self._sync_state,
+                                                    win_seq,
+                                                    timeout=0.2,
+                                                )
+                                            )
+                                            if new_seq is None:
+                                                # No update yet; retry later
+                                                send_frame = False
+                                            else:
+                                                send_frame = False  # Loop again will handle new seq
+                                        # Else frame within window; we'll send exactly once
+                                else:
+                                    # No valid window yet; don't send
+                                    send_frame = False
+                            # After sending (below), we'll update _last_sent_radar_seq
+                        except Exception:
+                            send_frame = False
+
                     if send_frame:
                         # Read current frame
                         frame = self._read_current_frame()
                         if frame is not None:
                             try:
-                                stream_queue.put(frame)
+                                # Avoid blocking during shutdown if consumer stops
+                                stream_queue.put_nowait(frame)
                                 self.logger.debug(
                                     f"Sent frame {frame_count} to analyzer: {frame.timestamp}"
                                 )
@@ -268,15 +378,31 @@ class PNGCamera(CameraFeed):
                                 else:
                                     self._last_frame_time = time.perf_counter()
 
-                                # Log every 30 frames to avoid spam
+                                # In full-analysis sync mode mark last window sequence used
+                                if use_sync and os.environ.get(
+                                    "FULL_ANALYSIS", "0"
+                                ) in ("1", "true", "True"):
+                                    try:
+                                        self._last_sent_radar_seq = (
+                                            SyncStateUtils.get_radar_window(
+                                                self._sync_state
+                                            )[3]
+                                        )
+                                    except Exception:
+                                        pass
+
+                                # Log every 30 frames to avoid spam (legacy high-rate mode)
                                 if frame_count % 30 == 0:
                                     self.logger.debug(
                                         f"Sent {frame_count} frames to analyzer"
                                     )
 
                             except Exception as e:
-                                self.logger.error(f"Error sending frame: {e}")
-                                break
+                                # Queue full or closed; skip frame to allow clean shutdown
+                                self.logger.warning(
+                                    f"Could not send frame (queue busy/closed): {e}"
+                                )
+                                time.sleep(0.001)
 
                         # Advance to next frame
                         self._advance_frame()
@@ -292,7 +418,17 @@ class PNGCamera(CameraFeed):
                 self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()
 
+        # Ensure the multiprocessing queue feeder thread in this process exits
+        try:
+            if stream_queue is not None:
+                stream_queue.close()
+                stream_queue.join_thread()
+        except Exception:
+            pass
+
         self.logger.info(f"Playback stopped. Sent total {frame_count} frames")
+
+        return
 
     def get_current_frame_info(self) -> Optional[Tuple[int, float, str]]:
         """Get information about the current frame"""
