@@ -555,6 +555,7 @@ void DCA1000Recording::senderThreadFunction(
                 {
                     auto frame = readFrameFromFile(frame_info);
                     stream_queue.push(frame);
+                    std::cout << "[RecordingFeed] Pushed frame " << frame_info.frame_number << " (idx=" << current_index << ")" << std::endl;
 
                     // Update tracking
                     if (use_sync)
@@ -576,6 +577,7 @@ void DCA1000Recording::senderThreadFunction(
                 {
                     // Skip this frame and continue
                     _current_frame_index.store(current_index + 1);
+                    std::cout << "[RecordingFeed] Error reading frame " << frame_info.frame_number << ": " << e.what() << std::endl;
                     continue;
                 }
             }

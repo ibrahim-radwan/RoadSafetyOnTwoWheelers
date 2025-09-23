@@ -80,7 +80,7 @@ size_t RadarFrame::getExpectedDataSize() const
         return 0;
     }
 
-    return _chirps * _tx_antennas * _rx_antennas * _samples;
+    return _chirps * _tx_antennas * _rx_antennas * _samples * 2;  // 2 for I/Q
 }
 
 std::string RadarFrame::toString() const
