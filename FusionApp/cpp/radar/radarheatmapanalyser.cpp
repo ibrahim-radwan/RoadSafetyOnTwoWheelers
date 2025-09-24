@@ -1,10 +1,14 @@
 #include "radarheatmapanalyser.hpp"
+#include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <thread>
 #include "config.hpp"
+#include "dsp/doppler_processing.hpp"
+#include "dsp/range_processing.hpp"
+#include "dsp/utils.hpp"
 #include "exceptions.hpp"
 
 namespace radar
@@ -92,8 +96,8 @@ AnalysisResult RadarHeatmapAnalyser::analyseFrame(
     // Preprocess frame to complex format
     af::array complex_frame = preprocessFrameFromRawData(frame->getRawData());
 
-    // Process frame (stub implementation)
-    AnalysisResult result = processFrameStub(complex_frame);
+    // Stage-1 MUSIC 2D processing (range & doppler FFT only)
+    AnalysisResult result = processFrameMusic2DStage1(complex_frame);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -128,17 +132,25 @@ void RadarHeatmapAnalyser::run(
 
     std::cout << "RadarHeatmapAnalyser processing thread started" << std::endl;
 
-    while (!stop_flag.load()) {
-        try {
+    while (!stop_flag.load())
+    {
+        try
+        {
             std::shared_ptr<RadarFrame> frame_ptr;
-            if (input_queue.waitAndPop(frame_ptr, std::chrono::milliseconds(100))) {
-                std::cout << "[RadarHeatmapAnalyser] Received frame " << frame_ptr->getFrameNumber() << std::endl;
+            if (input_queue.waitAndPop(frame_ptr,
+                                       std::chrono::milliseconds(100)))
+            {
+                std::cout << "[RadarHeatmapAnalyser] Received frame "
+                          << frame_ptr->getFrameNumber() << std::endl;
                 AnalysisResult result = analyseFrame(frame_ptr);
                 output_queue.push(std::move(result));
             }
-        } catch (const std::exception& e) {
-            std::cerr << "Error in RadarHeatmapAnalyser processing (shared_ptr): "
-                      << e.what() << std::endl;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr
+                << "Error in RadarHeatmapAnalyser processing (shared_ptr): "
+                << e.what() << std::endl;
         }
     }
 
@@ -185,57 +197,69 @@ af::array RadarHeatmapAnalyser::preprocessFrameFromRawData(
         throw RadarException(oss.str());
     }
 
-    // Step 1: Load raw data into an ArrayFire array.
-    // We collapse (chirps, tx) into the leading dimension to keep these two
-    // outer loops together: dims = (tx*chirps, samples, iq, rx)
-    // NOTE: Because the fastest varying index in raw data is rx, an alternate
-    // layout (rx, iq, samples, tx*chirps) could match memory locality better;
-    // this layout was chosen for clarity and then corrected via reorder.
-    const dim_t tx_chirps = static_cast<dim_t>(chirps * tx);
-    af::array raw_int16_af(tx_chirps, (dim_t)samples, (dim_t)iq, (dim_t)rx,
-                           raw_data.data());
-    // raw_int16_af shape: (tx*chirps, samples, iq, rx)
-
-    // Step 2: Reorder to bring rx next to (tx*chirps) and put iq last so we can
-    // slice it. After reorder(0,3,1,2): (tx*chirps, rx, samples, iq)
-    af::array reordered = af::reorder(raw_int16_af, 0, 3, 1, 2);
-
-    // Step 3: Slice I and Q (last dimension indices 0 and 1) -> each
-    // (tx*chirps, rx, samples)
-    af::array I_int16 = reordered(af::span, af::span, af::span, 0);
-    af::array Q_int16 = reordered(af::span, af::span, af::span, 1);
-
-    // Step 4: Cast to float32 for complex construction
-    af::array I_f32 = I_int16.as(f32);
-    af::array Q_f32 = Q_int16.as(f32);
-
-    // Step 5: Form complex values: I + j*Q (matches Python 1j*Q + I)
-    // complex_iq shape: (tx*chirps, rx, samples) with type c32
-    af::array complex_iq = af::complex(I_f32, Q_f32);
-
-    // Assertion: verify intermediate shape is (tx*chirps, rx, samples)
+    // Python index calculation: chirp*tx*samples*IQ*rx + tx*samples*IQ*rx +
+    // sample*IQ*rx + IQ*rx + rx
+    auto py_idx = [&](int c, int t, int s, int iq, int r) -> size_t
     {
-        af::dim4 d = complex_iq.dims();
-        if (d[0] != tx_chirps || d[1] != (dim_t)rx || d[2] != (dim_t)samples ||
-            d[3] != 1)
+        return c * (tx * samples * 2 * rx) + t * (samples * 2 * rx) +
+               s * (2 * rx) + iq * rx + r;
+    };
+
+    // Step 1: Create arrays manually to match Python's exact indexing
+    // We need to extract I and Q values using the same indexing as Python
+
+    // Pre-allocate I and Q arrays with final target shape: (chirps, tx, rx,
+    // samples)
+    std::vector<int16_t> I_data(chirps * tx * rx * samples);
+    std::vector<int16_t> Q_data(chirps * tx * rx * samples);
+
+    // Extract I and Q values using Python's exact indexing logic
+    for (int c = 0; c < chirps; c++)
+    {
+        for (int t = 0; t < tx; t++)
         {
-            std::ostringstream oss;
-            oss << "complex_iq shape mismatch: got (" << d[0] << "," << d[1]
-                << "," << d[2] << "," << d[3] << "), expected (" << tx_chirps
-                << "," << rx << "," << samples << ",1)";
-            throw RadarException(oss.str());
+            for (int r = 0; r < rx; r++)
+            {
+                for (int s = 0; s < samples; s++)
+                {
+                    // Python index: c*tx*samples*IQ*rx + t*samples*IQ*rx +
+                    // s*IQ*rx + iq*rx + r
+                    size_t py_i_idx =
+                        py_idx(c, t, s, 0, r);  // I channel (iq=0)
+                    size_t py_q_idx =
+                        py_idx(c, t, s, 1, r);  // Q channel (iq=1)
+
+                    // Target index in our I/Q arrays: c*tx*rx*samples +
+                    // t*rx*samples + r*samples + s
+                    size_t target_idx = c * (tx * rx * samples) +
+                                        t * (rx * samples) + r * samples + s;
+
+                    I_data[target_idx] = raw_data[py_i_idx];
+                    Q_data[target_idx] = raw_data[py_q_idx];
+                }
+            }
         }
     }
 
-    // Step 6: Reshape (moddims) to separate chirps and tx: target (chirps, tx,
-    // rx, samples)
-    af::array reshaped = af::moddims(complex_iq, (dim_t)chirps, (dim_t)tx,
-                                     (dim_t)rx, (dim_t)samples);
-    // reshaped shape: (chirps, tx, rx, samples)
+    // Create ArrayFire arrays with correct shape: (samples, rx, tx, chirps)
+    // Note: ArrayFire uses column-major ordering, so we reverse the dimensions
+    af::array I_int16(samples, rx, tx, chirps, I_data.data());
+    af::array Q_int16(samples, rx, tx, chirps, Q_data.data());
+
+    // Convert to float32
+    af::array I_f32 = I_int16.as(f32);
+    af::array Q_f32 = Q_int16.as(f32);
+
+    // Create complex array
+    af::array complex_temp = af::complex(I_f32, Q_f32);
+
+    // Reorder from (samples, rx, tx, chirps) to (chirps, tx, rx, samples) to
+    // match Python
+    af::array complex_iq = af::reorder(complex_temp, 3, 2, 1, 0);
 
     // Final assertion to ensure output shape matches Python expectation
     {
-        af::dim4 d = reshaped.dims();
+        af::dim4 d = complex_iq.dims();
         if (d[0] != (dim_t)chirps || d[1] != (dim_t)tx || d[2] != (dim_t)rx ||
             d[3] != (dim_t)samples)
         {
@@ -248,51 +272,141 @@ af::array RadarHeatmapAnalyser::preprocessFrameFromRawData(
     }
 
     // Ensure complex32 type
-    if (reshaped.type() != c32)
+    if (complex_iq.type() != c32)
     {
-        reshaped = reshaped.as(c32);
+        complex_iq = complex_iq.as(c32);
     }
 
-    auto t_end = std::chrono::high_resolution_clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
-    std::cout << "[RadarHeatmapAnalyser][Preprocess] " << us << " us" << std::endl;
-    return reshaped;
+    auto preproc_end = std::chrono::high_resolution_clock::now();
+    auto preproc_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          preproc_end - t_start)
+                          .count();
+    std::cout << "[Profile] Preprocessing: " << preproc_us << " us"
+              << std::endl;
+
+    return complex_iq;
 }
 
-AnalysisResult RadarHeatmapAnalyser::processFrameStub(
-    const af::array& complex_frame)
+AnalysisResult RadarHeatmapAnalyser::processFrameMusic2DStage1(
+    const af::array& complex_frame, int az_min, int az_max, int el_min,
+    int el_max, int fine_az_step, int fine_el_step, int doppler_halfspan,
+    int coarse_az_step, int coarse_el_step, int fine_half_win_az,
+    int fine_half_win_el, float music_diag_load, bool compute_tesseract)
 {
-    // Stub implementation that returns correctly structured empty results
-    // This is where the actual openradar_pd_process_frame logic would go
+    (void)az_min;
+    (void)az_max;
+    (void)el_min;
+    (void)el_max;
+    (void)fine_az_step;
+    (void)fine_el_step;
+    (void)doppler_halfspan;
+    (void)coarse_az_step;
+    (void)coarse_el_step;
+    (void)fine_half_win_az;
+    (void)fine_half_win_el;
+    (void)music_diag_load;
+    (void)compute_tesseract;  // Unused in stage 1
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+    auto t0 = std::chrono::high_resolution_clock::now();
+    if (!adc_params_)
+        throw RadarException("ADC params not set");
+    // Expect complex_frame dims: (chirps, tx, rx, samples)
+    af::dim4 d = complex_frame.dims();
+    if ((size_t)d[0] != (size_t)adc_params_->chirps ||
+        (size_t)d[1] != (size_t)adc_params_->tx ||
+        (size_t)d[2] != (size_t)adc_params_->rx ||
+        (size_t)d[3] != (size_t)adc_params_->samples)
+    {
+        std::ostringstream oss;
+        oss << "processFrameMusic2DStage1: unexpected frame shape (" << d[0]
+            << "," << d[1] << "," << d[2] << "," << d[3] << ") expected ("
+            << adc_params_->chirps << "," << adc_params_->tx << ","
+            << adc_params_->rx << "," << adc_params_->samples << ")";
+        throw RadarException(oss.str());
+    }
 
-    // Create default result with correct dimensions
+    // 1) Range processing (window + FFT over samples) producing radar cube
+    // (chirps, vrx, samples)
+    bool disable_window = false;  // Use windowing to match Python
+    auto win_sel = disable_window ? dsp::Window::NONE : dsp::Window::HAMMING;
+
+    auto range_start = std::chrono::high_resolution_clock::now();
+    af::array radar_cube = dsp::range_processing(
+        complex_frame, adc_params_->chirps, adc_params_->tx, adc_params_->rx,
+        adc_params_->samples, win_sel);
+    auto range_end = std::chrono::high_resolution_clock::now();
+    auto range_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        range_end - range_start)
+                        .count();
+    std::cout << "[Profile] Range processing: " << range_us << " us"
+              << std::endl;
+
+    // 2) Doppler processing (window + FFT over chirps)
+    auto doppler_start = std::chrono::high_resolution_clock::now();
+    af::array doppler_fft_result = dsp::doppler_processing(
+        radar_cube, adc_params_->chirps, adc_params_->tx * adc_params_->rx,
+        adc_params_->samples, win_sel);
+    auto doppler_end = std::chrono::high_resolution_clock::now();
+    auto doppler_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          doppler_end - doppler_start)
+                          .count();
+    std::cout << "[Profile] Doppler processing: " << doppler_us << " us"
+              << std::endl;
+
+    // Convert doppler_fft_result -> det_matrix (range,doppler) like Python:
+    // log(abs(FFT)) accumulation over vrx.
+    auto make_range_doppler = [&](const af::array& doppler_cube) -> af::array
+    {
+        // doppler_cube: (chirps, vrx, samples)
+        // Reorder to (range, vrx, doppler) to mirror Python interleaved=False
+        af::array reordered =
+            af::reorder(doppler_cube, 2, 1, 0);  // (range, vrx, doppler)
+        // Magnitude then log2 like python (fft2d_log_abs = log2(|fft2d_out|))
+        af::array mag = af::abs(reordered);
+        // Avoid log(0): add tiny epsilon
+        af::array log_mag = af::log2(mag + 1e-12f);
+        // Accumulate over vrx (axis=1) -> (range, 1, doppler)
+        af::array det = af::sum(log_mag, 1);
+        // Squeeze to exactly 2D (range, doppler) with singleton dimensions = 1
+        det = af::moddims(det, det.dims(0), det.dims(2), 1, 1);
+        return det;
+    };
+
+    auto rd_start = std::chrono::high_resolution_clock::now();
+    af::array det_matrix = make_range_doppler(doppler_fft_result);
+
+    // fftshift along Doppler axis for RD (axis=1 when det_matrix is (range,
+    // doppler))
+    af::array det_matrix_shifted = dsp::fftshift_dim(det_matrix, 1);
+    auto rd_end = std::chrono::high_resolution_clock::now();
+    auto rd_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(rd_end - rd_start)
+            .count();
+    std::cout << "[Profile] Range-Doppler matrix: " << rd_us << " us"
+              << std::endl;
+
+    // For future AoA input parity with Python, also compute a shifted Doppler
+    // cube by first reordering to (range, vrx, doppler) then shifting along
+    // doppler (axis=2).
+    af::array doppler_fft_shifted =
+        dsp::fftshift_dim(af::reorder(doppler_fft_result, 2, 1, 0), 2);
+    (void)doppler_fft_shifted;  // reserved for future aoa_input
+
+    // Populate AnalysisResult
     AnalysisResult result = createDefaultResult(0.0, 0, 0.0);
-
-    // Set correct dimensions based on ADC parameters
     result.range_bins = adc_params_->samples;
     result.doppler_bins = adc_params_->chirps;
     result.azimuth_bins = angle_bins_;
 
-    // Create empty heatmaps with correct dimensions
-    // Range-Doppler heatmap: range_bins x doppler_bins (set to None/empty for
-    // openradar method)
-    result.range_doppler
-        .clear();  // OpenRadar method doesn't compute range-doppler
+    // Store as ArrayFire array only
+    result.range_doppler = det_matrix_shifted;  // (range, doppler)
 
-    // Range-Azimuth heatmap: angle_bins x range_bins
-    result.range_azimuth.resize(angle_bins_,
-                                std::vector<double>(adc_params_->samples, 0.0));
+    // range_azimuth left empty for stage 1
 
-    // Empty point cloud data (no detections in stub)
-    result.point_cloud.clear();
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-        end_time - start_time);
-    result.processing_time_ms = duration.count() / 1000.0;
-
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto us =
+        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    result.processing_time_ms = us / 1000.0;
     return result;
 }
 

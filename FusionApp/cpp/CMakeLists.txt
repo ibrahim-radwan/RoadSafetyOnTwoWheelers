@@ -12,22 +12,17 @@ find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 
 # Find ArrayFire
-find_package(ArrayFire QUIET)
-if(ArrayFire_FOUND)
-    message(STATUS "ArrayFire found")
-    set(ARRAYFIRE_ENABLED ON)
-    # Determine an appropriate ArrayFire target or fall back to variables
-    set(ARRAYFIRE_LINK_TARGET "")
-    if(TARGET ArrayFire::afcpu)
-        set(ARRAYFIRE_LINK_TARGET ArrayFire::afcpu)
-    elseif(TARGET ArrayFire::af)
-        set(ARRAYFIRE_LINK_TARGET ArrayFire::af)
-    elseif(TARGET af)
-        set(ARRAYFIRE_LINK_TARGET af)
-    endif()
-else()
-    message(WARNING "ArrayFire not found. Radar analysis features will be disabled.")
-    set(ARRAYFIRE_ENABLED OFF)
+find_package(ArrayFire REQUIRED)
+message(STATUS "ArrayFire found")
+set(ARRAYFIRE_ENABLED ON)
+# Determine an appropriate ArrayFire target or fall back to variables
+set(ARRAYFIRE_LINK_TARGET "")
+if(TARGET ArrayFire::afcpu)
+    set(ARRAYFIRE_LINK_TARGET ArrayFire::afcpu)
+elseif(TARGET ArrayFire::af)
+    set(ARRAYFIRE_LINK_TARGET ArrayFire::af)
+elseif(TARGET af)
+    set(ARRAYFIRE_LINK_TARGET af)
 endif()
 
 # Find FFTW3
@@ -52,6 +47,9 @@ set(RADAR_SOURCES
 if(ARRAYFIRE_ENABLED AND FFTW_ENABLED)
     list(APPEND RADAR_SOURCES
         radar/radarheatmapanalyser.cpp
+        dsp/utils.cpp
+        dsp/range_processing.cpp
+        dsp/doppler_processing.cpp
     )
     message(STATUS "Radar analysis with ArrayFire + FFTW enabled")
     add_definitions(-DRADAR_ANALYSIS_ENABLED)
@@ -66,6 +64,9 @@ add_executable(fusion_replay
 # Link libraries
 target_link_libraries(fusion_replay)
 target_link_libraries(fusion_replay Threads::Threads)
+
+# Ensure project headers (e.g., dsp/*) are discoverable from any subdir
+target_include_directories(fusion_replay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Add ArrayFire if available
 if(ARRAYFIRE_ENABLED AND FFTW_ENABLED)
@@ -95,6 +96,7 @@ if(ARRAYFIRE_ENABLED AND FFTW_ENABLED)
     )
     
     target_link_libraries(test_radar_analysis Threads::Threads)
+    target_include_directories(test_radar_analysis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     # Prefer CMake targets first
     if(ARRAYFIRE_LINK_TARGET)
         target_link_libraries(test_radar_analysis ${ARRAYFIRE_LINK_TARGET})
