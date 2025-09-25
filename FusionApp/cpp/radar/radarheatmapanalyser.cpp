@@ -197,58 +197,30 @@ af::array RadarHeatmapAnalyser::preprocessFrameFromRawData(
         throw RadarException(oss.str());
     }
 
-    // Python index calculation: chirp*tx*samples*IQ*rx + tx*samples*IQ*rx +
-    // sample*IQ*rx + IQ*rx + rx
-    auto py_idx = [&](int c, int t, int s, int iq, int r) -> size_t
-    {
-        return c * (tx * samples * 2 * rx) + t * (samples * 2 * rx) +
-               s * (2 * rx) + iq * rx + r;
-    };
+    // Step 1: Interpret raw data as ArrayFire tensor matching acquisition order
+    const dim_t rx_dim = static_cast<dim_t>(rx);
+    const dim_t iq_dim = static_cast<dim_t>(iq);
+    const dim_t samples_dim = static_cast<dim_t>(samples);
+    const dim_t tx_dim = static_cast<dim_t>(tx);
+    const dim_t chirps_dim = static_cast<dim_t>(chirps);
+    const dim_t tx_chirps_dim = static_cast<dim_t>(tx_dim * chirps_dim);
 
-    // Step 1: Create arrays manually to match Python's exact indexing
-    // We need to extract I and Q values using the same indexing as Python
+    af::dim4 raw_dims(rx_dim, iq_dim, samples_dim, tx_chirps_dim);
+    af::array raw_int16(raw_dims, raw_data.data(), afHost);
 
-    // Pre-allocate I and Q arrays with final target shape: (chirps, tx, rx,
-    // samples)
-    std::vector<int16_t> I_data(chirps * tx * rx * samples);
-    std::vector<int16_t> Q_data(chirps * tx * rx * samples);
+    // Bring dimensions to (samples, rx, tx*chirps, iq)
+    af::array reordered = af::reorder(raw_int16, 2, 0, 3, 1);
 
-    // Extract I and Q values using Python's exact indexing logic
-    for (int c = 0; c < chirps; c++)
-    {
-        for (int t = 0; t < tx; t++)
-        {
-            for (int r = 0; r < rx; r++)
-            {
-                for (int s = 0; s < samples; s++)
-                {
-                    // Python index: c*tx*samples*IQ*rx + t*samples*IQ*rx +
-                    // s*IQ*rx + iq*rx + r
-                    size_t py_i_idx =
-                        py_idx(c, t, s, 0, r);  // I channel (iq=0)
-                    size_t py_q_idx =
-                        py_idx(c, t, s, 1, r);  // Q channel (iq=1)
+    // Separate I/Q channels and reshape to (samples, rx, tx, chirps)
+    af::array I_int16 = reordered(af::span, af::span, af::span, 0);
+    af::array Q_int16 = reordered(af::span, af::span, af::span, 1);
 
-                    // Target index in our I/Q arrays: c*tx*rx*samples +
-                    // t*rx*samples + r*samples + s
-                    size_t target_idx = c * (tx * rx * samples) +
-                                        t * (rx * samples) + r * samples + s;
-
-                    I_data[target_idx] = raw_data[py_i_idx];
-                    Q_data[target_idx] = raw_data[py_q_idx];
-                }
-            }
-        }
-    }
-
-    // Create ArrayFire arrays with correct shape: (samples, rx, tx, chirps)
-    // Note: ArrayFire uses column-major ordering, so we reverse the dimensions
-    af::array I_int16(samples, rx, tx, chirps, I_data.data());
-    af::array Q_int16(samples, rx, tx, chirps, Q_data.data());
+    af::array I_int16_4d = af::moddims(I_int16, samples_dim, rx_dim, tx_dim, chirps_dim);
+    af::array Q_int16_4d = af::moddims(Q_int16, samples_dim, rx_dim, tx_dim, chirps_dim);
 
     // Convert to float32
-    af::array I_f32 = I_int16.as(f32);
-    af::array Q_f32 = Q_int16.as(f32);
+    af::array I_f32 = I_int16_4d.as(f32);
+    af::array Q_f32 = Q_int16_4d.as(f32);
 
     // Create complex array
     af::array complex_temp = af::complex(I_f32, Q_f32);
