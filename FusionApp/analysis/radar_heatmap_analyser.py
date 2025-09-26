@@ -114,17 +114,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             )
             n = min(x.shape[0], y.shape[0], z.shape[0], inten.shape[0])
             p = inten[:n]
-            try:
-                pmin = float(_np.nanmin(p)) if p.size > 0 else 0.0
-                pmax = float(_np.nanmax(p)) if p.size > 0 else 1.0
-                denom = pmax - pmin
-                if not _np.isfinite(denom) or denom <= 1e-12:
-                    p = _np.zeros_like(p, dtype=float)
-                else:
-                    p = _np.clip((p - pmin) / denom, 0.0, 1.0)
-            except Exception:
-                p = _np.zeros_like(p, dtype=float)
-            arr = _np.stack((x[:n], y[:n], z[:n], p), axis=1)
+            arr = _np.stack((y[:n], x[:n], z[:n], p), axis=1)
             _np.save(stem + ".npy", arr)
         except Exception as e:
             if self.logger:
