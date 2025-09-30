@@ -188,13 +188,13 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 el_grid = _np.linspace(-30.0, 30.0, rea.shape[1], dtype=_np.float32)
             az_r = _np.deg2rad(az_grid).astype(_np.float32)  # (A,)
             el_r = _np.deg2rad(el_grid).astype(_np.float32)  # (E,)
-            r_bins = (_np.arange(rea.shape[0], dtype=_np.float32) * range_res)
+            r_bins = _np.arange(rea.shape[0], dtype=_np.float32) * range_res
             dr = range_res
             x_max = max_range
             y_max = max_range
             z_max = 0.3 * max_range
             xs = _np.arange(-x_max, x_max + 1e-9, dr, dtype=_np.float32)  # lateral
-            ys = _np.arange(0.0, y_max + 1e-9, dr, dtype=_np.float32)   # forward
+            ys = _np.arange(0.0, y_max + 1e-9, dr, dtype=_np.float32)  # forward
             zs = _np.arange(-z_max, z_max + 1e-9, dr, dtype=_np.float32)  # vertical
 
             # Internal build uses (Z, Y, X); initialize with -1 sentinel
@@ -220,7 +220,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 g1 = grid[idx_clipped + 1]
                 denom = g1 - g0
                 with _np.errstate(divide="ignore", invalid="ignore"):
-                    t = _np.where(valid, (values - g0) / _np.where(denom == 0, 1.0, denom), 0.0)
+                    t = _np.where(
+                        valid, (values - g0) / _np.where(denom == 0, 1.0, denom), 0.0
+                    )
                 # Ensure t in [0,1]
                 _np.clip(t, 0.0, 1.0, out=t)
                 return idx_clipped, t.astype(_np.float32), valid
@@ -237,7 +239,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 # Elevation: arctan2(z, horiz)
                 # Handle horiz == 0 -> +/- 90 deg
                 with _np.errstate(divide="ignore", invalid="ignore"):
-                    el = _np.arctan2(z, _np.where(horiz > 0.0, horiz, 1.0)).astype(_np.float32)
+                    el = _np.arctan2(z, _np.where(horiz > 0.0, horiz, 1.0)).astype(
+                        _np.float32
+                    )
                 # Replace where horiz ==0 explicitly
                 if z > 0:
                     el = _np.where(horiz == 0.0, 0.5 * _np.pi, el)
@@ -424,23 +428,17 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 tuning=getattr(self, "tuning", {}),
             )
         elif int(getattr(self.adc_params, "tx", 0)) == 3:
-            # Use MUSIC-2D variant for 3D estimation
-            from sample_processing.radar_proc_music2d import (
-                process_3D_radar_frame_music_2d,
+            # Use FFT-based KRadar pipeline for 3 TX configuration
+            from sample_processing.radar_proc_kradar import (
+                process_3d_radar_frame_kradar,
             )
 
             az_range = (-53, 53)
             el_range = (-18, 18)
-            # Decide whether we need to compute tesseract internally. We compute it if either
-            # (a) user requested tesseract saving, or (b) user requested zyx cube (depends on tesseract).
-            compute_tesseract_internal = bool(
-                self._full_analysis and (self._enable_tesseract or self._enable_zyx_cube)
-            )
-            result = process_3D_radar_frame_music_2d(
+            result = process_3d_radar_frame_kradar(
                 frame,
                 self.adc_params,
                 tuning=getattr(self, "tuning", {}),
-                compute_tesseract=compute_tesseract_internal,
                 az_range=az_range,
                 el_range=el_range,
             )
@@ -1019,7 +1017,12 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     drain_end_ns = drain_start_ns
                     recv_ns = time.perf_counter_ns()
                     proc_start = time.perf_counter()
-                    if self.logger and replay_frame_index is not None and os.environ.get("FULL_ANALYSIS", "0") in ("1","true","True"):
+                    if (
+                        self.logger
+                        and replay_frame_index is not None
+                        and os.environ.get("FULL_ANALYSIS", "0")
+                        in ("1", "true", "True")
+                    ):
                         self.logger.info(
                             "REPLAY_PROC_START frame_index=%s", str(replay_frame_index)
                         )
@@ -1028,11 +1031,16 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     self._maybe_save_artefacts(latest_frame, results)
 
                     end_ns = time.perf_counter_ns()
-                    if self.logger and replay_frame_index is not None and os.environ.get("FULL_ANALYSIS", "0") in ("1","true","True"):
+                    if (
+                        self.logger
+                        and replay_frame_index is not None
+                        and os.environ.get("FULL_ANALYSIS", "0")
+                        in ("1", "true", "True")
+                    ):
                         self.logger.info(
-                            "REPLAY_PROC_END   frame_index=%s proc_ms=%.2f", 
+                            "REPLAY_PROC_END   frame_index=%s proc_ms=%.2f",
                             str(replay_frame_index),
-                            (time.perf_counter()-proc_start)*1000.0,
+                            (time.perf_counter() - proc_start) * 1000.0,
                         )
                     # Attach timing/diag metadata
                     self._total_dropped_frames += drained_count
@@ -1062,19 +1070,33 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                     )
                     # Send results downstream
                     try:
-                        if os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True"):
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
                             output_queue.put(results)
                         else:
                             output_queue.put_nowait(results)
                     except Full:
-                        if os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True"):
-                            self.logger.error("Output queue full (replay frame) in full-analysis")
+                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                            "1",
+                            "true",
+                            "True",
+                        ):
+                            self.logger.error(
+                                "Output queue full (replay frame) in full-analysis"
+                            )
                             stop_event.set()
                             break
                         else:
-                            self.logger.warning("Output queue full, skipping frame (replay frame)")
+                            self.logger.warning(
+                                "Output queue full, skipping frame (replay frame)"
+                            )
                     # Emit ACK for replay pacing if requested
-                    if ack_queue is not None and os.environ.get("FULL_ANALYSIS", "0") in ("1", "true", "True"):
+                    if ack_queue is not None and os.environ.get(
+                        "FULL_ANALYSIS", "0"
+                    ) in ("1", "true", "True"):
                         # Derive replay frame index from the queue item metadata
                         try:
                             replay_index = item.get("REPLAY_FRAME_INDEX", -1)
@@ -1082,7 +1104,9 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                                 self.logger.info(
                                     "REPLAY_ACK_SEND  frame_index=%s", str(replay_index)
                                 )
-                            ack_queue.put_nowait({"RADAR_FRAME_PROCESSED": replay_index})
+                            ack_queue.put_nowait(
+                                {"RADAR_FRAME_PROCESSED": replay_index}
+                            )
                         except Exception:
                             pass
                     continue

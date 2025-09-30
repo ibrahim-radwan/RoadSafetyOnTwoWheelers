@@ -813,9 +813,11 @@
         const mode = modeEl ? modeEl.value : 'live';
         const liveOnlyEls = document.querySelectorAll('.live-only');
         const replayOnlyEls = document.querySelectorAll('.replay-only');
+        const fullOnlyEls = document.querySelectorAll('.full-only');
         liveOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'live'));
         // Treat 'full' like 'replay' for UI purposes
         replayOnlyEls.forEach(el => el.classList.toggle('hidden', mode === 'live'));
+        fullOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'full'));
         // Prefill defaults when switching into replay/full mode
         if ((mode === 'replay' || mode === 'full') && window.__defaults) {
           try {
@@ -878,7 +880,7 @@
         <label><input type="radio" name="server_mode" value="full"> Full-Analysis</label>
       </div>
       <label><input type="checkbox" id="radar_only"> Radar only</label>
-      <div class="replay-only hidden" style="margin-top:6px;">
+      <div class="full-only hidden" style="margin-top:6px;">
         <fieldset style="display:inline-block; min-width:220px;">
           <legend>Full Analysis Artefacts</legend>
           <label style="display:block; margin-bottom:4px;"><input type="checkbox" id="af_tesseract" checked> Tesseract
