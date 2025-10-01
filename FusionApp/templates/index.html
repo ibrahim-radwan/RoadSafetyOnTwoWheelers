@@ -207,7 +207,8 @@
         if (rcfg) params.push('radar_cfg=' + encodeURIComponent(rcfg));
         // Reset replay counters on new start
         rpCur = 0; rpLastTs = 0; rpPlaying = false;
-        const seekEl = document.getElementById('rp_seek'); if (seekEl) seekEl.value = '0';
+        const seekEl = document.getElementById('rp_seek'); if (seekEl) seekEl.value = '';
+        const curEl = document.getElementById('rp_current'); if (curEl) curEl.textContent = '0';
         // Ensure tuning is pushed to replay analyser immediately
         try { if (typeof window.__sendTuning === 'function') await window.__sendTuning(); } catch (e) { }
       }
@@ -287,8 +288,8 @@
               const rj = j && j.replay ? j.replay : null;
               if (rj && typeof rj.current_frame === 'number') {
                 rpCur = rj.current_frame >>> 0;
-                const seekEl = document.getElementById('rp_seek');
-                if (seekEl) seekEl.value = String(rpCur);
+                const curEl = document.getElementById('rp_current');
+                if (curEl) curEl.textContent = String(rpCur);
                 const tot = document.getElementById('rp_total');
                 if (tot && typeof rj.total_frames === 'number') tot.textContent = String(rj.total_frames >>> 0);
               }
@@ -326,15 +327,38 @@
       if (pauseBtn) pauseBtn.addEventListener('click', async () => { rpPlaying = false; await replayCmd('pause'); });
       if (stopBtn) stopBtn.addEventListener('click', async () => {
         rpPlaying = false; rpCur = 0; rpLastTs = 0;
-        const seekEl = document.getElementById('rp_seek'); if (seekEl) seekEl.value = '0';
+        const seekEl = document.getElementById('rp_seek'); if (seekEl) seekEl.value = '';
+        const curEl = document.getElementById('rp_current'); if (curEl) curEl.textContent = '0';
         // Stop playback state in feeds, then stop engine for a clean reset like live mode
         try { await replayCmd('stop'); } catch (e) { }
         try { await fetch('/system/stop', { method: 'POST' }); } catch (e) { }
       });
-      if (seekBtn) seekBtn.addEventListener('click', () => {
-        const v = document.getElementById('rp_seek').value || '0';
+      const doSeek = async () => {
+        const seekEl = document.getElementById('rp_seek');
+        const v = seekEl.value || '0';
         const n = parseInt(v || '0');
-        if (!isNaN(n)) { rpCur = n; replayCmd('seek:' + n); }
+        if (!isNaN(n)) {
+          try {
+            // If the system isn't started, start it in replay mode first
+            if (!isRunning) {
+              await systemStart();
+              // Brief delay to allow process to initialize queues
+              await new Promise(r => setTimeout(r, 300));
+            }
+          } catch (e) { 
+            console.error('Failed to start system before seek:', e);
+            return;  // Don't proceed if start failed
+          }
+          rpCur = n;
+          await replayCmd('seek:' + n); 
+          seekEl.value = ''; // Clear input after seeking
+        }
+      };
+      if (seekBtn) seekBtn.addEventListener('click', doSeek);
+      // Allow Enter key to seek
+      const seekInput = document.getElementById('rp_seek');
+      if (seekInput) seekInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') doSeek();
       });
     }
     // File picker helpers
@@ -954,9 +978,12 @@
           <button id="rp_stop">Stop</button>
           <span class="gap"></span>
           <label>Frame</label>
-          <input id="rp_seek" type="number" value="0" style="width:100px;" />
-          <button id="rp_seek_btn">Seek</button>
+          <span id="rp_current">0</span>
           <span class="meta">/ <span id="rp_total" data-total="0">0</span></span>
+          <span class="gap"></span>
+          <label>Seek to:</label>
+          <input id="rp_seek" type="number" placeholder="frame #" style="width:100px;" />
+          <button id="rp_seek_btn">Seek</button>
         </div>
       </div>
       <div class="panel" style="margin-top:8px;">

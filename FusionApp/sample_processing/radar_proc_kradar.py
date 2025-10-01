@@ -7,8 +7,25 @@ from typing import Dict, Optional, Tuple, cast
 
 import numpy as np
 from mmwave import dsp
+from scipy import ndimage, signal
 
 from sample_processing.radar_proc import logger
+
+# Constants for polar quantile detection (K-Radar approach)
+# Adjusted for more detections: 0.985 = top 1.5% (~15k points)
+# K-Radar defaults: 0.99 (1%), 0.999 (0.1%)
+POLAR_POWER_QUANTILE = 0.985  # Keep top 1.5% of power values
+
+# Constants for ZYX cube generation (kept for backward compatibility if needed)
+ZYX_X_MAX_MULTIPLIER = 1.0  # multiplier for max_range to get x_max
+ZYX_Y_MAX_MULTIPLIER = 1.0  # multiplier for max_range to get y_max
+ZYX_Z_MAX_MULTIPLIER = 0.3  # multiplier for max_range to get z_max
+
+# Constants for 3D CFAR (ZYX) - kept for backward compatibility
+# NOTE: Smaller guard/train cells = more sensitive detection but more false alarms
+# If missing detections, try reducing train cells or increasing FA_RATE
+CFAR_GUARD_CELL_ZYX = [1, 1, 1]  # Z, Y, X guard cells (number of cells)
+CFAR_TRAIN_CELL_ZYX = [1, 1, 1]  # Z, Y, X training cells (number of cells)
 
 
 def _compute_fft_drea(
@@ -75,6 +92,426 @@ def _compute_fft_drea(
     return tesseract, azimuth_grid_deg, elevation_grid_deg
 
 
+def _apply_polar_quantile_detection(
+    tesseract: np.ndarray,
+    az_grid_deg: np.ndarray,
+    el_grid_deg: np.ndarray,
+    adc_params,
+    quantile: float = POLAR_POWER_QUANTILE,
+) -> np.ndarray:
+    """
+    Apply quantile-based detection directly on polar (REA) cube.
+    Matches K-Radar's tools/radar_film/get_pw_dist.py approach.
+
+    This avoids interpolation loss by detecting in polar domain,
+    then converting only the detected points to Cartesian.
+
+    Args:
+        tesseract: 4D array (D, R, E, A) - Doppler, Range, Elevation, Azimuth
+        az_grid_deg: Azimuth angles in degrees
+        el_grid_deg: Elevation angles in degrees
+        adc_params: ADC parameters for range/doppler resolution
+        quantile: Power quantile threshold (default 0.999 = top 0.1%)
+
+    Returns:
+        point_cloud: Nx5 array [x, y, z, power, velocity]
+    """
+    # Aggregate doppler: take max and track which doppler bin
+    # This preserves moving target signal strength
+
+    # CRITICAL FIX: Exclude zero-doppler (static) bins to avoid detecting clutter
+    # K-Radar uses this approach to focus on moving targets
+    doppler_center = tesseract.shape[0] // 2
+    doppler_zero_width = 2  # Exclude ±2 bins around zero velocity
+
+    # Create a mask that zeros out the static bins
+    tesseract_moving = tesseract.copy()
+    tesseract_moving[
+        doppler_center - doppler_zero_width : doppler_center + doppler_zero_width + 1,
+        :,
+        :,
+        :,
+    ] = 0
+
+    rea_cube = np.max(tesseract_moving, axis=0).astype(np.float32)  # (R, E, A)
+    doppler_idx_max = np.argmax(
+        tesseract_moving, axis=0
+    )  # (R, E, A) - which doppler bin had max
+
+    # Apply quantile threshold on polar cube (only moving targets now)
+    # Filter out zeros from the quantile calculation
+    rea_cube_nonzero = rea_cube[rea_cube > 0]
+    if rea_cube_nonzero.size == 0:
+        return np.empty((0, 5), dtype=np.float32)
+    power_threshold = np.quantile(rea_cube_nonzero, quantile)
+
+    # Extract indices where power exceeds threshold
+    r_idx, e_idx, a_idx = np.where(rea_cube > power_threshold)
+
+    # DIAGNOSTIC: Log first few detected indices to verify they're changing
+    try:
+        from sample_processing.radar_proc import logger as _logger
+
+        if len(r_idx) > 0:
+            _logger.info(
+                "[Polar-Det-DEBUG] First 10 indices: r=%s, e=%s, a=%s, threshold=%.2e, rea_max=%.2e",
+                r_idx[:10].tolist(),
+                e_idx[:10].tolist(),
+                a_idx[:10].tolist(),
+                power_threshold,
+                np.max(rea_cube),
+            )
+    except Exception:
+        pass
+
+    if len(r_idx) == 0:
+        return np.empty((0, 5), dtype=np.float32)
+
+    # Get power values
+    powers = rea_cube[r_idx, e_idx, a_idx].astype(np.float32)
+
+    # Get doppler indices for velocity calculation
+    d_idx = doppler_idx_max[r_idx, e_idx, a_idx]
+
+    # DIAGNOSTIC: Log doppler distribution
+    try:
+        from sample_processing.radar_proc import logger as _logger
+
+        unique_d, counts_d = np.unique(d_idx, return_counts=True)
+        _logger.info(
+            "[Polar-Det-DEBUG] Doppler distribution: unique_bins=%s (center=%d), counts=%s",
+            unique_d[:10].tolist(),
+            tesseract.shape[0] // 2,
+            counts_d[:10].tolist(),
+        )
+    except Exception:
+        pass
+
+    # Convert indices to physical coordinates
+    range_res = float(getattr(adc_params, "range_resolution", 1.0))
+    doppler_res = float(getattr(adc_params, "doppler_resolution", 0.1))
+
+    # Range (in meters)
+    r = r_idx.astype(np.float32) * range_res
+
+    # Azimuth and Elevation (convert to radians)
+    az = np.deg2rad(az_grid_deg[a_idx]).astype(np.float32)
+    el = np.deg2rad(el_grid_deg[e_idx]).astype(np.float32)
+
+    # K-Radar coordinate convention: flip azimuth and elevation
+    # (matches tools/radar_film/get_pw_dist.py lines 254-256)
+    az = -az
+    el = -el
+
+    # Convert polar to Cartesian
+    # (matches tools/radar_film/get_pw_dist.py lines 258-261)
+    cos_el = np.cos(el)
+    cos_az = np.cos(az)
+    sin_az = np.sin(az)
+    sin_el = np.sin(el)
+
+    x = r * cos_el * cos_az
+    y = r * cos_el * sin_az
+    z = r * sin_el
+
+    # Calculate velocity from doppler
+    # tesseract is fftshifted, so center is at shape[0]//2
+    doppler_center = tesseract.shape[0] // 2
+    doppler_offsets = (d_idx - doppler_center).astype(np.float32)
+    velocities = doppler_offsets * doppler_res
+
+    # Stack into point cloud: [x, y, z, power, velocity]
+    point_cloud = np.column_stack([x, y, z, powers, velocities])
+
+    return point_cloud
+
+
+def _compute_zyx_cube(
+    tesseract: np.ndarray,
+    az_grid_deg: np.ndarray,
+    el_grid_deg: np.ndarray,
+    adc_params,
+    doppler_aggregation: str = "mean",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Convert DREA tesseract to ZYX cube via trilinear interpolation.
+
+    Follows the MATLAB gen_3_get_zyx_cube.m logic:
+    1. Aggregate across doppler to get REA (Range-Elevation-Azimuth) cube
+    2. Create Cartesian grid (z, y, x)
+    3. For each (z, y, x), convert to polar (r, e, a) and interpolate from REA
+
+    Args:
+        doppler_aggregation: Method to aggregate doppler dimension
+            - "max": Take maximum (best for moving targets, recommended)
+            - "mean": Average (smooths noise but dilutes moving targets)
+            - "percentile_90": 90th percentile (balance between max and mean)
+
+    Returns:
+        arr_zyx: 3D array with shape (Z, Y, X), initialized with -1 for invalid voxels
+        arr_z: Z-axis grid (vertical, in meters)
+        arr_y: Y-axis grid (forward, in meters)
+        arr_x: X-axis grid (lateral, in meters)
+    """
+    # Aggregate across Doppler dimension
+    if doppler_aggregation == "max":
+        rea = np.max(tesseract, axis=0)  # (R, E, A)
+    elif doppler_aggregation == "percentile_90":
+        rea = np.percentile(tesseract, 90, axis=0)  # (R, E, A)
+    elif doppler_aggregation == "mean":
+        rea = np.mean(tesseract, axis=0)  # (R, E, A)
+    else:
+        raise ValueError(f"Unknown doppler_aggregation: {doppler_aggregation}")
+
+    # Diagnostic: compare tesseract max before and after aggregation
+    try:
+        from sample_processing.radar_proc import logger as _logger
+
+        tess_max = np.max(tesseract)
+        rea_max = np.max(rea)
+        tess_max_pos = np.unravel_index(np.argmax(tesseract), tesseract.shape)
+        _logger.info(
+            "[ZYX-DEBUG] Tesseract max=%.2e at DREA[%d,%d,%d,%d], after %s agg: REA max=%.2e (ratio=%.3f)",
+            tess_max,
+            tess_max_pos[0],
+            tess_max_pos[1],
+            tess_max_pos[2],
+            tess_max_pos[3],
+            doppler_aggregation,
+            rea_max,
+            rea_max / max(tess_max, 1e-10),
+        )
+    except Exception:
+        pass
+
+    # Get range parameters
+    range_res = float(getattr(adc_params, "range_resolution", 1.0))
+    max_range = getattr(adc_params, "max_range", None)
+    if max_range is None:
+        max_range = range_res * float(getattr(adc_params, "samples", rea.shape[0]))
+    max_range = float(max_range)
+
+    # Convert angle grids to radians
+    az_r = np.deg2rad(az_grid_deg).astype(np.float32)  # (A,)
+    el_r = np.deg2rad(el_grid_deg).astype(np.float32)  # (E,)
+
+    # Range bins
+    r_bins = np.arange(rea.shape[0], dtype=np.float32) * range_res
+
+    # Define Cartesian grid bounds
+    dr = range_res
+    x_max = max_range * ZYX_X_MAX_MULTIPLIER
+    y_max = max_range * ZYX_Y_MAX_MULTIPLIER
+    z_max = max_range * ZYX_Z_MAX_MULTIPLIER
+
+    arr_x = np.arange(-x_max, x_max + 1e-9, dr, dtype=np.float32)  # lateral
+    arr_y = np.arange(0.0, y_max + 1e-9, dr, dtype=np.float32)  # forward
+    arr_z = np.arange(-z_max, z_max + 1e-9, dr, dtype=np.float32)  # vertical
+
+    # Initialize ZYX cube with -1 (sentinel for invalid voxels)
+    arr_zyx = np.full((arr_z.size, arr_y.size, arr_x.size), -1.0, dtype=np.float32)
+
+    # Precompute 2D grids for X-Y plane
+    y_grid, x_grid = np.meshgrid(arr_y, arr_x, indexing="ij")  # (Ny, Nx)
+    x2 = x_grid * x_grid
+    y2 = y_grid * y_grid
+    horiz_sq = x2 + y2
+    horiz = np.sqrt(horiz_sq, dtype=np.float32)
+
+    # Range bounds for validity check
+    r_min = r_bins[0]
+    r_max = r_bins[-1]
+    a_min = az_r[0]
+    a_max = az_r[-1]
+    e_min = el_r[0]
+    e_max = el_r[-1]
+
+    # Helper function to find interpolation indices
+    def _interval_indices(values: np.ndarray, grid: np.ndarray):
+        """Find bracketing indices and fractional position for interpolation."""
+        idx = np.searchsorted(grid, values, side="right") - 1
+        valid = (idx >= 0) & (idx < grid.size - 1)
+        idx_clipped = np.clip(idx, 0, grid.size - 2)
+        g0 = grid[idx_clipped]
+        g1 = grid[idx_clipped + 1]
+        denom = g1 - g0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = np.where(valid, (values - g0) / np.where(denom == 0, 1.0, denom), 0.0)
+        np.clip(t, 0.0, 1.0, out=t)
+        return idx_clipped, t.astype(np.float32), valid
+
+    # Precompute azimuth once (doesn't depend on z)
+    # MATLAB uses: a = atan(-y/x), which is atan2(-y, x)
+    # This matches their coordinate convention where positive y points LEFT
+    az = np.arctan2(-y_grid, x_grid).astype(np.float32)
+
+    # Process each Z slice
+    for iz, z in enumerate(arr_z):
+        z2 = z * z
+
+        # Compute range for this Z slice
+        r = np.sqrt(horiz_sq + z2, dtype=np.float32)  # (Ny, Nx)
+
+        # Compute elevation: arctan(z / horiz) with vectorized conditionals
+        with np.errstate(divide="ignore", invalid="ignore"):
+            el = np.arctan2(z, horiz).astype(np.float32)
+        # Handle horiz == 0 cases more efficiently
+        horiz_zero = horiz == 0.0
+        if np.any(horiz_zero):
+            if z > 0:
+                el[horiz_zero] = 0.5 * np.pi
+            elif z < 0:
+                el[horiz_zero] = -0.5 * np.pi
+            # else: el[horiz_zero] remains 0.0 from arctan2
+
+        # Check bounds
+        in_bounds = (
+            (r >= r_min)
+            & (r <= r_max)
+            & (az >= a_min)
+            & (az <= a_max)
+            & (el >= e_min)
+            & (el <= e_max)
+        )
+
+        # Find interpolation indices
+        ir, tr, valid_r = _interval_indices(r, r_bins)
+        ie, te, valid_e = _interval_indices(el, el_r)
+        ia, ta, valid_a = _interval_indices(az, az_r)
+
+        valid = in_bounds & valid_r & valid_e & valid_a
+        if not np.any(valid):
+            continue
+
+        # Trilinear interpolation: get 8 corners and compute in one expression chain
+        # This reduces intermediate array allocations
+        ir1 = ir + 1
+        ie1 = ie + 1
+        ia1 = ia + 1
+
+        # Precompute interpolation weights
+        ta_inv = 1.0 - ta
+        te_inv = 1.0 - te
+        tr_inv = 1.0 - tr
+
+        # Vectorized trilinear interpolation (reduces memory allocations)
+        vals = (
+            rea[ir, ie, ia] * tr_inv * te_inv * ta_inv
+            + rea[ir, ie, ia1] * tr_inv * te_inv * ta
+            + rea[ir, ie1, ia] * tr_inv * te * ta_inv
+            + rea[ir, ie1, ia1] * tr_inv * te * ta
+            + rea[ir1, ie, ia] * tr * te_inv * ta_inv
+            + rea[ir1, ie, ia1] * tr * te_inv * ta
+            + rea[ir1, ie1, ia] * tr * te * ta_inv
+            + rea[ir1, ie1, ia1] * tr * te * ta
+        )
+
+        # Assign to valid voxels
+        arr_zyx[iz][valid] = vals[valid]
+
+    return arr_zyx, arr_z, arr_y, arr_x
+
+
+def _apply_3d_cfar(
+    arr_zyx: np.ndarray,
+    arr_z: np.ndarray,
+    arr_y: np.ndarray,
+    arr_x: np.ndarray,
+    guard_cell_zyx: Tuple[int, int, int] = None,
+    train_cell_zyx: Tuple[int, int, int] = None,
+    fa_rate: float = None,
+) -> np.ndarray:
+    """
+    Apply 3D CA-CFAR to the ZYX cube to extract sparse point cloud.
+
+    Follows the approach from util_cfar.py ca_cfar method but adapted for 3D without doppler.
+
+    Args:
+        arr_zyx: 3D cube (Z, Y, X) with power values, -1 for invalid voxels
+        arr_z, arr_y, arr_x: coordinate grids
+        guard_cell_zyx: (nz, ny, nx) half-guard cells for each dimension
+        train_cell_zyx: (nz, ny, nx) half-train cells for each dimension
+        fa_rate: false alarm rate
+
+    Returns:
+        point cloud array with columns [x, y, z, power]
+    """
+    if guard_cell_zyx is None:
+        guard_cell_zyx = tuple(CFAR_GUARD_CELL_ZYX)
+    if train_cell_zyx is None:
+        train_cell_zyx = tuple(CFAR_TRAIN_CELL_ZYX)
+    if fa_rate is None:
+        fa_rate = CFAR_FA_RATE
+
+    # Mark invalid voxels
+    invalid_mask = arr_zyx == -1.0
+
+    # Normalize cube (use float32 to reduce memory bandwidth)
+    cube_norm = arr_zyx.astype(np.float32, copy=True)
+    cube_norm[invalid_mask] = 0.0
+    cube_norm *= 1.0 / 1e13  # in-place normalization
+    # Set invalid to mean to suppress detections at boundaries
+    mean_val = np.mean(cube_norm[~invalid_mask]) if np.any(~invalid_mask) else 0.0
+    cube_norm[invalid_mask] = mean_val
+
+    # Generate 3D mask for CA-CFAR
+    nh_g_z, nh_g_y, nh_g_x = guard_cell_zyx
+    nh_t_z, nh_t_y, nh_t_x = train_cell_zyx
+
+    mask_size = (
+        2 * (nh_g_z + nh_t_z) + 1,
+        2 * (nh_g_y + nh_t_y) + 1,
+        2 * (nh_g_x + nh_t_x) + 1,
+    )
+    mask = np.ones(mask_size, dtype=np.float32)
+
+    # Set guard cells to 0 (exclude from training)
+    mask[
+        nh_t_z : nh_t_z + 2 * nh_g_z + 1,
+        nh_t_y : nh_t_y + 2 * nh_g_y + 1,
+        nh_t_x : nh_t_x + 2 * nh_g_x + 1,
+    ] = 0.0
+
+    num_total_train_cells = np.count_nonzero(mask)
+    mask = mask / num_total_train_cells  # normalize for average
+
+    # Calculate alpha (CFAR threshold multiplier)
+    alpha = num_total_train_cells * (fa_rate ** (-1.0 / num_total_train_cells) - 1.0)
+
+    # Convolve to get local average of training cells
+    # Use FFT-based convolution for large kernels (much faster)
+    conv_out = signal.fftconvolve(cube_norm, mask, mode="same")
+    # Handle boundary effects by using the mirror mode approximation
+    # (fftconvolve uses zero-padding, so we clip to valid range after)
+    conv_out = alpha * conv_out
+
+    # Apply threshold and filter invalid voxels in one step
+    detections = (cube_norm > conv_out) & (~invalid_mask)
+    pc_idx = np.where(detections)
+
+    # Extract corresponding power values (unnormalized)
+    correp_power = arr_zyx[pc_idx]
+
+    # Convert indices to Cartesian coordinates
+    z_ind, y_ind, x_ind = pc_idx
+
+    # Get grid resolution
+    grid_size = float(arr_x[1] - arr_x[0]) if len(arr_x) > 1 else 1.0
+
+    # Compute coordinates (center of voxel) - use vectorized operations
+    z_min, y_min, x_min = float(arr_z[0]), float(arr_y[0]), float(arr_x[0])
+    z_pc_coord = z_min + z_ind.astype(np.float32) * grid_size
+    y_pc_coord = y_min + y_ind.astype(np.float32) * grid_size
+    x_pc_coord = x_min + x_ind.astype(np.float32) * grid_size
+
+    # Stack into point cloud: [x, y, z, power] - more efficient stacking
+    total_values = np.column_stack(
+        [x_pc_coord, y_pc_coord, z_pc_coord, correp_power]
+    ).astype(np.float32)
+
+    return total_values
+
+
 def process_3d_radar_frame_kradar(
     frame: np.ndarray,
     adc_params,
@@ -134,100 +571,70 @@ def process_3d_radar_frame_kradar(
     )
     t_aoa = time.perf_counter() - step_start
 
+    # K-RADAR PIPELINE: Apply polar quantile detection (matches their dataset generation)
     step_start = time.perf_counter()
-    fft2d_sum = det_matrix.astype(np.int64)
-    t3d = (tuning or {}).get("cfar_3d", {}) if isinstance(tuning, dict) else {}
-    t3d_d = t3d.get("doppler", {})
-    t3d_r = t3d.get("range", {})
-    lb_d = float(t3d_d.get("l_bound", 1.5))
-    gl_d = int(t3d_d.get("guard_len", 4))
-    nl_d = int(t3d_d.get("noise_len", 16))
-    lb_r = float(t3d_r.get("l_bound", 2.5))
-    gl_r = int(t3d_r.get("guard_len", 4))
-    nl_r = int(t3d_r.get("noise_len", 16))
+    detection_params = (
+        (tuning or {}).get("polar_detection", {}) if isinstance(tuning, dict) else {}
+    )
+    quantile = detection_params.get("power_quantile", POLAR_POWER_QUANTILE)
 
-    thrD, _ = np.apply_along_axis(
-        dsp.ca_,
-        axis=0,
-        arr=fft2d_sum.T,
-        l_bound=cast(int, lb_d),
-        guard_len=gl_d,
-        noise_len=nl_d,
-    )
-    thrR, noiseR = np.apply_along_axis(
-        dsp.ca_,
-        axis=0,
-        arr=fft2d_sum,
-        l_bound=cast(int, lb_r),
-        guard_len=gl_r,
-        noise_len=nl_r,
-    )
-    thrD = thrD.T
-    full_mask = (det_matrix > thrD) & (det_matrix > thrR)
-    det_peaks_indices = np.argwhere(full_mask)
-    peakVals = fft2d_sum[det_peaks_indices[:, 0], det_peaks_indices[:, 1]]
-    snr = peakVals - noiseR[det_peaks_indices[:, 0], det_peaks_indices[:, 1]]
-    t_cfar = time.perf_counter() - step_start
+    # Diagnostic: Check tesseract input
+    try:
+        tess_max = np.max(tesseract)
+        tess_max_pos = np.unravel_index(np.argmax(tesseract), tesseract.shape)
+        logger.info(
+            "[KRadar-Polar-DEBUG] Input Tesseract: max=%.2e at DREA[%d,%d,%d,%d], quantile=%.4f",
+            tess_max,
+            tess_max_pos[0],
+            tess_max_pos[1],
+            tess_max_pos[2],
+            tess_max_pos[3],
+            quantile,
+        )
+    except Exception:
+        pass
 
-    step_start = time.perf_counter()
-    dtype_location = f"({adc_params.tx},)<f4"
-    dtype_detObj2D = np.dtype(
-        {
-            "names": ["rangeIdx", "dopplerIdx", "peakVal", "location", "SNR"],
-            "formats": ["<i4", "<i4", "<f4", dtype_location, "<f4"],
-        }
+    point_cloud = _apply_polar_quantile_detection(
+        tesseract, azimuth_grid_deg, elevation_grid_deg, adc_params, quantile=quantile
     )
-    detObj2DRaw = np.zeros((det_peaks_indices.shape[0],), dtype=dtype_detObj2D)
-    detObj2DRaw["rangeIdx"] = det_peaks_indices[:, 0].squeeze()
-    detObj2DRaw["dopplerIdx"] = det_peaks_indices[:, 1].squeeze()
-    detObj2DRaw["peakVal"] = peakVals.flatten()
-    detObj2DRaw["SNR"] = snr.flatten()
-    t_struct = time.perf_counter() - step_start
+    t_detection = time.perf_counter() - step_start
 
-    step_start = time.perf_counter()
-    detObj2D = dsp.prune_to_peaks(
-        detObj2DRaw, det_matrix, adc_params.chirps, reserve_neighbor=True
-    )
-    detObj2D = dsp.peak_grouping_along_doppler(detObj2D, det_matrix, adc_params.chirps)
-    t_group = time.perf_counter() - step_start
+    num_det = point_cloud.shape[0]
 
-    step_start = time.perf_counter()
-    th3d = (tuning or {}).get("thresholds_3d", {}) if isinstance(tuning, dict) else {}
-    SNRThresholds2 = np.array(
-        th3d.get("snr_table", [[2, 10.5], [10, 7.5], [35, 5.0]]), dtype=np.float32
-    )
-    peakValThresholds2 = np.array(
-        th3d.get("peak_table", [[4, 100], [1, 400], [500, 0]]), dtype=np.float32
-    )
-    detObj2D = dsp.range_based_pruning(
-        detObj2D,
-        SNRThresholds2,
-        peakValThresholds2,
-        adc_params.samples,
-        0.5,
-        adc_params.range_resolution,
-    )
-    t_prune = time.perf_counter() - step_start
-
-    num_det = (
-        len(detObj2D["rangeIdx"])
-        if isinstance(detObj2D, (np.void, dict))
-        else detObj2D.shape[0]
-    )
+    # Diagnostic logging for polar detection results
+    try:
+        if num_det > 0:
+            logger.info(
+                "[KRadar-Polar-DEBUG] Detections: N=%d, "
+                "x: [%.2f, %.2f], y: [%.2f, %.2f], z: [%.2f, %.2f], "
+                "power: min=%.2e, max=%.2e, mean=%.2e, "
+                "velocity: [%.2f, %.2f] m/s",
+                num_det,
+                np.min(point_cloud[:, 0]),
+                np.max(point_cloud[:, 0]),
+                np.min(point_cloud[:, 1]),
+                np.max(point_cloud[:, 1]),
+                np.min(point_cloud[:, 2]),
+                np.max(point_cloud[:, 2]),
+                np.min(point_cloud[:, 3]),
+                np.max(point_cloud[:, 3]),
+                np.mean(point_cloud[:, 3]),
+                np.min(point_cloud[:, 4]),
+                np.max(point_cloud[:, 4]),
+            )
+    except Exception as e:
+        logger.warning(f"[KRadar-Polar-DEBUG] Failed to log detection stats: {e}")
 
     if num_det == 0:
         total_time = time.perf_counter() - function_start
         try:
             logger.info(
-                "[KRadar] total=%.3fs | range=%.3fs, doppler=%.3fs, aoa=%.3fs, cfar=%.3fs, struct=%.3fs, group=%.3fs, prune=%.3fs",
+                "[KRadar-Polar] total=%.3fs | range=%.3fs, doppler=%.3fs, aoa=%.3fs, detect=%.3fs, detN=0",
                 total_time,
                 t_range,
                 t_doppler,
                 t_aoa,
-                t_cfar,
-                t_struct,
-                t_group,
-                t_prune,
+                t_detection,
             )
         except Exception:
             pass
@@ -248,53 +655,30 @@ def process_3d_radar_frame_kradar(
             "tesseract_el_grid_deg": elevation_grid_deg,
         }
 
-    xs = np.zeros(num_det, dtype=np.float32)
-    ys = np.zeros(num_det, dtype=np.float32)
-    zs = np.zeros(num_det, dtype=np.float32)
-    azimuths_deg = np.zeros(num_det, dtype=np.float32)
-    elevations_deg = np.zeros(num_det, dtype=np.float32)
+    # Extract from point cloud: [x, y, z, power, velocity]
+    xs = point_cloud[:, 0]
+    ys = point_cloud[:, 1]
+    zs = point_cloud[:, 2]
+    powers = point_cloud[:, 3]
+    velocities = point_cloud[:, 4]
 
-    r_idx = detObj2D["rangeIdx"].astype(int)
-    k_idx = detObj2D["dopplerIdx"].astype(int)
-    el_bins = elevation_grid_deg.size
-    az_bins = azimuth_grid_deg.size
+    # Calculate azimuth and elevation from Cartesian coordinates
+    horiz = np.sqrt(xs**2 + ys**2)
+    azimuths_deg = np.rad2deg(np.arctan2(xs, ys)).astype(np.float32)
+    elevations_deg = np.rad2deg(np.arctan2(zs, horiz)).astype(np.float32)
 
-    for i in range(num_det):
-        r = int(r_idx[i])
-        k = int(k_idx[i])
-        slice_drea = tesseract[k, r]
-        flat_idx = int(np.argmax(slice_drea))
-        el_idx, az_idx = np.unravel_index(flat_idx, (el_bins, az_bins))
-        az_deg = float(azimuth_grid_deg[az_idx])
-        el_deg = float(elevation_grid_deg[el_idx])
-        azimuths_deg[i] = az_deg
-        elevations_deg[i] = el_deg
-
-        azr = np.deg2rad(az_deg)
-        elr = np.deg2rad(el_deg)
-        ux = np.cos(elr) * np.sin(azr)
-        uy = np.sin(elr)
-        uz = np.cos(elr) * np.cos(azr)
-        rng_m = adc_params.range_resolution * float(r)
-        xs[i] = ux * rng_m
-        ys[i] = uz * rng_m
-        zs[i] = uy * rng_m
-
-    velocities = detObj2D["dopplerIdx"] * adc_params.doppler_resolution
-    snrs = detObj2D["SNR"]
+    # Use power as SNR proxy
+    snrs = powers.astype(np.float32)
 
     total_time = time.perf_counter() - function_start
     try:
         logger.info(
-            "[KRadar] total=%.3fs | range=%.3fs, doppler=%.3fs, aoa=%.3fs, cfar=%.3fs, struct=%.3fs, group=%.3fs, prune=%.3fs, detN=%d",
+            "[KRadar-Polar] total=%.3fs | range=%.3fs, doppler=%.3fs, aoa=%.3fs, detect=%.3fs, detN=%d",
             total_time,
             t_range,
             t_doppler,
             t_aoa,
-            t_cfar,
-            t_struct,
-            t_group,
-            t_prune,
+            t_detection,
             num_det,
         )
     except Exception:

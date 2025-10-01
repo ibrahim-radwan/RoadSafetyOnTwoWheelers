@@ -465,8 +465,8 @@ class RadarHeatmapAnalyser(RadarAnalyser):
 
         # Create point cloud data from the results
         point_cloud_data = {
-            "x": x_pos,
-            "y": y_pos,
+            "x": y_pos,
+            "y": x_pos,
             "z": z_pos,
             "intensity": snrs,  # Use SNR as intensity
             # Also include per-point doppler (velocity)
