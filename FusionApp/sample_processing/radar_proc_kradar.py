@@ -148,22 +148,6 @@ def _apply_polar_quantile_detection(
     # Extract indices where power exceeds threshold
     r_idx, e_idx, a_idx = np.where(rea_cube > power_threshold)
 
-    # DIAGNOSTIC: Log first few detected indices to verify they're changing
-    try:
-        from sample_processing.radar_proc import logger as _logger
-
-        if len(r_idx) > 0:
-            _logger.info(
-                "[Polar-Det-DEBUG] First 10 indices: r=%s, e=%s, a=%s, threshold=%.2e, rea_max=%.2e",
-                r_idx[:10].tolist(),
-                e_idx[:10].tolist(),
-                a_idx[:10].tolist(),
-                power_threshold,
-                np.max(rea_cube),
-            )
-    except Exception:
-        pass
-
     if len(r_idx) == 0:
         return np.empty((0, 5), dtype=np.float32)
 
@@ -172,20 +156,6 @@ def _apply_polar_quantile_detection(
 
     # Get doppler indices for velocity calculation
     d_idx = doppler_idx_max[r_idx, e_idx, a_idx]
-
-    # DIAGNOSTIC: Log doppler distribution
-    try:
-        from sample_processing.radar_proc import logger as _logger
-
-        unique_d, counts_d = np.unique(d_idx, return_counts=True)
-        _logger.info(
-            "[Polar-Det-DEBUG] Doppler distribution: unique_bins=%s (center=%d), counts=%s",
-            unique_d[:10].tolist(),
-            tesseract.shape[0] // 2,
-            counts_d[:10].tolist(),
-        )
-    except Exception:
-        pass
 
     # Convert indices to physical coordinates
     range_res = float(getattr(adc_params, "range_resolution", 1.0))
@@ -262,27 +232,6 @@ def _compute_zyx_cube(
         rea = np.mean(tesseract, axis=0)  # (R, E, A)
     else:
         raise ValueError(f"Unknown doppler_aggregation: {doppler_aggregation}")
-
-    # Diagnostic: compare tesseract max before and after aggregation
-    try:
-        from sample_processing.radar_proc import logger as _logger
-
-        tess_max = np.max(tesseract)
-        rea_max = np.max(rea)
-        tess_max_pos = np.unravel_index(np.argmax(tesseract), tesseract.shape)
-        _logger.info(
-            "[ZYX-DEBUG] Tesseract max=%.2e at DREA[%d,%d,%d,%d], after %s agg: REA max=%.2e (ratio=%.3f)",
-            tess_max,
-            tess_max_pos[0],
-            tess_max_pos[1],
-            tess_max_pos[2],
-            tess_max_pos[3],
-            doppler_aggregation,
-            rea_max,
-            rea_max / max(tess_max, 1e-10),
-        )
-    except Exception:
-        pass
 
     # Get range parameters
     range_res = float(getattr(adc_params, "range_resolution", 1.0))
@@ -580,11 +529,17 @@ def process_3d_radar_frame_kradar(
     tesseract_for_ra = tesseract.copy()
     tesseract_for_ra[
         doppler_center - doppler_zero_width : doppler_center + doppler_zero_width + 1,
-        :, :, :
+        :,
+        :,
+        :,
     ] = 0
-    range_azimuth_map = np.max(tesseract_for_ra, axis=0)  # First max over doppler -> (R, E, A)
-    range_azimuth_map = np.max(range_azimuth_map, axis=1)  # Then max over elevation -> (R, A)
-    
+    range_azimuth_map = np.max(
+        tesseract_for_ra, axis=0
+    )  # First max over doppler -> (R, E, A)
+    range_azimuth_map = np.max(
+        range_azimuth_map, axis=1
+    )  # Then max over elevation -> (R, A)
+
     # Apply log scale to range-azimuth for better visualization
     range_azimuth_map = 20.0 * np.log10(np.abs(range_azimuth_map) + 1e-10)
 
@@ -594,22 +549,6 @@ def process_3d_radar_frame_kradar(
         (tuning or {}).get("polar_detection", {}) if isinstance(tuning, dict) else {}
     )
     quantile = detection_params.get("power_quantile", POLAR_POWER_QUANTILE)
-
-    # Diagnostic: Check tesseract input
-    try:
-        tess_max = np.max(tesseract)
-        tess_max_pos = np.unravel_index(np.argmax(tesseract), tesseract.shape)
-        logger.info(
-            "[KRadar-Polar-DEBUG] Input Tesseract: max=%.2e at DREA[%d,%d,%d,%d], quantile=%.4f",
-            tess_max,
-            tess_max_pos[0],
-            tess_max_pos[1],
-            tess_max_pos[2],
-            tess_max_pos[3],
-            quantile,
-        )
-    except Exception:
-        pass
 
     point_cloud = _apply_polar_quantile_detection(
         tesseract, azimuth_grid_deg, elevation_grid_deg, adc_params, quantile=quantile
