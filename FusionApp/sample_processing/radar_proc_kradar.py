@@ -571,6 +571,23 @@ def process_3d_radar_frame_kradar(
     )
     t_aoa = time.perf_counter() - step_start
 
+    # Compute Range-Azimuth map by taking MAX over Doppler (axis 0) and Elevation (axis 2)
+    # Tesseract shape: (D, R, E, A) -> RA shape: (R, A)
+    # Use max to preserve peak signal strength (sum would wash out targets with noise)
+    # Exclude static clutter (zero-doppler bins) before aggregation
+    doppler_center = tesseract.shape[0] // 2
+    doppler_zero_width = 2  # Exclude ±2 bins around zero velocity (same as detection)
+    tesseract_for_ra = tesseract.copy()
+    tesseract_for_ra[
+        doppler_center - doppler_zero_width : doppler_center + doppler_zero_width + 1,
+        :, :, :
+    ] = 0
+    range_azimuth_map = np.max(tesseract_for_ra, axis=0)  # First max over doppler -> (R, E, A)
+    range_azimuth_map = np.max(range_azimuth_map, axis=1)  # Then max over elevation -> (R, A)
+    
+    # Apply log scale to range-azimuth for better visualization
+    range_azimuth_map = 20.0 * np.log10(np.abs(range_azimuth_map) + 1e-10)
+
     # K-RADAR PIPELINE: Apply polar quantile detection (matches their dataset generation)
     step_start = time.perf_counter()
     detection_params = (
@@ -641,7 +658,7 @@ def process_3d_radar_frame_kradar(
 
         return {
             "range_doppler": det_matrix.T,
-            "range_azimuth": None,
+            "range_azimuth": range_azimuth_map.T,
             "x_pos": np.array([]),
             "y_pos": np.array([]),
             "z_pos": np.array([]),
@@ -686,7 +703,7 @@ def process_3d_radar_frame_kradar(
 
     return {
         "range_doppler": det_matrix.T,
-        "range_azimuth": None,
+        "range_azimuth": range_azimuth_map.T,
         "x_pos": xs,
         "y_pos": ys,
         "z_pos": zs,

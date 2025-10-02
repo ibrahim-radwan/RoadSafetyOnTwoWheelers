@@ -712,34 +712,49 @@ class FusionRunner:
                     self._ra_shape, dtype=np_dtype, buffer=self._ra_blocks[slot].buf
                 )
                 arr = np.array(view, copy=True)
-                try:
-                    arr = np.rot90(arr, 1)
-                except Exception:
-                    pass
+                # Don't rotate for polar RA display - polar transform handles orientation
+                # try:
+                #     arr = np.rot90(arr, 1)
+                # except Exception:
+                #     pass
                 pc = self._latest_point_cloud or {}
                 mr = pc.get("max_range") if isinstance(pc, dict) else None
-                if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
-                    extents = (-90.0, 90.0, 0.0, float(mr))
+                # Get actual azimuth range from the data
+                az_grid = pc.get("tesseract_az_grid_deg") if isinstance(pc, dict) else None
+                if isinstance(az_grid, np.ndarray) and az_grid.size > 0:
+                    az_min, az_max = float(np.min(az_grid)), float(np.max(az_grid))
                 else:
-                    extents = (-90.0, 90.0, 0.0, 10.0)
+                    az_min, az_max = -60.0, 60.0  # Default for KRadar
+                if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
+                    extents = (az_min, az_max, 0.0, float(mr))
+                else:
+                    extents = (az_min, az_max, 0.0, 10.0)
                 return heatmap_to_png(
-                    arr, extents=extents, force_square=True, target_size=(640, 480)
+                    arr, extents=extents, force_square=False, target_size=(640, 480), polar=True
                 )
         except Exception:
             pass
         if isinstance(self._latest_ra, np.ndarray):
-            try:
-                arr = np.rot90(self._latest_ra, 1)
-            except Exception:
-                arr = self._latest_ra
+            # Don't rotate for polar display - polar transform handles orientation
+            # try:
+            #     arr = np.rot90(self._latest_ra, 1)
+            # except Exception:
+            #     arr = self._latest_ra
+            arr = self._latest_ra
             pc = self._latest_point_cloud or {}
             mr = pc.get("max_range") if isinstance(pc, dict) else None
-            if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
-                extents = (-90.0, 90.0, 0.0, float(mr))
+            # Get actual azimuth range from the data
+            az_grid = pc.get("tesseract_az_grid_deg") if isinstance(pc, dict) else None
+            if isinstance(az_grid, np.ndarray) and az_grid.size > 0:
+                az_min, az_max = float(np.min(az_grid)), float(np.max(az_grid))
             else:
-                extents = (-90.0, 90.0, 0.0, 10.0)
+                az_min, az_max = -60.0, 60.0  # Default for KRadar
+            if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
+                extents = (az_min, az_max, 0.0, float(mr))
+            else:
+                extents = (az_min, az_max, 0.0, 10.0)
             return heatmap_to_png(
-                arr, extents=extents, force_square=True, target_size=(640, 480)
+                arr, extents=extents, force_square=False, target_size=(640, 480), polar=True
             )
         return None
 
