@@ -681,19 +681,19 @@ class DCA1000Recording(RadarFeed):
                         continue
 
                     # Get the current frame information (sequential in full-analysis)
-                    filepath, frame_timestamp, _ = self._frame_files[
-                        self._current_frame_index
-                    ]
+                    # Capture frame index at start of iteration for seek detection
+                    frame_to_send = self._current_frame_index
+                    filepath, frame_timestamp, _ = self._frame_files[frame_to_send]
                     if (
                         full_analysis
                         and ack_queue is not None
                         and last_sent_index != -1
-                        and self._current_frame_index != last_sent_index + 1
+                        and frame_to_send != last_sent_index + 1
                     ):
                         self.logger.warning(
-                            "REPLAY_SEQ_GAP expected=%d got=%d",
+                            "REPLAY_SEQ_GAP expected=%d got=%d (seek?)",
                             last_sent_index + 1,
-                            self._current_frame_index,
+                            frame_to_send,
                         )
 
                     if use_sync:
@@ -742,10 +742,8 @@ class DCA1000Recording(RadarFeed):
                         # Publish the radar-driven processing window
                         try:
                             # Determine next frame timestamp for window end
-                            if self._current_frame_index + 1 < len(self._frame_files):
-                                _, ts_next, _ = self._frame_files[
-                                    self._current_frame_index + 1
-                                ]
+                            if frame_to_send + 1 < len(self._frame_files):
+                                _, ts_next, _ = self._frame_files[frame_to_send + 1]
                             else:
                                 # Last frame: allow camera to flush remaining frames
                                 ts_next = frame_timestamp + 1e9
@@ -755,7 +753,7 @@ class DCA1000Recording(RadarFeed):
                                     self._sync_state,
                                     frame_timestamp,
                                     ts_next,
-                                    self._current_frame_index,
+                                    frame_to_send,
                                 )
                             except Exception:
                                 pass
@@ -780,7 +778,7 @@ class DCA1000Recording(RadarFeed):
                             frame_payload = {
                                 "RADAR_REPLAY_FILEPATH": filepath,
                                 "FRAME": frame,
-                                "REPLAY_FRAME_INDEX": self._current_frame_index,
+                                "REPLAY_FRAME_INDEX": frame_to_send,
                             }
                             if os.environ.get("FULL_ANALYSIS", "0") in (
                                 "1",
@@ -809,13 +807,13 @@ class DCA1000Recording(RadarFeed):
                                 time.sleep(0.001)
 
                         self.logger.debug(
-                            f"Sent frame {self._current_frame_index}: {os.path.basename(filepath)} "
+                            f"Sent frame {frame_to_send}: {os.path.basename(filepath)} "
                             f"(timestamp: {frame_timestamp:.3f})"
                         )
                         if ack_queue is not None and full_analysis:
                             self.logger.info(
                                 "REPLAY_SEND frame_index=%d send_queue_time_ms=%.2f",
-                                self._current_frame_index,
+                                frame_to_send,
                                 (time.perf_counter() - send_start) * 1000.0,
                             )
 
@@ -833,15 +831,15 @@ class DCA1000Recording(RadarFeed):
                                 if not (
                                     isinstance(ack, dict)
                                     and ack.get("RADAR_FRAME_PROCESSED")
-                                    == self._current_frame_index
+                                    == frame_to_send
                                 ):
                                     self.logger.warning(
-                                        f"Unexpected ACK payload: {ack}"
+                                        f"Unexpected ACK payload: {ack} (expected frame {frame_to_send})"
                                     )
                                 else:
                                     self.logger.info(
                                         "REPLAY_ACK  frame_index=%d wait_ms=%.2f",
-                                        self._current_frame_index,
+                                        frame_to_send,
                                         (time.perf_counter() - ack_wait_start) * 1000.0,
                                     )
                             except queue.Empty:
@@ -849,8 +847,26 @@ class DCA1000Recording(RadarFeed):
                                 break
 
                         # Advance to next frame only after ACK (or immediately if no ACK)
-                        self._current_frame_index += 1
-                        last_sent_index += 1
+                        # In Full-Analysis mode, check if frame index was externally modified by seek
+                        if full_analysis and ack_queue is not None:
+                            # We just sent frame_to_send
+                            # Check if _current_frame_index was modified during send (seek command)
+                            if self._current_frame_index == frame_to_send:
+                                # Normal case: no seek during send, advance sequentially
+                                self._current_frame_index = frame_to_send + 1
+                                last_sent_index = frame_to_send
+                            else:
+                                # Seek detected: index was changed during send
+                                self.logger.info(
+                                    f"REPLAY_SEEK in Full-Analysis: sent frame {frame_to_send}, jumping to {self._current_frame_index}"
+                                )
+                                # Update last_sent to what we actually sent
+                                last_sent_index = frame_to_send
+                                # Don't modify _current_frame_index - seek already set it to target
+                        else:
+                            # Non-Full-Analysis mode: normal increment
+                            self._current_frame_index += 1
+                            last_sent_index += 1
 
                         # In full-analysis mode, let the camera catch up to window end before advancing further
                         try:
@@ -1149,6 +1165,12 @@ class DCA1000Recording(RadarFeed):
             position_str = command.split(":")[1]
             try:
                 position = int(position_str)
+                # Check if we're in Full-Analysis ACK-paced mode
+                full_analysis = os.environ.get("FULL_ANALYSIS", "0") in (
+                    "1",
+                    "true",
+                    "True",
+                )
                 if use_sync:
                     # In synchronized mode, convert frame to timeline position
                     if 0 <= position < len(self._frame_files):
@@ -1157,10 +1179,23 @@ class DCA1000Recording(RadarFeed):
                             self._sync_state
                         )
                         relative_time = target_timestamp - start_timestamp
-                        SyncStateUtils.seek_to_time(self._sync_state, relative_time)
-                        self.logger.debug(
-                            f"Seeked to timeline position {relative_time:.3f}s (frame {position})"
-                        )
+
+                        # In Full-Analysis mode, directly set frame index (timeline seeking is disabled)
+                        if (
+                            full_analysis
+                            and hasattr(self, "_ack_queue")
+                            and self._ack_queue is not None
+                        ):
+                            self._current_frame_index = position
+                            self.logger.info(
+                                f"REPLAY_SEEK_DIRECT: Set frame index to {position} (Full-Analysis mode)"
+                            )
+                        else:
+                            # Regular replay mode: use timeline-based seeking
+                            SyncStateUtils.seek_to_time(self._sync_state, relative_time)
+                            self.logger.debug(
+                                f"Seeked to timeline position {relative_time:.3f}s (frame {position})"
+                            )
                     else:
                         self.logger.error(
                             f"Frame index {position} out of range [0, {len(self._frame_files)-1}]"

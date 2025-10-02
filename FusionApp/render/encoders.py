@@ -518,6 +518,74 @@ def _render_point_cloud_cv_png(
             return None
 
 
+def _transform_ra_to_polar(ra_data: np.ndarray, extents: tuple) -> np.ndarray:
+    """
+    Transform rectangular range-azimuth data to polar coordinates for display.
+    
+    Args:
+        ra_data: Range-Azimuth data, shape (n_range, n_azimuth)
+        extents: (az_min, az_max, range_min, range_max) in degrees and meters
+        
+    Returns:
+        Polar image for display, shape (height, width)
+    """
+    try:
+        from scipy.ndimage import map_coordinates
+    except ImportError:
+        # Fallback to rectangular if scipy not available
+        return ra_data
+    
+    # Data comes in as (azimuth, range) after .T in radar_proc_kradar.py
+    # Transpose to get (range, azimuth) for proper polar mapping
+    ra_data = ra_data.T
+    n_range, n_azimuth = ra_data.shape
+    az_min, az_max, range_min, range_max = extents
+    
+    # Create output Cartesian grid
+    # Height (y-axis): 0 to range_max (bottom to top)
+    # Width (x-axis): -range_max to +range_max (left to right)
+    height = 400  # pixels
+    width = 800   # pixels
+    
+    # Create Cartesian meshgrid
+    # X: lateral distance from -range_max (left) to +range_max (right)
+    # Y: forward distance from 0 (bottom/radar) to range_max (top)
+    x = np.linspace(-range_max, range_max, width)
+    y = np.linspace(0, range_max, height)  # 0 at bottom (radar position), max at top
+    X, Y = np.meshgrid(x, y)
+    
+    # Convert Cartesian (x, y) to polar (range, azimuth)
+    R = np.sqrt(X**2 + Y**2)
+    Az_rad = np.arctan2(X, Y)  # atan2(x, y) gives azimuth from y-axis
+    Az_deg = np.rad2deg(Az_rad)
+    
+    # Create output image (initialize with MAXIMUM value for areas outside coverage = white/bright)
+    polar_image = np.full((height, width), np.max(ra_data), dtype=np.float32)
+    
+    # Mask for valid polar region (within azimuth coverage and range)
+    mask = (Az_deg >= az_min) & (Az_deg <= az_max) & (R >= range_min) & (R <= range_max)
+    
+    if np.any(mask):
+        # Normalize to indices
+        range_idx = (R[mask] - range_min) / (range_max - range_min) * (n_range - 1)
+        az_idx = (Az_deg[mask] - az_min) / (az_max - az_min) * (n_azimuth - 1)
+        
+        # Clip to valid indices
+        range_idx = np.clip(range_idx, 0, n_range - 1)
+        az_idx = np.clip(az_idx, 0, n_azimuth - 1)
+        
+        # Bilinear interpolation
+        coords = np.array([range_idx, az_idx])
+        interpolated = map_coordinates(ra_data, coords, order=1, mode='nearest')
+        
+        polar_image[mask] = interpolated
+    
+    # Flip vertically: image row 0 should be at top (y=range_max), row height-1 at bottom (y=0)
+    polar_image = np.flipud(polar_image)
+    
+    return polar_image
+
+
 def heatmap_to_png(
     array2d: np.ndarray,
     colormap: int = cv2.COLORMAP_JET,
@@ -525,12 +593,20 @@ def heatmap_to_png(
     *,
     force_square: bool = False,
     target_size: tuple = (640, 480),
+    polar: bool = False,
 ) -> Optional[bytes]:
     try:
         a = np.asarray(array2d)
         if a.ndim != 2 or a.size == 0:
             return None
         a = a.astype(np.float32, copy=False)
+        
+        # Apply polar transformation for range-azimuth data if requested
+        if polar and extents is not None and len(extents) == 4:
+            a = _transform_ra_to_polar(a, extents)
+            # Update extents for polar display (Cartesian space)
+            az_min, az_max, range_min, range_max = extents
+            extents = (-range_max, range_max, 0, range_max)
         finite = np.isfinite(a)
         if not np.any(finite):
             return None

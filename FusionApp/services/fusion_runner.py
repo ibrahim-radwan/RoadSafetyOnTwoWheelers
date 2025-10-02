@@ -309,81 +309,6 @@ class FusionRunner:
         self._running = True
         return True
 
-    def _save_point_cloud_npy(
-        self,
-        point_cloud: Optional[Dict[str, Any]],
-        frame_timestamp: Optional[float],
-        src_filepath: Optional[str] = None,
-    ) -> None:
-        """Save (x, y, z, power) array to .npy next to the matching .bin.
-
-        Active only in full-analysis mode.
-        """
-        try:
-            if not getattr(self, "_full_analysis", False):
-                return
-            if point_cloud is None or frame_timestamp is None:
-                return
-            # Determine target .npy path
-            if isinstance(src_filepath, str) and src_filepath:
-                bin_path = src_filepath
-                npy_path = os.path.splitext(bin_path)[0] + ".npy"
-            else:
-                # Only in full-analysis replay with known base directory
-                base_dir: Optional[str] = self._replay_dir if self._replay_dir else None
-                if base_dir is None:
-                    return
-                ts = float(frame_timestamp)
-                ts_i = int(ts)
-                ts_frac = int((ts - ts_i) * 1e5)
-                prefix = f"{ts_i:010d}_{ts_frac:05d}_"
-                try:
-                    matches = glob.glob(os.path.join(base_dir, prefix + "*.bin"))
-                    if not matches:
-                        return
-                    bin_path = matches[0]
-                    npy_path = os.path.splitext(bin_path)[0] + ".npy"
-                except Exception:
-                    return
-
-            try:
-                x = np.asarray(point_cloud.get("x", []), dtype=float)
-                y = np.asarray(point_cloud.get("y", []), dtype=float)
-                z_raw = point_cloud.get("z")
-                z = (
-                    np.asarray(z_raw, dtype=float)
-                    if z_raw is not None
-                    else np.zeros_like(x)
-                )
-                inten_raw = point_cloud.get("intensity", point_cloud.get("snr"))
-                inten = (
-                    np.asarray(inten_raw, dtype=float)
-                    if inten_raw is not None
-                    else np.zeros_like(x)
-                )
-                n = min(x.shape[0], y.shape[0], z.shape[0], inten.shape[0])
-                p = inten[:n]
-                try:
-                    pmin = float(np.nanmin(p)) if p.size > 0 else 0.0
-                    pmax = float(np.nanmax(p)) if p.size > 0 else 1.0
-                    denom = pmax - pmin
-                    if not np.isfinite(denom) or denom <= 1e-12:
-                        p = np.zeros_like(p, dtype=float)
-                    else:
-                        p = (p - pmin) / denom
-                        p = np.clip(p, 0.0, 1.0)
-                except Exception:
-                    p = np.zeros_like(p, dtype=float)
-                arr = np.stack((x[:n], y[:n], z[:n], p), axis=1)
-                np.save(npy_path, arr)
-            except Exception as e:
-                try:
-                    self.logger.warning(f"Point cloud npy save failed: {e}")
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
     def stop(self) -> None:
         self._stop_event.set()
         try:
@@ -787,34 +712,49 @@ class FusionRunner:
                     self._ra_shape, dtype=np_dtype, buffer=self._ra_blocks[slot].buf
                 )
                 arr = np.array(view, copy=True)
-                try:
-                    arr = np.rot90(arr, 1)
-                except Exception:
-                    pass
+                # Don't rotate for polar RA display - polar transform handles orientation
+                # try:
+                #     arr = np.rot90(arr, 1)
+                # except Exception:
+                #     pass
                 pc = self._latest_point_cloud or {}
                 mr = pc.get("max_range") if isinstance(pc, dict) else None
-                if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
-                    extents = (-90.0, 90.0, 0.0, float(mr))
+                # Get actual azimuth range from the data
+                az_grid = pc.get("tesseract_az_grid_deg") if isinstance(pc, dict) else None
+                if isinstance(az_grid, np.ndarray) and az_grid.size > 0:
+                    az_min, az_max = float(np.min(az_grid)), float(np.max(az_grid))
                 else:
-                    extents = (-90.0, 90.0, 0.0, 10.0)
+                    az_min, az_max = -60.0, 60.0  # Default for KRadar
+                if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
+                    extents = (az_min, az_max, 0.0, float(mr))
+                else:
+                    extents = (az_min, az_max, 0.0, 10.0)
                 return heatmap_to_png(
-                    arr, extents=extents, force_square=True, target_size=(640, 480)
+                    arr, extents=extents, force_square=False, target_size=(640, 480), polar=True
                 )
         except Exception:
             pass
         if isinstance(self._latest_ra, np.ndarray):
-            try:
-                arr = np.rot90(self._latest_ra, 1)
-            except Exception:
-                arr = self._latest_ra
+            # Don't rotate for polar display - polar transform handles orientation
+            # try:
+            #     arr = np.rot90(self._latest_ra, 1)
+            # except Exception:
+            #     arr = self._latest_ra
+            arr = self._latest_ra
             pc = self._latest_point_cloud or {}
             mr = pc.get("max_range") if isinstance(pc, dict) else None
-            if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
-                extents = (-90.0, 90.0, 0.0, float(mr))
+            # Get actual azimuth range from the data
+            az_grid = pc.get("tesseract_az_grid_deg") if isinstance(pc, dict) else None
+            if isinstance(az_grid, np.ndarray) and az_grid.size > 0:
+                az_min, az_max = float(np.min(az_grid)), float(np.max(az_grid))
             else:
-                extents = (-90.0, 90.0, 0.0, 10.0)
+                az_min, az_max = -60.0, 60.0  # Default for KRadar
+            if isinstance(mr, (int, float)) and np.isfinite(mr) and mr > 0:
+                extents = (az_min, az_max, 0.0, float(mr))
+            else:
+                extents = (az_min, az_max, 0.0, 10.0)
             return heatmap_to_png(
-                arr, extents=extents, force_square=True, target_size=(640, 480)
+                arr, extents=extents, force_square=False, target_size=(640, 480), polar=True
             )
         return None
 
