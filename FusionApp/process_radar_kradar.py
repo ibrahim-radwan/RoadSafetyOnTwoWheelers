@@ -5,6 +5,8 @@ Standalone script to process a single radar frame (.bin) and produce K-Radar art
 This script takes a .bin radar frame file and a radar config file as inputs,
 processes the frame through the K-Radar processing pipeline, and outputs:
 - Sparse point cloud (.npy)
+- Point cloud visualizations (.png: XY and XZ views)
+- Heatmap visualizations (.png: Range-Azimuth and Range-Elevation)
 - arr_zyx cube (.mat)
 - Tesseract 4D tensor (.mat)
 
@@ -285,6 +287,178 @@ def save_point_cloud_pngs(output_stem: str, result: dict, adc_params, logger) ->
         logger.error(traceback.format_exc())
 
 
+def save_heatmap_pngs(
+    output_stem: str,
+    result: dict,
+    adc_params,
+    logger,
+) -> None:
+    """
+    Save range-azimuth and range-elevation heatmaps as PNG images in polar format.
+
+    Range-azimuth is shown as a circular arc plot (top-down radar view).
+    Range-elevation is shown as a circular arc plot (side view).
+
+    Args:
+        output_stem: Output file stem (without extension)
+        result: Processing result dictionary from kradar pipeline
+        adc_params: ADC parameters for max_range and range_resolution
+        logger: Logger instance
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        logger.warning("Matplotlib not available, skipping heatmap visualizations")
+        return
+
+    try:
+        # Get range-azimuth map
+        range_azimuth = result.get("range_azimuth")
+        tesseract = result.get("tesseract")
+        az_grid_deg = result.get("tesseract_az_grid_deg")
+        el_grid_deg = result.get("tesseract_el_grid_deg")
+
+        # Get range parameters
+        range_res = float(getattr(adc_params, "range_resolution", 1.0))
+        max_range = getattr(adc_params, "max_range", None)
+        if max_range is None:
+            samples = int(getattr(adc_params, "samples", 256))
+            max_range = range_res * float(samples)
+        max_range = float(max_range)
+
+        # --- Range-Azimuth Heatmap (Polar Plot) ---
+        if range_azimuth is not None and range_azimuth.size > 0:
+            # Note: range_azimuth comes as (num_az_bins, num_range_bins) - transposed!
+            # We need to transpose it to get (num_range_bins, num_az_bins)
+            num_az_bins, num_range_bins = range_azimuth.shape
+            range_azimuth_corrected = range_azimuth.T  # Now (range, azimuth)
+
+            # Create range and azimuth axes
+            range_bins = np.arange(num_range_bins) * range_res
+            if az_grid_deg is not None and len(az_grid_deg) == num_az_bins:
+                az_bins_deg = az_grid_deg
+            else:
+                az_bins_deg = np.linspace(-53, 53, num_az_bins)
+
+            # Convert angles to radians (rotate 90° counter-clockwise so 0° points right)
+            az_bins_rad = np.deg2rad(az_bins_deg)
+
+            # Create meshgrid for polar plot
+            R, Theta = np.meshgrid(range_bins, az_bins_rad)
+
+            # Apply log scaling for better visualization
+            heatmap_data = np.log10(range_azimuth_corrected.T + 1e-10)
+
+            # Create polar plot
+            fig = plt.figure(figsize=(10, 10))
+            ax = fig.add_subplot(111, projection="polar")
+
+            # Plot the heatmap with blue-yellow-red colormap
+            im = ax.pcolormesh(Theta, R, heatmap_data, cmap="jet", shading="auto")
+
+            # Set the view to show the arc (azimuth range)
+            az_min_rad = np.deg2rad(az_bins_deg[0])
+            az_max_rad = np.deg2rad(az_bins_deg[-1])
+            ax.set_thetamin(np.rad2deg(az_min_rad))
+            ax.set_thetamax(np.rad2deg(az_max_rad))
+
+            # Set radial limits
+            ax.set_ylim(0, max_range)
+
+            # Configure appearance
+            ax.set_theta_zero_location(
+                "E"
+            )  # 0° at right (rotated 90° counter-clockwise)
+            ax.set_theta_direction(1)  # Counter-clockwise
+            ax.set_ylabel("Range (m)", fontsize=10, labelpad=30)
+            ax.set_title(
+                "Range-Azimuth Heatmap", fontsize=14, fontweight="bold", pad=20
+            )
+
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax, pad=0.1, fraction=0.046)
+            cbar.set_label("Log Power (dB)", fontsize=10)
+
+            plt.tight_layout()
+            ra_path = output_stem + "_range_azimuth.png"
+            plt.savefig(ra_path, dpi=150, bbox_inches="tight", facecolor="white")
+            plt.close(fig)
+            logger.info(f"Saved range-azimuth polar heatmap: {ra_path}")
+        else:
+            logger.warning("Range-azimuth map not available, skipping heatmap")
+
+        # --- Range-Elevation Heatmap (Polar Plot) ---
+        if (
+            tesseract is not None
+            and isinstance(tesseract, np.ndarray)
+            and tesseract.size > 0
+        ):
+            # Aggregate tesseract across Doppler (axis 0) and Azimuth (axis 3)
+            # Result shape: (Range, Elevation)
+            range_elevation = np.mean(tesseract, axis=(0, 3))
+
+            # Get dimensions
+            num_range_bins, num_el_bins = range_elevation.shape
+
+            # Create range and elevation axes
+            range_bins = np.arange(num_range_bins) * range_res
+            if el_grid_deg is not None and len(el_grid_deg) == num_el_bins:
+                el_bins_deg = el_grid_deg
+            else:
+                el_bins_deg = np.linspace(-18, 18, num_el_bins)
+
+            # Convert angles to radians (rotate 90° counter-clockwise so 0° points right)
+            el_bins_rad = np.deg2rad(el_bins_deg)
+
+            # Create meshgrid for polar plot
+            R, Theta = np.meshgrid(range_bins, el_bins_rad)
+
+            # Apply log scaling for better visualization
+            heatmap_data = np.log10(range_elevation.T + 1e-10)
+
+            # Create polar plot
+            fig = plt.figure(figsize=(10, 10))
+            ax = fig.add_subplot(111, projection="polar")
+
+            # Plot the heatmap with blue-yellow-red colormap
+            im = ax.pcolormesh(Theta, R, heatmap_data, cmap="jet", shading="auto")
+
+            # Set the view to show the arc (elevation range)
+            el_min_rad = np.deg2rad(el_bins_deg[0])
+            el_max_rad = np.deg2rad(el_bins_deg[-1])
+            ax.set_thetamin(np.rad2deg(el_min_rad))
+            ax.set_thetamax(np.rad2deg(el_max_rad))
+
+            # Set radial limits
+            ax.set_ylim(0, max_range)
+
+            # Configure appearance
+            ax.set_theta_zero_location(
+                "E"
+            )  # 0° at right (rotated 90° counter-clockwise)
+            ax.set_theta_direction(1)  # Counter-clockwise
+            ax.set_ylabel("Range (m)", fontsize=10, labelpad=30)
+            ax.set_title(
+                "Range-Elevation Heatmap", fontsize=14, fontweight="bold", pad=20
+            )
+
+            # Add colorbar
+            cbar = plt.colorbar(im, ax=ax, pad=0.1, fraction=0.046)
+            cbar.set_label("Log Power (dB)", fontsize=10)
+
+            plt.tight_layout()
+            re_path = output_stem + "_range_elevation.png"
+            plt.savefig(re_path, dpi=150, bbox_inches="tight", facecolor="white")
+            plt.close(fig)
+            logger.info(f"Saved range-elevation polar heatmap: {re_path}")
+        else:
+            logger.warning("Tesseract not available, skipping range-elevation heatmap")
+
+    except Exception as e:
+        logger.error(f"Failed to save heatmap PNGs: {e}")
+        import traceback
+
+        logger.error(traceback.format_exc())
+
+
 def save_tesseract_mat(output_stem: str, tesseract: np.ndarray, logger) -> None:
     """
     Save 4D tesseract (DREA tensor) to .mat file.
@@ -549,6 +723,7 @@ def process_single_frame(
     # Save artifacts
     save_point_cloud_npy(output_stem, result, logger)
     save_point_cloud_pngs(output_stem, result, adc_params, logger)
+    save_heatmap_pngs(output_stem, result, adc_params, logger)
 
     tesseract = result.get("tesseract")
     if tesseract is not None:
@@ -583,6 +758,8 @@ This will create:
   - processed/1234567890_12345_000000000001.npy (sparse point cloud)
   - processed/1234567890_12345_000000000001_xy.png (top-down view)
   - processed/1234567890_12345_000000000001_xz.png (side view)
+  - processed/1234567890_12345_000000000001_range_azimuth.png (range-azimuth heatmap)
+  - processed/1234567890_12345_000000000001_range_elevation.png (range-elevation heatmap)
   - processed/1234567890_12345_000000000001_tesseract.mat (4D DREA tensor)
   - processed/1234567890_12345_000000000001_arr_zyx.mat (3D Cartesian cube)
         """,
