@@ -12,6 +12,8 @@ numpy>=2.0.0
 scipy>=1.15.0
 scikit-learn>=1.6.0
 numba
+pydantic>=2.5.0
+PyYAML>=6.0
 
 # # Computer Vision and ML
 ultralytics
