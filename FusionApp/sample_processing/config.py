@@ -3,14 +3,37 @@
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs"
 DEFAULT_CONFIG_NAME = "default.yaml"
+
+
+_RANGE_KEY_PATTERN = re.compile(r"[\s,\-:]+")
+
+
+def _parse_range_key(key: Any) -> Tuple[float, float]:
+    """Parse a range expression (e.g., "0-10" or "(0, 10)") into floats."""
+
+    if isinstance(key, (tuple, list)) and len(key) == 2:
+        return float(key[0]), float(key[1])
+
+    if not isinstance(key, str):
+        raise ValueError(f"Unsupported range key type: {type(key)!r}")
+
+    cleaned = key.strip()
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        cleaned = cleaned[1:-1]
+    parts = [part for part in _RANGE_KEY_PATTERN.split(cleaned) if part]
+    if len(parts) != 2:
+        raise ValueError(f"Could not parse range key '{key}'")
+    start, end = map(float, parts)
+    return start, end
 
 
 def _ensure_configs_dir() -> Path:
@@ -37,6 +60,8 @@ class PowerNormalizationConfig(BaseModel):
 
     divide_by: float = 1e13
     clip_input_max: Optional[float] = None
+    range_based_divide_by: Optional[List[Tuple[float, float, float]]] = None
+    range_based_default_divide_by: Optional[float] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -50,12 +75,93 @@ class PowerNormalizationConfig(BaseModel):
                     data["clip_input_max"] = float(clip_value)
             elif isinstance(clip_value, (int, float)) and clip_value <= 0.0:
                 data["clip_input_max"] = None
+
+            range_value = data.get("range_based_divide_by")
+            default_value: Optional[float] = None
+            if isinstance(range_value, dict):
+                segments: List[Tuple[float, float, float]] = []
+                for key, value in range_value.items():
+                    if isinstance(key, str) and key.strip().lower() in {
+                        "default",
+                        "else",
+                        "fallback",
+                    }:
+                        default_value = float(value)
+                        continue
+                    start, end = _parse_range_key(key)
+                    segments.append((start, end, float(value)))
+                segments.sort(key=lambda item: item[0])
+                data["range_based_divide_by"] = segments
+                if default_value is not None:
+                    data["range_based_default_divide_by"] = default_value
+            elif isinstance(range_value, list):
+                segments_list: List[Tuple[float, float, float]] = []
+                for entry in range_value:
+                    if isinstance(entry, dict) and {"range", "divide_by"} <= set(
+                        entry.keys()
+                    ):
+                        rng = entry["range"]
+                        if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+                            raise ValueError("range entry must be a 2-element sequence")
+                        start, end = float(rng[0]), float(rng[1])
+                        value = float(entry["divide_by"])
+                        segments_list.append((start, end, value))
+                        if "default" in entry:
+                            default_value = float(entry["default"])
+                    elif isinstance(entry, dict) and "default" in entry:
+                        default_value = float(entry["default"])
+                    elif isinstance(entry, (list, tuple)) and len(entry) == 3:
+                        start, end, value = entry
+                        segments_list.append((float(start), float(end), float(value)))
+                    else:
+                        raise ValueError(
+                            "range_based_divide_by list entries must be dicts with 'range'/'divide_by' or 3-tuples"
+                        )
+                segments_list.sort(key=lambda item: item[0])
+                data["range_based_divide_by"] = segments_list
+                if default_value is not None:
+                    data["range_based_default_divide_by"] = default_value
+            elif isinstance(range_value, (int, float)):
+                data["range_based_default_divide_by"] = float(range_value)
         return data
 
     @model_validator(mode="after")
     def _validate(self) -> "PowerNormalizationConfig":
         if self.divide_by <= 0.0:
             raise ValueError("power_normalization.divide_by must be positive")
+        if (
+            self.range_based_default_divide_by is not None
+            and self.range_based_default_divide_by <= 0.0
+        ):
+            raise ValueError(
+                "power_normalization.range_based_default_divide_by must be positive"
+            )
+        if self.range_based_divide_by:
+            segments = list(self.range_based_divide_by)
+            if not segments:
+                self.range_based_divide_by = None
+            else:
+                prev_end = None
+                normalized_segments: List[Tuple[float, float, float]] = []
+                for start, end, value in segments:
+                    start_f = float(start)
+                    end_f = float(end)
+                    value_f = float(value)
+                    if value_f <= 0.0:
+                        raise ValueError(
+                            "power_normalization.range_based_divide_by divide_by values must be positive"
+                        )
+                    if end_f <= start_f:
+                        raise ValueError(
+                            "power_normalization.range_based_divide_by ranges must have end > start"
+                        )
+                    if prev_end is not None and start_f < prev_end:
+                        raise ValueError(
+                            "power_normalization.range_based_divide_by ranges must be non-overlapping and sorted"
+                        )
+                    prev_end = end_f
+                    normalized_segments.append((start_f, end_f, value_f))
+                object.__setattr__(self, "range_based_divide_by", normalized_segments)
         return self
 
 
@@ -242,7 +348,9 @@ def parse_override_entries(entries: Optional[Iterable[str]]) -> Dict[str, Any]:
         try:
             value = yaml.safe_load(raw_value)
         except yaml.YAMLError as exc:  # type: ignore[attr-defined]
-            raise ValueError(f"Failed to parse override value '{raw_value}': {exc}") from exc
+            raise ValueError(
+                f"Failed to parse override value '{raw_value}': {exc}"
+            ) from exc
         overrides[key] = value
     return overrides
 

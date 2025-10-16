@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 from mmwave import dsp
@@ -51,7 +51,9 @@ AWR2243_AZ_TX_INDICES = (0, 2)
 AWR2243_EL_TX_INDICES = (1,)
 AWR2243_SPATIAL_GRID_X_WL = np.arange(8, dtype=np.float32) * 0.5
 AWR2243_SPATIAL_GRID_Y_WL = np.array([0.0, 0.5], dtype=np.float32)
-AWR2243_ELEVATION_COLUMN_OFFSET = 2  # Elevation row (TX1) begins at x = 1.0λ (column index 2)
+AWR2243_ELEVATION_COLUMN_OFFSET = (
+    2  # Elevation row (TX1) begins at x = 1.0λ (column index 2)
+)
 AWR2243_SPATIAL_VALID_MASK = np.array(
     [
         [True, True, True, True, True, True, True, True],
@@ -78,7 +80,7 @@ def _resolve_dsp_window(name: str) -> dsp.utils.Window:
 
 
 def _resolve_spatial_window_config(
-    window: Optional[Union[str, SpatialWindowConfig]]
+    window: Optional[Union[str, SpatialWindowConfig]],
 ) -> Optional[Union[str, Dict[str, str]]]:
     """Normalize spatial window configuration for angle FFTs."""
 
@@ -209,7 +211,8 @@ def _compute_fft_drea(
             :, :, AWR2243_AZ_TX_INDICES[1], :
         ]
         spatial_cube[
-            :, :,
+            :,
+            :,
             1,
             AWR2243_ELEVATION_COLUMN_OFFSET : AWR2243_ELEVATION_COLUMN_OFFSET + num_rx,
         ] = aoa_cube[:, :, AWR2243_EL_TX_INDICES[0], :]
@@ -267,14 +270,22 @@ def _compute_fft_drea(
         tesseract = np.abs(fft2d_shift) ** 2
         effective_virtual = float(np.count_nonzero(AWR2243_SPATIAL_VALID_MASK))
         nominal_virtual = float(
-            max(len(AWR2243_AZ_TX_INDICES) * num_rx * len(AWR2243_EL_TX_INDICES) * num_rx, 1)
+            max(
+                len(AWR2243_AZ_TX_INDICES)
+                * num_rx
+                * len(AWR2243_EL_TX_INDICES)
+                * num_rx,
+                1,
+            )
         )
         power_scale = (nominal_virtual / max(effective_virtual, 1.0)) ** 2
         tesseract *= power_scale
         tesseract = tesseract.astype(np.float32, copy=False)
 
     else:
-        raise ValueError(f"Unknown angle_mode '{angle_mode}'. Use '1d_fft' or '2d_fft'.")
+        raise ValueError(
+            f"Unknown angle_mode '{angle_mode}'. Use '1d_fft' or '2d_fft'."
+        )
 
     azimuth_grid_deg = np.linspace(az_range[0], az_range[1], az_bins, dtype=np.float32)
     elevation_grid_deg = np.linspace(
@@ -427,12 +438,28 @@ def _polar_cfar_detect(
                     continue
                 if os_rank is None:
                     rank_fraction = CFAR_DEFAULT_OS_RANK
-                    k = int(np.clip(round(rank_fraction * (num_train_cells - 1)), 0, num_train_cells - 1))
+                    k = int(
+                        np.clip(
+                            round(rank_fraction * (num_train_cells - 1)),
+                            0,
+                            num_train_cells - 1,
+                        )
+                    )
                 elif isinstance(os_rank, float):
-                    k = int(np.clip(round(os_rank * (num_train_cells - 1)), 0, num_train_cells - 1))
+                    k = int(
+                        np.clip(
+                            round(os_rank * (num_train_cells - 1)),
+                            0,
+                            num_train_cells - 1,
+                        )
+                    )
                 else:
                     k = int(np.clip(os_rank, 0, num_train_cells - 1))
-                scale = os_alpha if os_alpha is not None else _cfar_alpha(num_train_cells, pfa)
+                scale = (
+                    os_alpha
+                    if os_alpha is not None
+                    else _cfar_alpha(num_train_cells, pfa)
+                )
                 threshold, _ = dsp.cfar.os_(
                     cut,
                     guard_len=range_guard,
@@ -1154,6 +1181,20 @@ def process_3d_radar_frame_kradar(
 
     pn_cfg = pc_cfg.power_normalization
     divide_by = float(getattr(pn_cfg, "divide_by", 1.0))
+    range_based_dividers = getattr(pn_cfg, "range_based_divide_by", None)
+    range_divider_segments: Optional[List[Tuple[float, float, float]]] = (
+        list(range_based_dividers) if range_based_dividers else None
+    )
+    range_default_divider = getattr(pn_cfg, "range_based_default_divide_by", None)
+    fallback_divider = float(divide_by)
+    if range_default_divider is not None and range_default_divider > 0.0:
+        fallback_divider = float(range_default_divider)
+    elif fallback_divider <= 0.0:
+        fallback_divider = 1.0
+
+    range_divider_used: Optional[np.ndarray] = None
+    range_bin_edges: Optional[np.ndarray] = None
+    range_bin_indices: Optional[np.ndarray] = None
     effective_clip_max: Optional[float] = None
 
     if point_cloud.shape[0] > 0 and pc_cfg.roi.enabled:
@@ -1193,30 +1234,151 @@ def process_3d_radar_frame_kradar(
                 effective_clip_max = clip_input_max
                 power_to_scale = np.clip(raw_power, 0.0, clip_input_max)
 
-        if divide_by > 0.0:
-            normalized = power_to_scale / divide_by
-        else:
-            normalized = power_to_scale.copy()
+        normalized: np.ndarray = power_to_scale.copy()
+        if range_divider_segments:
+            roi_x_min, roi_x_max = float(pc_cfg.roi.x[0]), float(pc_cfg.roi.x[1])
+            if pc_cfg.range_scale != 1.0:
+                scale = float(pc_cfg.range_scale)
+                roi_x_min *= scale
+                roi_x_max *= scale
+
+            if roi_x_max <= roi_x_min:
+                logger.warning(
+                    "%s Invalid ROI X bounds (min %.3f >= max %.3f); falling back to default divider",
+                    log_tag,
+                    roi_x_min,
+                    roi_x_max,
+                )
+            else:
+                segments_sorted = sorted(
+                    range_divider_segments,
+                    key=lambda seg: float(seg[0]),
+                )
+                num_segments = len(segments_sorted)
+                values = np.array(
+                    [float(seg[2]) for seg in segments_sorted], dtype=np.float32
+                )
+                starts = np.array(
+                    [float(seg[0]) for seg in segments_sorted], dtype=np.float32
+                )
+                ends = np.array(
+                    [float(seg[1]) for seg in segments_sorted], dtype=np.float32
+                )
+
+                dividers_per_point = np.full(
+                    power_to_scale.shape, fallback_divider, dtype=np.float32
+                )
+                bin_indices = np.full(power_to_scale.shape, -1, dtype=np.int32)
+                x_coords = point_cloud[:, 0]
+
+                for seg_idx, (start, end, value) in enumerate(segments_sorted):
+                    value_f = float(value)
+                    if value_f <= 0.0:
+                        logger.warning(
+                            "%s Range divider %.3e for segment %d is non-positive; skipping",
+                            log_tag,
+                            value_f,
+                            seg_idx,
+                        )
+                        continue
+
+                    start_f = float(start)
+                    end_f = float(end)
+                    if seg_idx == num_segments - 1:
+                        mask = (x_coords >= start_f) & (x_coords <= end_f)
+                    else:
+                        mask = (x_coords >= start_f) & (x_coords < end_f)
+                    if not np.any(mask):
+                        continue
+                    dividers_per_point[mask] = value_f
+                    bin_indices[mask] = seg_idx
+
+                outside_mask = bin_indices < 0
+                if np.any(outside_mask):
+                    logger.warning(
+                        "%s Range dividers left %d detections outside specified ranges; applying fallback divider=%.3e",
+                        log_tag,
+                        int(np.count_nonzero(outside_mask)),
+                        fallback_divider,
+                    )
+
+                normalized = power_to_scale / np.where(
+                    dividers_per_point > 0.0, dividers_per_point, fallback_divider
+                )
+                range_divider_used = values
+                range_bin_edges = np.column_stack((starts, ends))
+                range_bin_indices = bin_indices
+
+        if range_divider_used is None:
+            normalized = power_to_scale / fallback_divider
 
         point_cloud[:, 3] = normalized.astype(np.float32, copy=False)
 
         logger.debug(
-            "%s Power normalization raw_max=%.3e clip=%.3e divide_by=%.3e",
+            "%s Power normalization raw_max=%.3e clip=%.3e divide_strategy=%s",
             log_tag,
             raw_max,
             effective_clip_max if effective_clip_max is not None else 0.0,
-            divide_by,
+            (
+                "range"
+                if range_divider_used is not None
+                else f"scalar({fallback_divider:.3e})"
+            ),
         )
+        if (
+            range_divider_used is not None
+            and range_bin_edges is not None
+            and range_bin_indices is not None
+            and range_divider_used.size > 0
+        ):
+            raw_max_per_bin = np.zeros(range_divider_used.size, dtype=np.float32)
+            norm_max_per_bin = np.zeros(range_divider_used.size, dtype=np.float32)
+            valid_bin_mask = range_bin_indices >= 0
+            if np.any(valid_bin_mask):
+                np.maximum.at(
+                    raw_max_per_bin,
+                    range_bin_indices[valid_bin_mask],
+                    power_to_scale[valid_bin_mask],
+                )
+                np.maximum.at(
+                    norm_max_per_bin,
+                    range_bin_indices[valid_bin_mask],
+                    normalized[valid_bin_mask],
+                )
+            for seg_idx in range(range_divider_used.size):
+                start_edge, end_edge = range_bin_edges[seg_idx]
+                logger.info(
+                    "%s Range bin %d x=[%.2f, %.2f] divider=%.3e raw_max=%.3e norm_max=%.3e",
+                    log_tag,
+                    seg_idx,
+                    float(start_edge),
+                    float(end_edge),
+                    float(range_divider_used[seg_idx]),
+                    float(raw_max_per_bin[seg_idx]),
+                    float(norm_max_per_bin[seg_idx]),
+                )
 
     num_det = point_cloud.shape[0]
 
     logger.info("%s quantile_point_cloud final=%d", log_tag, num_det)
 
-    power_norm_info: Dict[str, float] = {
+    power_norm_info: Dict[str, Any] = {
         "divide_by": float(divide_by),
-        "clip_input_max": float(effective_clip_max) if effective_clip_max is not None else 0.0,
+        "clip_input_max": (
+            float(effective_clip_max) if effective_clip_max is not None else 0.0
+        ),
         "raw_max_observed": raw_max_observed,
     }
+    if range_default_divider is not None:
+        power_norm_info["range_based_default_divide_by"] = float(range_default_divider)
+    if range_divider_segments:
+        power_norm_info["range_based_divide_by"] = [
+            {
+                "range": [float(start), float(end)],
+                "divide_by": float(value),
+            }
+            for start, end, value in range_divider_segments
+        ]
 
     try:
         if num_det > 0:

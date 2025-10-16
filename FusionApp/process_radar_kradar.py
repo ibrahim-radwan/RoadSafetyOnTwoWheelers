@@ -46,6 +46,7 @@ except ImportError:
     plt = None  # type: ignore[assignment]
     LinearSegmentedColormap = None  # type: ignore[assignment]
 
+
 def load_bin_frame(filepath: str) -> np.ndarray:
     """
     Load a radar frame from .bin file.
@@ -839,12 +840,34 @@ def process_single_frame(
 
     power_norm_meta = result.get("power_normalization")
     if isinstance(power_norm_meta, dict):
-        logger.info(
-            "Power normalization: divide_by=%.3e clip_input_max=%.3e raw_max=%.3e",
-            float(power_norm_meta.get("divide_by", 1.0)),
-            float(power_norm_meta.get("clip_input_max", 0.0)),
-            float(power_norm_meta.get("raw_max_observed", 0.0)),
-        )
+        range_based = power_norm_meta.get("range_based_divide_by")
+        default_divider = power_norm_meta.get("range_based_default_divide_by")
+        if range_based:
+            logger.info(
+                "Power normalization: range-based=%s default=%.3e clip_input_max=%.3e raw_max=%.3e",
+                range_based,
+                (
+                    float(default_divider)
+                    if default_divider is not None
+                    else float(power_norm_meta.get("divide_by", 1.0))
+                ),
+                float(power_norm_meta.get("clip_input_max", 0.0)),
+                float(power_norm_meta.get("raw_max_observed", 0.0)),
+            )
+        elif default_divider is not None:
+            logger.info(
+                "Power normalization: default_divide=%.3e clip_input_max=%.3e raw_max=%.3e",
+                float(default_divider),
+                float(power_norm_meta.get("clip_input_max", 0.0)),
+                float(power_norm_meta.get("raw_max_observed", 0.0)),
+            )
+        else:
+            logger.info(
+                "Power normalization: divide_by=%.3e clip_input_max=%.3e raw_max=%.3e",
+                float(power_norm_meta.get("divide_by", 1.0)),
+                float(power_norm_meta.get("clip_input_max", 0.0)),
+                float(power_norm_meta.get("raw_max_observed", 0.0)),
+            )
 
     x_positions = result.get("x_pos")
     num_detections = len(x_positions) if x_positions is not None else 0
@@ -883,9 +906,7 @@ def process_single_frame(
                 logger,
             )
         else:
-            logger.warning(
-                "Angle grids missing from result, skipping arr_zyx artifact"
-            )
+            logger.warning("Angle grids missing from result, skipping arr_zyx artifact")
     else:
         logger.warning(
             "Tesseract not present in result, skipping tesseract and arr_zyx artifacts"
