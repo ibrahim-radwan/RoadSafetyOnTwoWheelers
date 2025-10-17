@@ -1,8 +1,8 @@
 # Thanks to OpenPCDet (https://github.com/open-mmlab/OpenPCDet)
 import torch
 
-from ops.iou3d_nms import iou3d_nms_utils
-from utils import common_utils
+from ....ops.iou3d_nms import iou3d_nms_utils
+from ....utils import common_utils
 
 
 class ATSSTargetAssigner(object):

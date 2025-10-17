@@ -1,8 +1,8 @@
 # Modified from OpenPCDet (https://github.com/open-mmlab/OpenPCDet)
 import torch
 
-from utils import box_utils
-from models.head.point_head_template import PointHeadTemplate
+from ...utils import box_utils
+from ...models.head.point_head_template import PointHeadTemplate
 
 
 class PointHeadSimple(PointHeadTemplate):

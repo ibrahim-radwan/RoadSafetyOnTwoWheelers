@@ -1,8 +1,10 @@
 from functools import partial
 
 import torch.nn as nn
+import spconv.pytorch as spconv
 
-from utils.spconv_utils import replace_feature, spconv
+def replace_feature(out, new_features):
+    return out.replace_feature(new_features)
 
 
 def post_act_block(in_channels, out_channels, kernel_size, indice_key=None, stride=1, padding=0,

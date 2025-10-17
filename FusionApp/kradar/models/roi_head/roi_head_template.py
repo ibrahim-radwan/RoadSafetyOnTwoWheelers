@@ -3,9 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils import box_coder_utils, common_utils, loss_utils
-from models.model_utils.model_nms_utils import class_agnostic_nms
-from models.roi_head.target_assigner.proposal_target_layer import ProposalTargetLayer
+from ...utils import box_coder_utils, common_utils, loss_utils
+from ...models.model_utils.model_nms_utils import class_agnostic_nms
+from ...models.roi_head.target_assigner.proposal_target_layer import ProposalTargetLayer
 
 
 class RoIHeadTemplate(nn.Module):

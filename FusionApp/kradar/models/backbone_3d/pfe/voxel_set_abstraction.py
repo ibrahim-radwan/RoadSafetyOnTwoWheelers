@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
 from ops.pointnet2.pointnet2_stack import pointnet2_utils as pointnet2_stack_utils
-from utils import common_utils
+from ....utils import common_utils
 
 def bilinear_interpolate_torch(im, x, y):
     """

@@ -9,7 +9,7 @@ import torch.nn as nn
 import numpy as np
 import nms
 
-from utils.Rotated_IoU.oriented_iou_loss import cal_iou
+from ...utils.Rotated_IoU.oriented_iou_loss import cal_iou
 
 class RdrSpcubeHead(nn.Module):
     def __init__(self, cfg):

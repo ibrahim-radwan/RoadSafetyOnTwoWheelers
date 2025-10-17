@@ -1,9 +1,9 @@
 # Modified from OpenPCDet (https://github.com/open-mmlab/OpenPCDet)
 import torch.nn as nn
 
-from ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
-from utils import common_utils
-from models.roi_head.roi_head_template import RoIHeadTemplate
+from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
+from ...utils import common_utils
+from ...models.roi_head.roi_head_template import RoIHeadTemplate
 
 
 class PVRCNNHead(RoIHeadTemplate):

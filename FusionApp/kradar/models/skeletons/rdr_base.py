@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from models import pre_processor, backbone_2d, backbone_3d, head, roi_head
+from .. import pre_processor, backbone_2d, backbone_3d, head, roi_head
 
 class RadarBase(nn.Module):
     def __init__(self, cfg):

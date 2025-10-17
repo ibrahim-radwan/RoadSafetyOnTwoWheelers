@@ -41,18 +41,10 @@ def main() -> None:
     parser.add_argument(
         "--conf-thr", type=float, default=0.3, help="Confidence threshold"
     )
-    parser.add_argument(
-        "--device", default="cuda", help="Device to run on (cuda or cpu)"
-    )
+
     parser.add_argument("--output-json", help="Optional path to save detections")
     args = parser.parse_args()
 
-    if args.device != "cuda":
-        raise ValueError("Radar inference currently supports only CUDA execution.")
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA device is required by the radar model (pre-processor uses CUDA kernels)."
-        )
     device = torch.device("cuda")
     result = run_single_inference(
         cfg_path=args.config,

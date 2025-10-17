@@ -7,8 +7,8 @@ from typing import Dict, List
 import numpy as np
 import torch
 
-from models.skeletons import build_skeleton
-from utils.util_config import cfg_from_yaml_file, cfg
+from .models.skeletons import build_skeleton
+from .utils.util_config import cfg_from_yaml_file, cfg
 
 
 class SparseRadarPCInference:

@@ -3,9 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.init import kaiming_normal_
-from models.model_utils import model_nms_utils
-from models.model_utils import centernet_utils
-from utils import loss_utils
+from ...models.model_utils import model_nms_utils
+from ...models.model_utils import centernet_utils
+from ...utils import loss_utils
 from functools import partial
 
 

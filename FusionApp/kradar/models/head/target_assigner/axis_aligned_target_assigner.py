@@ -2,8 +2,8 @@
 import numpy as np
 import torch
 
-from ops.iou3d_nms import iou3d_nms_utils
-from utils import box_utils
+from ....ops.iou3d_nms import iou3d_nms_utils
+from ....utils import box_utils
 
 
 class AxisAlignedTargetAssigner(object):

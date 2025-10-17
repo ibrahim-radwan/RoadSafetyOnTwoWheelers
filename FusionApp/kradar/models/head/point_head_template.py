@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ops.roiaware_pool3d import roiaware_pool3d_utils
-from utils import common_utils, loss_utils
+from ...ops.roiaware_pool3d import roiaware_pool3d_utils
+from ...utils import common_utils, loss_utils
 
 
 class PointHeadTemplate(nn.Module):
