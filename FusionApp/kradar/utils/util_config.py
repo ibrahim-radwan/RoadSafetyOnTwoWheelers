@@ -6,9 +6,10 @@ import yaml
 from easydict import EasyDict
 from pathlib import Path
 
+
 def merge_new_config(config, new_config):
-    if '_BASE_CONFIG_' in new_config:
-        with open(new_config['_BASE_CONFIG_'], 'r') as f:
+    if "_BASE_CONFIG_" in new_config:
+        with open(new_config["_BASE_CONFIG_"], "r") as f:
             try:
                 yaml_config = yaml.safe_load(f, Loader=yaml.FullLoader)
             except:
@@ -25,8 +26,9 @@ def merge_new_config(config, new_config):
 
     return config
 
+
 def cfg_from_yaml_file(cfg_file, config):
-    with open(cfg_file, 'r') as f:
+    with open(cfg_file, "r") as f:
         try:
             new_config = yaml.safe_load(f, Loader=yaml.FullLoader)
         except:
@@ -36,7 +38,8 @@ def cfg_from_yaml_file(cfg_file, config):
 
     return config
 
+
 # set empty as default and add key & values
 cfg = EasyDict()
-cfg.ROOT_DIR = (Path(__file__).resolve().parent / '../').resolve()
+cfg.ROOT_DIR = (Path(__file__).resolve().parent / "../").resolve()
 cfg.LOCAL_RANK = 0
