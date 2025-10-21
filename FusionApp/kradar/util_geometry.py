@@ -57,7 +57,8 @@ def get_pc_for_vis(pc, color=None):
 
     Args:
         pc: Nx3 or Nx4 numpy array (x, y, z, [power/intensity])
-        color: Color specification - 'black', 'gray', or RGB list [r, g, b] in [0, 1]
+        color: Color specification - 'black', 'gray', 'power', or RGB list [r, g, b] in [0, 1]
+               If 'power' is specified and pc has 4 columns, colors by power (light gray to black)
 
     Returns:
         o3d.geometry.PointCloud object
@@ -73,6 +74,22 @@ def get_pc_for_vis(pc, color=None):
         pcd.colors = o3d.utility.Vector3dVector(
             np.repeat(np.array([0.8, 0.8, 0.8])[np.newaxis, :], num_points, axis=0)
         )
+    elif color == "power" and pc.shape[1] >= 4:
+        # Color code by power: normalize power values and map to grayscale
+        # Medium gray (low power) to black (high power)
+        power = pc[:, 3]
+        power_min, power_max = power.min(), power.max()
+        if power_max > power_min:
+            power_norm = (power - power_min) / (power_max - power_min)
+        else:
+            power_norm = np.zeros_like(power)
+        # Map to grayscale: medium gray (0.5) to black (0.0)
+        # Higher power = darker color
+        gray_values = 0.5 - (
+            power_norm * 0.5
+        )  # Range from 0.5 (medium gray) to 0.0 (black)
+        colors_array = np.repeat(gray_values[:, np.newaxis], 3, axis=1)
+        pcd.colors = o3d.utility.Vector3dVector(colors_array)
     elif color is not None:
         pcd.colors = o3d.utility.Vector3dVector(
             np.repeat(np.array(color)[np.newaxis, :], num_points, axis=0)
