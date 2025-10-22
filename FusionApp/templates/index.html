@@ -169,6 +169,43 @@
     .picker .entry.selected {
       background: #cfe3ff;
     }
+
+    /* Tab Navigation Styles */
+    .tab-nav {
+      display: flex;
+      gap: 0;
+      border-bottom: 2px solid #ddd;
+      margin-bottom: 16px;
+    }
+
+    .tab-btn {
+      background: #f5f5f5;
+      border: 1px solid #ddd;
+      border-bottom: none;
+      padding: 10px 24px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: #666;
+      transition: all 0.2s ease;
+      border-radius: 6px 6px 0 0;
+      margin-right: 4px;
+      position: relative;
+      bottom: -2px;
+    }
+
+    .tab-btn:hover {
+      background: #e8e8e8;
+      color: #333;
+    }
+
+    .tab-btn.active {
+      background: white;
+      color: #2563eb;
+      border-color: #2563eb;
+      border-bottom: 2px solid white;
+      font-weight: 600;
+    }
   </style>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <script>
@@ -182,7 +219,8 @@
       const params = [];
       const radarOnly = document.getElementById('radar_only').checked;
       if (radarOnly) params.push('radar_only=1');
-      const mode = document.querySelector('input[name="server_mode"]:checked').value;
+      const activeTab = document.querySelector('.tab-btn.active');
+      const mode = activeTab ? activeTab.getAttribute('data-mode') : 'live';
       params.push('mode=' + encodeURIComponent(mode));
       if (mode === 'live') {
         const sel = document.getElementById('radar_cfg_sel');
@@ -797,8 +835,8 @@
     // Mode toggle: live vs replay (bind after DOM is ready)
     window.addEventListener('load', function () {
       function setModeUI() {
-        const modeEl = document.querySelector('input[name="server_mode"]:checked');
-        const mode = modeEl ? modeEl.value : 'live';
+        const activeTab = document.querySelector('.tab-btn.active');
+        const mode = activeTab ? activeTab.getAttribute('data-mode') : 'live';
         const liveOnlyEls = document.querySelectorAll('.live-only');
         const replayOnlyEls = document.querySelectorAll('.replay-only');
         liveOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'live'));
@@ -817,7 +855,17 @@
           } catch (e) { }
         }
       }
-      document.querySelectorAll('input[name="server_mode"]').forEach(r => r.addEventListener('change', setModeUI));
+      // Tab click handlers
+      document.querySelectorAll('.tab-btn').forEach(tab => {
+        tab.addEventListener('click', function() {
+          // Remove active class from all tabs
+          document.querySelectorAll('.tab-btn').forEach(t => t.classList.remove('active'));
+          // Add active class to clicked tab
+          this.classList.add('active');
+          // Update UI based on selected mode
+          setModeUI();
+        });
+      });
       setModeUI();
     });
   </script>
@@ -858,10 +906,9 @@
   <div class="row">
     <div class="col panel" style="flex:2;">
       <h3>Controls</h3>
-      <div style="margin-bottom:6px;">
-        <label>Server Mode:</label>
-        <label><input type="radio" name="server_mode" value="live" checked> Live</label>
-        <label><input type="radio" name="server_mode" value="replay"> Replay</label>
+      <div class="tab-nav">
+        <button class="tab-btn active" data-mode="live">Live</button>
+        <button class="tab-btn" data-mode="replay">Replay</button>
       </div>
       <label><input type="checkbox" id="radar_only"> Radar only</label>
       <div class="live-only">
@@ -987,7 +1034,7 @@
         <div style="margin-top:8px;"><button id="t_apply">Apply</button></div>
       </div>
     </div>
-    <div class="col panel" style="flex:1;">
+    <div class="col panel live-only" style="flex:1;">
       <h3>Recording Stats</h3>
       <div id="rec_dir" class="meta"></div>
       <div class="meta">Camera frames: <span id="cam_total">0</span> | write FPS(5s): <span id="cam_fps">0.00</span>
