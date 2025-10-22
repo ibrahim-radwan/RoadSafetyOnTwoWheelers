@@ -20,11 +20,17 @@ Example:
 import os
 import sys
 import argparse
+from typing import Any, Dict, Optional, Tuple, cast
+
 import numpy as np
-from typing import Optional
 
 from sample_processing.radar_params import ADCParams
 from sample_processing.radar_proc_kradar import process_3d_radar_frame_kradar
+from sample_processing.config import (
+    RadarPipelineConfig,
+    load_radar_config,
+    parse_override_entries,
+)
 from utils import setup_logger
 
 try:
@@ -37,6 +43,8 @@ try:
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
+    plt = None  # type: ignore[assignment]
+    LinearSegmentedColormap = None  # type: ignore[assignment]
 
 
 def load_bin_frame(filepath: str) -> np.ndarray:
@@ -107,7 +115,90 @@ def preprocess_frame(raw_data: np.ndarray, adc_params: ADCParams) -> np.ndarray:
     return complex_frame
 
 
-def save_point_cloud_npy(output_stem: str, result: dict, logger) -> None:
+def apply_roi(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    snr: np.ndarray,
+    logger,
+    roi: Optional[dict] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Filter sparse detections using an axis-aligned ROI without mutating inputs.
+
+    Args:
+        x: Forward positions array.
+        y: Lateral positions array.
+        z: Vertical positions array.
+        snr: Detection power/SNR array.
+        logger: Logger instance for diagnostic output.
+        roi: Optional ROI limits per axis, format:
+            {
+                "x": (xmin, xmax),
+                "y": (ymin, ymax),
+                "z": (zmin, zmax),
+            }
+
+    Returns:
+        Tuple of filtered (x, y, z, snr) arrays.
+    """
+    defaults = {
+        "x": (0.0, 100.0),
+        "y": (-6.2, 6.2),
+        "z": (-1.8, 5.8),
+    }
+    if roi is None:
+        roi = defaults
+    else:
+        roi = {
+            "x": roi.get("x", defaults["x"]),
+            "y": roi.get("y", defaults["y"]),
+            "z": roi.get("z", defaults["z"]),
+        }
+
+    if x.size == 0 or y.size == 0 or z.size == 0 or snr.size == 0:
+        logger.info("No sparse detections available for ROI filtering")
+        return x, y, z, snr
+
+    n = min(x.size, y.size, z.size, snr.size)
+    x = x[:n]
+    y = y[:n]
+    z = z[:n]
+    snr = snr[:n]
+
+    (xmin, xmax) = roi["x"]
+    (ymin, ymax) = roi["y"]
+    (zmin, zmax) = roi["z"]
+
+    mask = (
+        (x >= xmin)
+        & (x <= xmax)
+        & (y >= ymin)
+        & (y <= ymax)
+        & (z >= zmin)
+        & (z <= zmax)
+    )
+
+    kept = int(np.count_nonzero(mask))
+    logger.info(
+        "ROI filter applied: kept %d/%d detections within x=[%.1f, %.1f], y=[%.1f, %.1f], z=[%.1f, %.1f]",
+        kept,
+        n,
+        xmin,
+        xmax,
+        ymin,
+        ymax,
+        zmin,
+        zmax,
+    )
+
+    return x[mask], y[mask], z[mask], snr[mask]
+
+
+def save_point_cloud_npy(
+    output_stem: str,
+    result: dict,
+    logger,
+) -> None:
     """
     Save sparse point cloud to .npy file.
 
@@ -124,10 +215,12 @@ def save_point_cloud_npy(output_stem: str, result: dict, logger) -> None:
         z = np.asarray(result.get("z_pos", []), dtype=float)
         snr = np.asarray(result.get("snrs", []), dtype=float)
 
+        x, y, z, snr = apply_roi(x, y, z, snr, logger)
+
         n = min(x.shape[0], y.shape[0], z.shape[0], snr.shape[0])
 
         # K-Radar convention: [y, x, z, power]
-        arr = np.stack((y[:n], x[:n], z[:n], snr[:n]), axis=1)
+        arr = np.stack((x[:n], y[:n], z[:n], snr[:n]), axis=1)
 
         output_path = output_stem + ".npy"
         np.save(output_path, arr)
@@ -150,7 +243,7 @@ def save_point_cloud_pngs(output_stem: str, result: dict, adc_params, logger) ->
         adc_params: ADC parameters for max_range
         logger: Logger instance
     """
-    if not MATPLOTLIB_AVAILABLE:
+    if not MATPLOTLIB_AVAILABLE or plt is None or LinearSegmentedColormap is None:
         logger.warning("Matplotlib not available, skipping PNG visualizations")
         return
 
@@ -231,8 +324,8 @@ def save_point_cloud_pngs(output_stem: str, result: dict, adc_params, logger) ->
 
         # Set limits to max_range
         ax.set_aspect("equal", adjustable="box")
-        ax.set_xlim([-max_range, max_range])
-        ax.set_ylim([0, max_range])
+        ax.set_xlim(-max_range, max_range)
+        ax.set_ylim(0, max_range)
 
         plt.tight_layout()
         xy_path = output_stem + "_xy.png"
@@ -271,8 +364,8 @@ def save_point_cloud_pngs(output_stem: str, result: dict, adc_params, logger) ->
 
         # Set limits: z symmetric around 0, x from 0 to max_range
         z_max = max_range * 0.3  # 30% of max_range for vertical
-        ax.set_xlim([-z_max, z_max])
-        ax.set_ylim([0, max_range])
+        ax.set_xlim(-z_max, z_max)
+        ax.set_ylim(0, max_range)
 
         plt.tight_layout()
         xz_path = output_stem + "_xz.png"
@@ -305,7 +398,7 @@ def save_heatmap_pngs(
         adc_params: ADC parameters for max_range and range_resolution
         logger: Logger instance
     """
-    if not MATPLOTLIB_AVAILABLE:
+    if not MATPLOTLIB_AVAILABLE or plt is None:
         logger.warning("Matplotlib not available, skipping heatmap visualizations")
         return
 
@@ -326,10 +419,8 @@ def save_heatmap_pngs(
 
         # --- Range-Azimuth Heatmap (Polar Plot) ---
         if range_azimuth is not None and range_azimuth.size > 0:
-            # Note: range_azimuth comes as (num_az_bins, num_range_bins) - transposed!
-            # We need to transpose it to get (num_range_bins, num_az_bins)
+            # Note: range_azimuth comes as (num_az_bins, num_range_bins)
             num_az_bins, num_range_bins = range_azimuth.shape
-            range_azimuth_corrected = range_azimuth.T  # Now (range, azimuth)
 
             # Create range and azimuth axes
             range_bins = np.arange(num_range_bins) * range_res
@@ -344,12 +435,12 @@ def save_heatmap_pngs(
             # Create meshgrid for polar plot
             R, Theta = np.meshgrid(range_bins, az_bins_rad)
 
-            # Apply log scaling for better visualization
-            heatmap_data = np.log10(range_azimuth_corrected.T + 1e-10)
+            # Range-azimuth map already in dB scale; use as-is for plotting
+            heatmap_data = range_azimuth.astype(np.float32, copy=False)
 
             # Create polar plot
             fig = plt.figure(figsize=(10, 10))
-            ax = fig.add_subplot(111, projection="polar")
+            ax = cast(Any, fig.add_subplot(111, projection="polar"))
 
             # Plot the heatmap with blue-yellow-red colormap
             im = ax.pcolormesh(Theta, R, heatmap_data, cmap="jet", shading="auto")
@@ -357,8 +448,8 @@ def save_heatmap_pngs(
             # Set the view to show the arc (azimuth range)
             az_min_rad = np.deg2rad(az_bins_deg[0])
             az_max_rad = np.deg2rad(az_bins_deg[-1])
-            ax.set_thetamin(np.rad2deg(az_min_rad))
-            ax.set_thetamax(np.rad2deg(az_max_rad))
+            ax.set_thetamin(np.rad2deg(az_min_rad))  # type: ignore[attr-defined]
+            ax.set_thetamax(np.rad2deg(az_max_rad))  # type: ignore[attr-defined]
 
             # Set radial limits
             ax.set_ylim(0, max_range)
@@ -416,7 +507,7 @@ def save_heatmap_pngs(
 
             # Create polar plot
             fig = plt.figure(figsize=(10, 10))
-            ax = fig.add_subplot(111, projection="polar")
+            ax = cast(Any, fig.add_subplot(111, projection="polar"))
 
             # Plot the heatmap with blue-yellow-red colormap
             im = ax.pcolormesh(Theta, R, heatmap_data, cmap="jet", shading="auto")
@@ -424,8 +515,8 @@ def save_heatmap_pngs(
             # Set the view to show the arc (elevation range)
             el_min_rad = np.deg2rad(el_bins_deg[0])
             el_max_rad = np.deg2rad(el_bins_deg[-1])
-            ax.set_thetamin(np.rad2deg(el_min_rad))
-            ax.set_thetamax(np.rad2deg(el_max_rad))
+            ax.set_thetamin(np.rad2deg(el_min_rad))  # type: ignore[attr-defined]
+            ax.set_thetamax(np.rad2deg(el_max_rad))  # type: ignore[attr-defined]
 
             # Set radial limits
             ax.set_ylim(0, max_range)
@@ -483,6 +574,7 @@ def save_tesseract_mat(output_stem: str, tesseract: np.ndarray, logger) -> None:
 
 def save_arr_zyx_mat(
     output_stem: str,
+    result: Dict[str, Any],
     tesseract: np.ndarray,
     az_grid_deg: np.ndarray,
     el_grid_deg: np.ndarray,
@@ -507,6 +599,29 @@ def save_arr_zyx_mat(
     """
     try:
         from scipy.io import savemat
+
+        precomputed_cube = result.get("arr_zyx")
+        precomputed_z = result.get("arr_z")
+        precomputed_y = result.get("arr_y")
+        precomputed_x = result.get("arr_x")
+
+        if isinstance(precomputed_cube, np.ndarray) and precomputed_cube.size > 0:
+            payload: Dict[str, Any] = {"arr_zyx": precomputed_cube}
+            if isinstance(precomputed_z, np.ndarray):
+                payload["arr_z"] = precomputed_z
+            if isinstance(precomputed_y, np.ndarray):
+                payload["arr_y"] = precomputed_y
+            if isinstance(precomputed_x, np.ndarray):
+                payload["arr_x"] = precomputed_x
+
+            output_path = output_stem + "_arr_zyx.mat"
+            savemat(output_path, payload)
+            logger.info(
+                "Saved arr_zyx: %s (shape=%s)",
+                output_path,
+                getattr(precomputed_cube, "shape", None),
+            )
+            return
 
         if (
             tesseract is None
@@ -639,7 +754,9 @@ def save_arr_zyx_mat(
 
         output_path = output_stem + "_arr_zyx.mat"
         savemat(output_path, {"arr_zyx": arr_zyx})
-        logger.info(f"Saved arr_zyx: {output_path} (shape={arr_zyx.shape})")
+        logger.info(
+            f"Saved arr_zyx (recomputed): {output_path} (shape={arr_zyx.shape})"
+        )
     except Exception as e:
         logger.error(f"Failed to save arr_zyx .mat: {e}")
 
@@ -648,8 +765,10 @@ def process_single_frame(
     bin_filepath: str,
     config_filepath: str,
     output_dir: Optional[str] = None,
-    az_range: tuple = (-53, 53),
-    el_range: tuple = (-18, 18),
+    az_range: Optional[Tuple[float, float]] = None,
+    el_range: Optional[Tuple[float, float]] = None,
+    pipeline_config_path: Optional[str] = None,
+    pipeline_overrides: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Process a single radar frame and produce K-Radar artifacts.
@@ -694,19 +813,64 @@ def process_single_frame(
     complex_frame = preprocess_frame(raw_data, adc_params)
     logger.info(f"Preprocessed frame shape: {complex_frame.shape}")
 
-    # Process through K-Radar pipeline
-    logger.info(
-        f"Processing with K-Radar pipeline (az_range={az_range}, el_range={el_range})..."
-    )
+    # Load pipeline configuration (YAML)
+    pipeline_cfg: RadarPipelineConfig = load_radar_config(pipeline_config_path)
+
+    overrides: Dict[str, Any] = {}
+    if az_range is not None:
+        overrides["angle.azimuth_range"] = [float(az_range[0]), float(az_range[1])]
+    if el_range is not None:
+        overrides["angle.elevation_range"] = [float(el_range[0]), float(el_range[1])]
+    if pipeline_overrides:
+        overrides.update(pipeline_overrides)
+    if overrides:
+        pipeline_cfg = pipeline_cfg.overridden(overrides)
+
+    if pipeline_config_path:
+        logger.info(f"Using pipeline config: {pipeline_config_path}")
+    else:
+        logger.info("Using pipeline config: default.yaml")
+
+    logger.info("Processing with K-Radar pipeline...")
     result = process_3d_radar_frame_kradar(
         complex_frame,
         adc_params,
-        tuning=None,
-        az_range=az_range,
-        el_range=el_range,
+        config=pipeline_cfg,
     )
 
-    num_detections = len(result.get("x_pos", []))
+    power_norm_meta = result.get("power_normalization")
+    if isinstance(power_norm_meta, dict):
+        range_based = power_norm_meta.get("range_based_divide_by")
+        default_divider = power_norm_meta.get("range_based_default_divide_by")
+        if range_based:
+            logger.info(
+                "Power normalization: range-based=%s default=%.3e clip_input_max=%.3e raw_max=%.3e",
+                range_based,
+                (
+                    float(default_divider)
+                    if default_divider is not None
+                    else float(power_norm_meta.get("divide_by", 1.0))
+                ),
+                float(power_norm_meta.get("clip_input_max", 0.0)),
+                float(power_norm_meta.get("raw_max_observed", 0.0)),
+            )
+        elif default_divider is not None:
+            logger.info(
+                "Power normalization: default_divide=%.3e clip_input_max=%.3e raw_max=%.3e",
+                float(default_divider),
+                float(power_norm_meta.get("clip_input_max", 0.0)),
+                float(power_norm_meta.get("raw_max_observed", 0.0)),
+            )
+        else:
+            logger.info(
+                "Power normalization: divide_by=%.3e clip_input_max=%.3e raw_max=%.3e",
+                float(power_norm_meta.get("divide_by", 1.0)),
+                float(power_norm_meta.get("clip_input_max", 0.0)),
+                float(power_norm_meta.get("raw_max_observed", 0.0)),
+            )
+
+    x_positions = result.get("x_pos")
+    num_detections = len(x_positions) if x_positions is not None else 0
     logger.info(f"Processing complete. Detections: {num_detections}")
 
     # Determine output file stem
@@ -726,12 +890,23 @@ def process_single_frame(
     save_heatmap_pngs(output_stem, result, adc_params, logger)
 
     tesseract = result.get("tesseract")
-    if tesseract is not None:
+    if isinstance(tesseract, np.ndarray) and tesseract.size > 0:
         save_tesseract_mat(output_stem, tesseract, logger)
 
         az_grid = result.get("tesseract_az_grid_deg")
         el_grid = result.get("tesseract_el_grid_deg")
-        save_arr_zyx_mat(output_stem, tesseract, az_grid, el_grid, adc_params, logger)
+        if isinstance(az_grid, np.ndarray) and isinstance(el_grid, np.ndarray):
+            save_arr_zyx_mat(
+                output_stem,
+                result,
+                tesseract,
+                az_grid,
+                el_grid,
+                adc_params,
+                logger,
+            )
+        else:
+            logger.warning("Angle grids missing from result, skipping arr_zyx artifact")
     else:
         logger.warning(
             "Tesseract not present in result, skipping tesseract and arr_zyx artifacts"
@@ -789,19 +964,34 @@ This will create:
     parser.add_argument(
         "--az-range",
         nargs=2,
-        type=int,
-        default=[-53, 53],
+        type=float,
+        default=None,
         metavar=("MIN", "MAX"),
-        help="Azimuth range in degrees (default: -53 53)",
+        help="Optional azimuth range override in degrees",
     )
 
     parser.add_argument(
         "--el-range",
         nargs=2,
-        type=int,
-        default=[-18, 18],
+        type=float,
+        default=None,
         metavar=("MIN", "MAX"),
-        help="Elevation range in degrees (default: -18 18)",
+        help="Optional elevation range override in degrees",
+    )
+
+    parser.add_argument(
+        "--pipeline-config",
+        help="Path to pipeline YAML configuration (defaults to configs/default.yaml)",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--set",
+        dest="pipeline_overrides",
+        metavar="KEY=VALUE",
+        action="append",
+        default=None,
+        help="Override pipeline config entries (repeatable).",
     )
 
     args = parser.parse_args()
@@ -820,13 +1010,17 @@ This will create:
             "config_file is required (either as positional argument or --config-file)"
         )
 
+    pipeline_overrides = parse_override_entries(args.pipeline_overrides)
+
     try:
         process_single_frame(
             bin_file,
             config_file,
             output_dir=args.output_dir,
-            az_range=tuple(args.az_range),
-            el_range=tuple(args.el_range),
+            az_range=tuple(args.az_range) if args.az_range else None,
+            el_range=tuple(args.el_range) if args.el_range else None,
+            pipeline_config_path=args.pipeline_config,
+            pipeline_overrides=pipeline_overrides or None,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
