@@ -209,22 +209,6 @@ def system_stop():
     return ("OK", 200)
 
 
-@app.route("/system/retry", methods=["POST"])
-def system_retry():
-    global runner
-    if runner is None:
-        return ("runner not initialized", 503)
-    try:
-        runner.stop()
-    except Exception:
-        pass
-    ok = runner.start()
-    return (
-        "OK" if ok else f"FAILED: {runner._failure_reason or 'unknown'}",
-        200 if ok else 500,
-    )
-
-
 @app.route("/replay/control", methods=["POST"])
 def replay_control():
     global runner
