@@ -184,18 +184,6 @@
       if (radarOnly) params.push('radar_only=1');
       const mode = document.querySelector('input[name="server_mode"]:checked').value;
       params.push('mode=' + encodeURIComponent(mode));
-      // Artefact toggles only meaningful for full-analysis mode; only append when mode==='full'
-      if (mode === 'full') {
-        try {
-          const tcb = document.getElementById('af_tesseract');
-          // default to enabled if checkbox missing
-          const tval = (tcb ? tcb.checked : true) ? '1' : '0';
-          const zcb = document.getElementById('af_zyx_cube');
-          const zval = (zcb ? zcb.checked : true) ? '1' : '0';
-          params.push('tesseract=' + tval);
-          params.push('zyx_cube=' + zval);
-        } catch (e) { /* ignore */ }
-      }
       if (mode === 'live') {
         const sel = document.getElementById('radar_cfg_sel');
         const cfg = sel && sel.value ? sel.value : '';
@@ -228,18 +216,6 @@
         document.getElementById('status').textContent = JSON.stringify(j, null, 2);
         fetchProcesses();
         renderTimes(j);
-        // Sync artefact checkboxes when running or after status pull (do not override user edits if not full mode)
-        try {
-          const art = j && j.artefacts ? j.artefacts : {};
-          if (typeof art.enable_tesseract === 'boolean') {
-            const tcb = document.getElementById('af_tesseract');
-            if (tcb && isRunning) tcb.checked = art.enable_tesseract;
-          }
-          if (typeof art.enable_zyx_cube === 'boolean') {
-            const zcb = document.getElementById('af_zyx_cube');
-            if (zcb && isRunning) zcb.checked = art.enable_zyx_cube;
-          }
-        } catch (e) { }
         try {
           if (typeof j.running === 'boolean') {
             isRunning = j.running;
@@ -268,18 +244,6 @@
                   if (radarTimer) clearInterval(radarTimer);
                   // When engine stops, reset replay playing flag
                   rpPlaying = false;
-                }
-              }
-            } catch (e) { }
-            // Sync artefact checkbox states while engine running
-            try {
-              const art = j && j.artefacts ? j.artefacts : {};
-              if (isRunning) {
-                if (typeof art.enable_tesseract === 'boolean') {
-                  const tcb = document.getElementById('af_tesseract'); if (tcb) tcb.checked = art.enable_tesseract;
-                }
-                if (typeof art.enable_zyx_cube === 'boolean') {
-                  const zcb = document.getElementById('af_zyx_cube'); if (zcb) zcb.checked = art.enable_zyx_cube;
                 }
               }
             } catch (e) { }
@@ -345,12 +309,12 @@
               // Brief delay to allow process to initialize queues
               await new Promise(r => setTimeout(r, 300));
             }
-          } catch (e) { 
+          } catch (e) {
             console.error('Failed to start system before seek:', e);
             return;  // Don't proceed if start failed
           }
           rpCur = n;
-          await replayCmd('seek:' + n); 
+          await replayCmd('seek:' + n);
           seekEl.value = ''; // Clear input after seeking
         }
       };
@@ -837,13 +801,10 @@
         const mode = modeEl ? modeEl.value : 'live';
         const liveOnlyEls = document.querySelectorAll('.live-only');
         const replayOnlyEls = document.querySelectorAll('.replay-only');
-        const fullOnlyEls = document.querySelectorAll('.full-only');
         liveOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'live'));
-        // Treat 'full' like 'replay' for UI purposes
         replayOnlyEls.forEach(el => el.classList.toggle('hidden', mode === 'live'));
-        fullOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'full'));
-        // Prefill defaults when switching into replay/full mode
-        if ((mode === 'replay' || mode === 'full') && window.__defaults) {
+        // Prefill defaults when switching into replay mode
+        if (mode === 'replay' && window.__defaults) {
           try {
             if (window.__defaults.default_replay_path) {
               const rp = document.getElementById('replay_path');
@@ -901,19 +862,8 @@
         <label>Server Mode:</label>
         <label><input type="radio" name="server_mode" value="live" checked> Live</label>
         <label><input type="radio" name="server_mode" value="replay"> Replay</label>
-        <label><input type="radio" name="server_mode" value="full"> Full-Analysis</label>
       </div>
       <label><input type="checkbox" id="radar_only"> Radar only</label>
-      <div class="full-only hidden" style="margin-top:6px;">
-        <fieldset style="display:inline-block; min-width:220px;">
-          <legend>Full Analysis Artefacts</legend>
-          <label style="display:block; margin-bottom:4px;"><input type="checkbox" id="af_tesseract" checked> Tesseract
-            (4D MUSIC)</label>
-          <label style="display:block; margin-bottom:4px;"><input type="checkbox" id="af_zyx_cube" checked> ZYX Cube
-            (Cartesian)</label>
-          <div class="meta">Effective only in Full-Analysis mode.</div>
-        </fieldset>
-      </div>
       <div class="live-only">
         <button onclick="systemStart()">Start System</button>
         <button onclick="systemStop()">Stop System</button>

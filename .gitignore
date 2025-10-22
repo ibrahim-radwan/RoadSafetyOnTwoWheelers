@@ -4,3 +4,4 @@ fpga_udp.egg-info/
 FusionApp/fpga_udp/fpga_udp.cpython-310-x86_64-linux-gnu.so
 .vscode/
 cp_KRADAR/
+*/kradar/**/*.pyd
