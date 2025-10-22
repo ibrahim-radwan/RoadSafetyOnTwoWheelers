@@ -142,6 +142,7 @@ def run_single_inference(
     az_range: Optional[Tuple[float, float]] = None,
     el_range: Optional[Tuple[float, float]] = None,
     save_artifacts: bool = True,
+    save_mat: bool = False,
     visualize: bool = False,
     interactive: bool = False,
     view_angle: str = "perspective",
@@ -161,6 +162,7 @@ def run_single_inference(
         az_range: Optional azimuth range (min, max) in degrees
         el_range: Optional elevation range (min, max) in degrees
         save_artifacts: Whether to save intermediate artifacts
+        save_mat: Whether to save tesseract and zyx .mat files (requires save_artifacts=True)
         visualize: Whether to generate 3D visualizations
         interactive: Whether to show interactive 3D viewer (requires visualize=True)
         view_angle: View angle for saved images: 'top', 'side', 'perspective', or 'all'
@@ -196,23 +198,24 @@ def run_single_inference(
         save_point_cloud_pngs(output_stem, result, adc_params, logger)
         save_heatmap_pngs(output_stem, result, adc_params, logger)
 
-        # Save tesseract and arr_zyx if available
-        tesseract = result.get("tesseract")
-        if isinstance(tesseract, np.ndarray) and tesseract.size > 0:
-            save_tesseract_mat(output_stem, tesseract, logger)
+        # Save tesseract and arr_zyx if available and --save-mat flag is set
+        if save_mat:
+            tesseract = result.get("tesseract")
+            if isinstance(tesseract, np.ndarray) and tesseract.size > 0:
+                save_tesseract_mat(output_stem, tesseract, logger)
 
-            az_grid = result.get("tesseract_az_grid_deg")
-            el_grid = result.get("tesseract_el_grid_deg")
-            if isinstance(az_grid, np.ndarray) and isinstance(el_grid, np.ndarray):
-                save_arr_zyx_mat(
-                    output_stem,
-                    result,
-                    tesseract,
-                    az_grid,
-                    el_grid,
-                    adc_params,
-                    logger,
-                )
+                az_grid = result.get("tesseract_az_grid_deg")
+                el_grid = result.get("tesseract_el_grid_deg")
+                if isinstance(az_grid, np.ndarray) and isinstance(el_grid, np.ndarray):
+                    save_arr_zyx_mat(
+                        output_stem,
+                        result,
+                        tesseract,
+                        az_grid,
+                        el_grid,
+                        adc_params,
+                        logger,
+                    )
 
     # Run inference on the point cloud
     logger.info("Running K-Radar model inference...")
@@ -359,6 +362,7 @@ def run_batch_inference(
     az_range: Optional[Tuple[float, float]] = None,
     el_range: Optional[Tuple[float, float]] = None,
     save_artifacts: bool = True,
+    save_mat: bool = False,
     visualize: bool = False,
     interactive: bool = False,
     view_angle: str = "perspective",
@@ -378,6 +382,7 @@ def run_batch_inference(
         az_range: Optional azimuth range (min, max) in degrees
         el_range: Optional elevation range (min, max) in degrees
         save_artifacts: Whether to save intermediate artifacts
+        save_mat: Whether to save tesseract and zyx .mat files (requires save_artifacts=True)
         visualize: Whether to generate 3D visualizations
         interactive: Whether to show interactive 3D viewer (updated in real-time)
         view_angle: View angle for saved images
@@ -453,23 +458,25 @@ def run_batch_inference(
                 save_point_cloud_pngs(output_stem, result, adc_params, logger)
                 save_heatmap_pngs(output_stem, result, adc_params, logger)
 
-                tesseract = result.get("tesseract")
-                if isinstance(tesseract, np.ndarray) and tesseract.size > 0:
-                    save_tesseract_mat(output_stem, tesseract, logger)
-                    az_grid = result.get("tesseract_az_grid_deg")
-                    el_grid = result.get("tesseract_el_grid_deg")
-                    if isinstance(az_grid, np.ndarray) and isinstance(
-                        el_grid, np.ndarray
-                    ):
-                        save_arr_zyx_mat(
-                            output_stem,
-                            result,
-                            tesseract,
-                            az_grid,
-                            el_grid,
-                            adc_params,
-                            logger,
-                        )
+                # Save tesseract and arr_zyx if available and --save-mat flag is set
+                if save_mat:
+                    tesseract = result.get("tesseract")
+                    if isinstance(tesseract, np.ndarray) and tesseract.size > 0:
+                        save_tesseract_mat(output_stem, tesseract, logger)
+                        az_grid = result.get("tesseract_az_grid_deg")
+                        el_grid = result.get("tesseract_el_grid_deg")
+                        if isinstance(az_grid, np.ndarray) and isinstance(
+                            el_grid, np.ndarray
+                        ):
+                            save_arr_zyx_mat(
+                                output_stem,
+                                result,
+                                tesseract,
+                                az_grid,
+                                el_grid,
+                                adc_params,
+                                logger,
+                            )
 
             # Run inference
             logger.info("Running K-Radar model inference...")
@@ -725,6 +732,11 @@ Examples:
         action="store_true",
         help="Skip saving intermediate artifacts (point clouds, heatmaps, etc.)",
     )
+    parser.add_argument(
+        "--save-mat",
+        action="store_true",
+        help="Save tesseract and zyx .mat files (only effective if --no-artifacts is not set)",
+    )
 
     # Visualization options
     parser.add_argument(
@@ -774,6 +786,7 @@ Examples:
                 az_range=tuple(args.az_range) if args.az_range else None,
                 el_range=tuple(args.el_range) if args.el_range else None,
                 save_artifacts=not args.no_artifacts,
+                save_mat=args.save_mat,
                 visualize=args.visualize,
                 interactive=args.interactive,
                 view_angle=args.view_angle,
@@ -812,6 +825,7 @@ Examples:
                 az_range=tuple(args.az_range) if args.az_range else None,
                 el_range=tuple(args.el_range) if args.el_range else None,
                 save_artifacts=not args.no_artifacts,
+                save_mat=args.save_mat,
                 visualize=args.visualize,
                 interactive=args.interactive,
                 view_angle=args.view_angle,

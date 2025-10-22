@@ -216,7 +216,7 @@ def create_video(
 ) -> None:
     """
     Create a video from camera frames and perspective detection visualizations.
-    Uses H.264 codec for high quality output.
+    Tries multiple codecs with fallback for compatibility.
 
     Args:
         input_dir: Directory containing the PNG files
@@ -244,12 +244,19 @@ def create_video(
     target_width = None
     target_height = None
 
-    # Use H.264 codec (avc1 for MP4)
-    codec = "avc1"
+    # List of codecs to try in order of preference
+    # Each codec is (fourcc_string, description)
+    codecs_to_try = [
+        ("mp4v", "MPEG-4"),  # Most compatible
+        ("XVID", "Xvid"),  # Good compatibility
+        ("MJPG", "Motion JPEG"),  # Widely supported
+        ("X264", "H.264 (x264)"),  # May work with ffmpeg
+        ("avc1", "H.264 (avc1)"),  # Try H.264 variants
+        ("H264", "H.264"),
+    ]
 
     print(f"\nCreating video: {output_path}")
     print(f"FPS: {fps}")
-    print(f"Codec: H.264 (avc1)")
 
     for perspective_path, perspective_timestamp in perspective_files:
         # Find matching camera frame
@@ -290,14 +297,30 @@ def create_video(
                 height -= 1
                 combined_frame = combined_frame[:height, :]
 
-            fourcc = cv2.VideoWriter_fourcc(*codec)
-            video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            # Try each codec until one works
+            codec_used = None
+            for codec_fourcc, codec_desc in codecs_to_try:
+                print(f"Trying codec: {codec_desc} ({codec_fourcc})...")
+                fourcc = cv2.VideoWriter_fourcc(*codec_fourcc)
+                video_writer = cv2.VideoWriter(
+                    output_path, fourcc, fps, (width, height)
+                )
 
-            if not video_writer.isOpened():
-                print(f"Error: Failed to open video writer with H.264 codec")
+                if video_writer.isOpened():
+                    codec_used = codec_desc
+                    print(f"✓ Successfully initialized with {codec_desc} codec")
+                    break
+                else:
+                    video_writer.release()
+                    video_writer = None
+
+            if video_writer is None or not video_writer.isOpened():
+                print(f"Error: Failed to open video writer with any codec")
+                print(f"Codecs tried: {', '.join([c[1] for c in codecs_to_try])}")
                 return
 
             print(f"Video resolution: {width}x{height}")
+            print(f"Using codec: {codec_used}")
 
             # Store target dimensions for consistency check
             target_width = width
