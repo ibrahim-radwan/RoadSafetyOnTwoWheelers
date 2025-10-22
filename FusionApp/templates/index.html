@@ -1439,11 +1439,11 @@
         </div>
       </div>
       <!-- System Control & Processes Row -->
-      <div class="live-only" style="margin-top:12px; display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
+      <div style="margin-top:12px; display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
         <!-- System Control Card -->
         <div class="control-card" style="min-width:200px;">
           <div class="control-card-header" style="margin-bottom:12px;">System Control</div>
-          <div style="margin-bottom:12px;">
+          <div class="live-only" style="margin-bottom:12px;">
             <label style="font-size:13px; color:#6b7280; display:block; margin-bottom:6px;">Radar Config</label>
             <select id="radar_cfg_sel">
               {% if radar_config_options %}
@@ -1454,7 +1454,7 @@
               {% endif %}
             </select>
           </div>
-
+          
           <div style="display:flex; gap:8px;">
             <button class="btn-start" id="btn-system-start" onclick="systemStart()">
               <span id="start-btn-text">▶ Start System</span>
