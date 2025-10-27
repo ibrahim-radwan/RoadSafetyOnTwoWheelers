@@ -752,8 +752,8 @@ def process_3D_radar_frame_music_2d(
         # Return RD transposed to match analyser RD SHM shape (chirps, samples) before UI rotation
         "range_doppler": det_matrix.T,
         "range_azimuth": range_azimuth,
-        "x_pos": xs,
-        "y_pos": ys,
+        "x_pos": ys,
+        "y_pos": xs,
         "z_pos": zs,
         "velocities": velocities,
         "snrs": snrs,

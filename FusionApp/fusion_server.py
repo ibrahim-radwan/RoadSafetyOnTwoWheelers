@@ -249,7 +249,14 @@ def replay_info():
                     if l.endswith(".bin"):
                         rad += 1
                     elif l.endswith(".png"):
-                        cam += 1
+                        # Only count PNG files whose names contain only numbers and underscores
+                        # and end with a number (e.g., 0000000412_06917_000000012314.png)
+                        # Exclude files like _xz.png, frame_001.png, heatmap_xz.png, etc.
+                        name_without_ext = l[:-4]  # Remove .png extension
+                        if name_without_ext and name_without_ext[-1].isdigit():
+                            # Check that name only contains digits and underscores
+                            if all(c.isdigit() or c == "_" for c in name_without_ext):
+                                cam += 1
         except Exception:
             pass
         return jsonify({"radar_frames": int(rad), "camera_frames": int(cam)})

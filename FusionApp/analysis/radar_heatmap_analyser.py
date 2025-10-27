@@ -21,6 +21,10 @@ from sample_processing.radar_proc import (
     process_3D_radar_frame,
     custom_process_frame,
 )
+from sample_processing.config import (
+    load_radar_config,
+    DEFAULT_CONFIG_NAME,
+)
 from utils import setup_logger, disable_shm_resource_tracker
 from multiprocessing import shared_memory
 
@@ -432,16 +436,20 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             from sample_processing.radar_proc_kradar import (
                 process_3d_radar_frame_kradar,
             )
-
-            az_range = (-53, 53)
-            el_range = (-18, 18)
-            result = process_3d_radar_frame_kradar(
-                frame,
-                self.adc_params,
-                tuning=getattr(self, "tuning", {}),
-                az_range=az_range,
-                el_range=el_range,
+            from sample_processing.radar_proc import process_3D_radar_frame
+            from sample_processing.radar_proc_music2d import (
+                process_3D_radar_frame_music_2d,
             )
+
+            # Load pipeline configuration in "realtime" mode for live analysis
+            # pipeline_cfg = load_radar_config(None, mode="realtime")
+            # result = process_3d_radar_frame_kradar(
+            #     frame,
+            #     self.adc_params,
+            #     config=pipeline_cfg,
+            # )
+            # result = process_3D_radar_frame(frame, self.adc_params)
+            result = process_3D_radar_frame_music_2d(frame, self.adc_params)
         else:
             raise RuntimeError(
                 f"Unsupported adc_params.tx={getattr(self.adc_params, 'tx', None)}; expected 2 or 3"

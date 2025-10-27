@@ -847,6 +847,8 @@
     let unifiedTimer = null;
     let lastVideoTick = 0;
     let lastRadarTick = 0;
+    let videoFPS = 1;
+    let radarFPS = 1;
     let procTimer = null;
     let pc3dInitialized = false; // preserve 3D camera across frames
     let pc3dResetOnNext = false; // force reset camera when switching to 3D
@@ -862,22 +864,12 @@
         if (!isRunning) return;
         const now = Date.now();
         try {
-          const vMode = document.querySelector('input[name="video_mode"]:checked').value;
-          if (vMode === 'live') {
-            let vfps = parseInt((document.getElementById('video_fps').value || '1'), 10);
-            vfps = Math.max(1, vfps);
-            const vPeriod = Math.max(50, Math.floor(1000 / vfps));
-            if (now - lastVideoTick >= vPeriod) { fetchVideoFrame(); lastVideoTick = now; }
-          }
+          const vPeriod = Math.max(50, Math.floor(1000 / videoFPS));
+          if (now - lastVideoTick >= vPeriod) { fetchVideoFrame(); lastVideoTick = now; }
         } catch (e) { }
         try {
-          const rMode = document.querySelector('input[name="radar_mode"]:checked').value;
-          if (rMode === 'live') {
-            let rfps = parseInt((document.getElementById('radar_fps').value || '1'), 10);
-            rfps = Math.max(1, rfps);
-            const rPeriod = Math.max(50, Math.floor(1000 / rfps));
-            if (now - lastRadarTick >= rPeriod) { fetchRadarFrame(); lastRadarTick = now; }
-          }
+          const rPeriod = Math.max(50, Math.floor(1000 / radarFPS));
+          if (now - lastRadarTick >= rPeriod) { fetchRadarFrame(); lastRadarTick = now; }
         } catch (e) { }
       }, basePeriod);
     }
@@ -900,17 +892,45 @@
       el.src = url;
     }
     function bindViewerControls() {
-      // Defaults to 1 fps
-      const vSel = document.getElementById('video_fps');
-      if (vSel) vSel.value = '1';
-      const rSel = document.getElementById('radar_fps');
-      if (rSel) rSel.value = '1';
-      document.querySelectorAll('input[name="video_mode"]').forEach(r => r.addEventListener('change', () => { scheduleVideoPoll(); }));
-      document.querySelectorAll('input[name="radar_mode"]').forEach(r => r.addEventListener('change', () => { scheduleRadarPoll(); }));
-      document.getElementById('video_fps').addEventListener('change', () => { scheduleVideoPoll(); });
-      document.getElementById('radar_fps').addEventListener('change', () => { scheduleRadarPoll(); });
-      document.getElementById('video_next').addEventListener('click', () => { clearInterval(videoTimer); fetchVideoFrame(); });
-      document.getElementById('radar_next').addEventListener('click', () => { clearInterval(radarTimer); fetchRadarFrame(); });
+      // Video FPS button handlers
+      document.querySelectorAll('[data-vfps]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const fps = parseInt(e.target.getAttribute('data-vfps'), 10);
+          if (fps) {
+            videoFPS = fps;
+            // Highlight active button
+            document.querySelectorAll('[data-vfps]').forEach(b => b.style.opacity = '0.6');
+            e.target.style.opacity = '1';
+          }
+        });
+        // Set default (1 fps)
+        if (btn.getAttribute('data-vfps') === '1') {
+          btn.style.opacity = '1';
+        } else {
+          btn.style.opacity = '0.6';
+        }
+      });
+
+      // Radar FPS button handlers
+      document.querySelectorAll('[data-rfps]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const fps = parseInt(e.target.getAttribute('data-rfps'), 10);
+          if (fps) {
+            radarFPS = fps;
+            // Highlight active button
+            document.querySelectorAll('[data-rfps]').forEach(b => b.style.opacity = '0.6');
+            e.target.style.opacity = '1';
+          }
+        });
+        // Set default (1 fps)
+        if (btn.getAttribute('data-rfps') === '1') {
+          btn.style.opacity = '1';
+        } else {
+          btn.style.opacity = '0.6';
+        }
+      });
+
+      // Radar mode button handlers
       document.querySelectorAll('[data-rmode]').forEach(b => b.addEventListener('click', (e) => {
         const m = e.target.getAttribute('data-rmode');
         if (m) {
@@ -1111,7 +1131,7 @@
       const radarOnly = document.getElementById('radar_only')?.checked || false;
 
       const expected = [
-        'WebServer', 'RadarFeed', 'CameraFeed', 'FusionEngine', 'RadarAnalyser', 'CameraAnalyser'
+        'WebServer', 'FusionEngine', 'RadarFeed', 'RadarAnalyser', 'CameraFeed', 'CameraAnalyser'
       ];
 
       const byLabel = {};
@@ -1442,19 +1462,23 @@
       <div style="margin-top:12px; display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
         <!-- System Control Card -->
         <div class="control-card" style="min-width:200px;">
-          <div class="control-card-header" style="margin-bottom:12px;">System Control</div>
-          <div class="live-only" style="margin-bottom:12px;">
-            <label style="font-size:13px; color:#6b7280; display:block; margin-bottom:6px;">Radar Config</label>
-            <select id="radar_cfg_sel">
-              {% if radar_config_options %}
-              {% for o in radar_config_options %}
-              <option value="{{ o.path }}" {% if o.mode=='3D' and ('180m' in (o.label|lower)) %}selected{% endif %}>{{
-                o.label }}</option>
-              {% endfor %}
-              {% endif %}
-            </select>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; gap:16px;">
+            <div class="control-card-header" style="margin:0;">System Control</div>
+            <div class="live-only">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <label style="font-size:13px; color:#6b7280; margin:0; white-space:nowrap;">Radar Config</label>
+                <select id="radar_cfg_sel" style="min-width:120px;">
+                  {% if radar_config_options %}
+                  {% for o in radar_config_options %}
+                  <option value="{{ o.path }}" {% if o.mode=='3D' and ('180m' in (o.label|lower)) %}selected{% endif %}>
+                    {{ o.label }}</option>
+                  {% endfor %}
+                  {% endif %}
+                </select>
+              </div>
+            </div>
           </div>
-          
+
           <div style="display:flex; gap:8px;">
             <button class="btn-start" id="btn-system-start" onclick="systemStart()">
               <span id="start-btn-text">▶ Start System</span>
@@ -1469,36 +1493,36 @@
         </div>
 
         <!-- System Processes Card -->
-        <div class="control-card" style="flex:1; min-width:320px; max-width:400px;">
+        <div class="control-card" style="flex:1; min-width:420px; max-width:500px;">
           <div class="control-card-header" style="margin-bottom:12px;">System Processes</div>
-          <div style="display:flex; gap:12px;" id="process-status-inline">
-            <!-- Left Column: WebServer, RadarFeed, CameraFeed -->
-            <div style="display:flex; flex-direction:column; gap:6px; width:160px;">
-              <div class="process-item">
+          <div style="display:flex; flex-direction:column; gap:6px;" id="process-status-inline">
+            <!-- Row 1: WebServer, FusionEngine, RadarFeed -->
+            <div style="display:flex; gap:12px;">
+              <div class="process-item" style="width:130px;">
                 <span class="process-dot stopped"></span>
                 <span>WebServer</span>
               </div>
-              <div class="process-item">
-                <span class="process-dot stopped"></span>
-                <span>RadarFeed</span>
-              </div>
-              <div class="process-item" data-requires="camera">
-                <span class="process-dot stopped"></span>
-                <span>CameraFeed</span>
-              </div>
-            </div>
-
-            <!-- Right Column: FusionEngine, RadarAnalyser, CameraAnalyser -->
-            <div style="display:flex; flex-direction:column; gap:6px; width:160px;">
-              <div class="process-item">
+              <div class="process-item" style="width:130px;">
                 <span class="process-dot stopped"></span>
                 <span>FusionEngine</span>
               </div>
-              <div class="process-item">
+              <div class="process-item" style="width:130px;">
+                <span class="process-dot stopped"></span>
+                <span>RadarFeed</span>
+              </div>
+            </div>
+
+            <!-- Row 2: RadarAnalyser, CameraFeed, CameraAnalyser -->
+            <div style="display:flex; gap:12px;">
+              <div class="process-item" style="width:130px;">
                 <span class="process-dot stopped"></span>
                 <span>RadarAnalyser</span>
               </div>
-              <div class="process-item" data-requires="camera">
+              <div class="process-item" data-requires="camera" style="width:130px;">
+                <span class="process-dot stopped"></span>
+                <span>CameraFeed</span>
+              </div>
+              <div class="process-item" data-requires="camera" style="width:130px;">
                 <span class="process-dot stopped"></span>
                 <span>CameraAnalyser</span>
               </div>
@@ -1507,31 +1531,87 @@
         </div>
       </div>
 
+      <!-- Video and Radar Visualizers -->
+      <div class="row" style="gap:16px;">
+        <div class="col panel" style="max-width:656px; padding:8px;">
+          <div style="position:relative;">
+            <img id="video_view" alt="Video"
+              style="width:640px; height:640px; display:block; background:#000; object-fit:contain;" />
+            <div
+              style="position:absolute; top:8px; left:8px; background:rgba(0,0,0,0.7); padding:4px 6px; border-radius:6px; display:flex; align-items:center; gap:6px;">
+              <span style="color:#fff; font-size:42px; line-height:1;">📹</span>
+              <button class="btn-neutral btn-sm" data-vfps="1" style="padding:4px 8px; font-size:11px;">1 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="3" style="padding:4px 8px; font-size:11px;">3 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="5" style="padding:4px 8px; font-size:11px;">5 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="10" style="padding:4px 8px; font-size:11px;">10 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="15" style="padding:4px 8px; font-size:11px;">15 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="30" style="padding:4px 8px; font-size:11px;">30 fps</button>
+            </div>
+          </div>
+        </div>
+        <div class="col panel" style="max-width:656px; padding:8px;">
+          <div style="position:relative;">
+            <img id="radar_view" alt="Radar"
+              style="width:640px; height:640px; display:block; background:#000; object-fit:contain;" />
+            <div id="radar_plot" style="width:640px;height:640px;display:none;"></div>
+            <div
+              style="position:absolute; top:8px; left:8px; background:rgba(0,0,0,0.7); padding:4px 6px; border-radius:6px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+              <span style="color:#fff; font-size:42px; line-height:1;">📡</span>
+              <button class="btn-neutral btn-sm" data-rmode="rd" style="padding:4px 10px; font-size:11px;">RD</button>
+              <button class="btn-neutral btn-sm" data-rmode="ra" style="padding:4px 10px; font-size:11px;">RA</button>
+              <button class="btn-neutral btn-sm" data-rmode="pc2d"
+                style="padding:4px 10px; font-size:11px;">PC-2D</button>
+              <button class="btn-neutral btn-sm" data-rmode="pc3d"
+                style="padding:4px 10px; font-size:11px;">PC-3D</button>
+              <span style="width:4px;"></span>
+              <button class="btn-neutral btn-sm" data-rfps="1" style="padding:4px 8px; font-size:11px;">1 fps</button>
+              <button class="btn-neutral btn-sm" data-rfps="2" style="padding:4px 8px; font-size:11px;">2 fps</button>
+              <button class="btn-neutral btn-sm" data-rfps="5" style="padding:4px 8px; font-size:11px;">5 fps</button>
+              <button class="btn-neutral btn-sm" data-rfps="10" style="padding:4px 8px; font-size:11px;">10 fps</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Recording Control Card -->
       <div class="live-only control-card" id="recording-card">
-        <div class="control-card-header">Recording</div>
+        <div style="display:flex; gap:16px; align-items:flex-start;">
+          <!-- Recording Buttons -->
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <button class="btn-record" id="btn-start-record" onclick="startRecord()" disabled>● Start Recording</button>
+            <button class="btn-stop" id="btn-stop-record" onclick="stopRecord()" disabled>⏹ Stop Recording</button>
+          </div>
 
-        <div style="display:flex; gap:8px; margin-bottom:16px;">
-          <button class="btn-record" id="btn-start-record" onclick="startRecord()" disabled>● Start Recording</button>
-          <button class="btn-stop" id="btn-stop-record" onclick="stopRecord()" disabled>⏹ Stop Recording</button>
-        </div>
-
-        <!-- Recording Stats -->
-        <div style="padding:12px; background:#f9fafb; border-radius:8px; border:1px solid #e5e7eb;">
-          <div id="rec_dir" class="meta" style="margin-bottom:6px; font-weight:500;">dir: -</div>
-          <div class="meta">Camera: <span id="cam_total">0</span> frames | <span id="cam_fps">0.00</span> fps</div>
-          <div class="meta">Radar: <span id="rad_total">0</span> frames | <span id="rad_fps">0.00</span> fps</div>
-          <div class="meta">Data: <span id="bytes_total">0.00</span> MB | BW: <span id="bw_bps">0.00</span> MB/s</div>
-          <div class="meta">Duration: <span id="rec_dur">00:00:00</span></div>
+          <!-- Recording Stats -->
+          <div style="flex:1; padding:12px; background:#f9fafb; border-radius:8px; border:1px solid #e5e7eb;">
+            <div id="rec_dir" class="meta" style="margin-bottom:8px; font-weight:500; font-size:12px;">dir: -</div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px 16px; font-size:12px;">
+              <div class="meta">
+                <span style="font-weight:500;">Camera:</span> <span id="cam_total">0</span> frames | <span
+                  id="cam_fps">0.00</span> fps
+              </div>
+              <div class="meta">
+                <span style="font-weight:500;">Radar:</span> <span id="rad_total">0</span> frames | <span
+                  id="rad_fps">0.00</span> fps
+              </div>
+              <div class="meta">
+                <span style="font-weight:500;">Data:</span> <span id="bytes_total">0.00</span> MB | <span
+                  id="bw_bps">0.00</span> MB/s
+              </div>
+              <div class="meta">
+                <span style="font-weight:500;">Duration:</span> <span id="rec_dur">00:00:00</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="replay-only hidden" style="margin-top:12px;">
-        <h4>Replay Inputs</h4>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <div style="min-width:320px;">
             <div class="meta">Recording directory</div>
             <div style="display:flex; gap:6px;">
-              <input id="replay_path" style="flex:1;" placeholder="/home/user/recording_dir" />
+              <input id="replay_path" style="flex:1; direction:rtl; text-align:left;"
+                placeholder="/home/user/recording_dir" />
               <button class="btn-neutral btn-sm"
                 onclick="document.getElementById('picker_dir').classList.toggle('hidden'); listDir('picker_dir_list','');">Browse</button>
             </div>
@@ -1548,7 +1628,8 @@
           <div style="min-width:320px;">
             <div class="meta">Radar config file</div>
             <div style="display:flex; gap:6px;">
-              <input id="replay_cfg" style="flex:1;" placeholder="/home/user/configs/AWR...txt" />
+              <input id="replay_cfg" style="flex:1; direction:rtl; text-align:left;"
+                placeholder="/home/user/configs/AWR...txt" />
               <button class="btn-neutral btn-sm"
                 onclick="document.getElementById('picker_cfg').classList.toggle('hidden'); listDir('picker_cfg_list','');">Browse</button>
             </div>
@@ -1564,7 +1645,6 @@
           </div>
         </div>
         <div style="margin-top:8px;">
-          <h4>Playback</h4>
           <button class="btn-start" id="rp_play">▶ Play</button>
           <button class="btn-neutral" id="rp_pause">⏸ Pause</button>
           <button class="btn-stop" id="rp_stop">⏹ Stop</button>
@@ -1628,54 +1708,6 @@
         </div>
         <div style="margin-top:8px;"><button class="btn-start" id="t_apply">Apply</button></div>
       </div>
-    </div>
-  </div>
-  <div class="row">
-    <div class="col panel">
-      <h3>Video</h3>
-      <div>
-        <label>Mode: </label>
-        <label><input type="radio" name="video_mode" value="live" checked> Live</label>
-        <label>FPS:</label>
-        <select id="video_fps">
-          <option selected>1</option>
-          <option>3</option>
-          <option>5</option>
-          <option>10</option>
-          <option>15</option>
-          <option>30</option>
-        </select>
-        <span class="gap"></span>
-        <label><input type="radio" name="video_mode" value="manual"> Manual</label>
-        <button class="btn-neutral btn-sm" id="video_next">Next frame</button>
-      </div>
-      <img id="video_view" alt="Video" />
-    </div>
-    <div class="col panel">
-      <h3>Radar</h3>
-      <div>
-        <label>Mode: </label>
-        <button class="btn-neutral btn-sm" data-rmode="rd">RD</button>
-        <button class="btn-neutral btn-sm" data-rmode="ra">RA</button>
-        <button class="btn-neutral btn-sm" data-rmode="pc2d">PC-2D</button>
-        <button class="btn-neutral btn-sm" data-rmode="pc3d">PC-3D</button>
-        <label><input type="radio" name="radar_mode" value="live" checked> Live</label>
-        <label>FPS:</label>
-        <select id="radar_fps">
-          <option selected>1</option>
-          <option>2</option>
-          <option>5</option>
-          <option>10</option>
-        </select>
-        <span class="gap"></span>
-        <label><input type="radio" name="radar_mode" value="manual"> Manual</label>
-        <button class="btn-neutral btn-sm" id="radar_next">Next frame</button>
-      </div>
-      <div style="margin:8px 0;">
-
-      </div>
-      <img id="radar_view" alt="Radar" />
-      <div id="radar_plot" style="width:640px;height:480px;display:none;"></div>
     </div>
   </div>
   <div class="row">

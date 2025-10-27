@@ -72,6 +72,18 @@ class PNGCamera(CameraFeed):
         # Parse timestamps from filenames and sort
         for filepath in png_files:
             filename = os.path.basename(filepath)
+
+            # Only process PNG files whose names contain only numbers and underscores
+            # and end with a number (e.g., 0000000412_06917_000000012314.png)
+            # Exclude files like _xz.png, frame_001.png, heatmap_xz.png, etc.
+            name_without_ext = filename[:-4] if filename.endswith(".png") else filename
+            if not name_without_ext or not name_without_ext[-1].isdigit():
+                continue
+
+            # Check that name only contains digits and underscores
+            if not all(c.isdigit() or c == "_" for c in name_without_ext):
+                continue
+
             try:
                 # Parse timestamp from filename format: {integer_part}_{fraction_part}_{frame_number}.png
                 parts = filename.split("_")
