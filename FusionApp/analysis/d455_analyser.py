@@ -100,7 +100,7 @@ class D455Analyser(CameraAnalyser):
             if not self._analysis_enabled:
                 return objects
             if self._yolo_model is None:
-                self._yolo_model = YOLO("yolov8n.pt")
+                self._yolo_model = YOLO("models/video_analysis/yolov8n.pt")
             start_time = time.perf_counter()
             # Simpler call path observed to be faster in your setup
             results = self._yolo_model(rgb_image, verbose=False)
@@ -188,48 +188,56 @@ class D455Analyser(CameraAnalyser):
             self._half = False
             self._device_arg = "cpu"
 
-        # Deactivate analysis if no CUDA and log an error once
+        # Exit analyser process if no CUDA acceleration available
         if self._device != "cuda":
-            self._analysis_enabled = False
             self.logger.error(
-                "GPU/HW acceleration is not available. Object detection is deactivated."
+                "GPU/HW acceleration is not available. Object detection requires CUDA. Exiting analyser process."
             )
-            self.logger.info(f"AVG Runtime: {0.0:.4f}s (frame {0})")
-        else:
-            # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
-            model_loaded = False
-            if _running_on_jetson():
-                try:
-                    self._yolo_model = YOLO("yolov8n.engine")
-                    self._backend = "tensorrt"
-                    model_loaded = True
-                    self.logger.info("Loaded TensorRT engine 'yolov8n.engine'")
-                except Exception as e:
-                    self.logger.info(
-                        f"TensorRT engine not used ({e}); falling back to PyTorch 'yolov8n.pt'"
-                    )
-            else:
-                self.logger.info(
-                    "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
-                )
+            # Exit the analyser process gracefully
+            return
+
+        # Load YOLO model (CUDA is available)
+        model_loaded = False
+
+        # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
+        if _running_on_jetson():
             try:
-                if not model_loaded:
-                    self._yolo_model = YOLO("yolov8n.pt")
-                    self._backend = "torch"
-                    model_loaded = True
+                self._yolo_model = YOLO("models/video_analysis/yolov8n.engine")
+                self._backend = "tensorrt"
+                model_loaded = True
+                self.logger.info(
+                    "Loaded TensorRT engine 'models/video_analysis/yolov8n.engine'"
+                )
+            except Exception as e:
+                self.logger.info(
+                    f"TensorRT engine not used ({e}); falling back to PyTorch 'models/video_analysis/yolov8n.pt'"
+                )
+        else:
+            self.logger.info(
+                "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
+            )
+
+        # Load PyTorch model if TensorRT was not loaded
+        if not model_loaded:
+            try:
+                self._yolo_model = YOLO("models/video_analysis/yolov8n.pt")
+                self._backend = "torch"
+                model_loaded = True
+                self.logger.info(f"Loaded YOLO PyTorch model on device={self._device}")
             except Exception as e:
                 self.logger.error(f"Failed to load YOLO model: {e}")
                 self._analysis_enabled = False
+                return
 
-            # Log device and optimization info (keep minimal)
-            if self._analysis_enabled and model_loaded:
-                try:
-                    name = torch.cuda.get_device_name(0)
-                    self.logger.info(
-                        f"Using CUDA device: {name}, backend={self._backend}, imgsz={self._imgsz}"
-                    )
-                except Exception:
-                    pass
+        # Log device and optimization info (keep minimal)
+        if self._analysis_enabled and model_loaded:
+            try:
+                name = torch.cuda.get_device_name(0)
+                self.logger.info(
+                    f"Using CUDA device: {name}, backend={self._backend}, imgsz={self._imgsz}"
+                )
+            except Exception:
+                pass
 
             # Warm up kernels to reduce first-frame latency
             try:

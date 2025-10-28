@@ -5,3 +5,11 @@ FusionApp/fpga_udp/fpga_udp.cpython-310-x86_64-linux-gnu.so
 .vscode/
 cp_KRADAR/
 */kradar/**/*.pyd
+
+# Python wheel files
+*.whl
+
+# Large model files (download separately)
+*.engine
+*.onnx
+*.pt
