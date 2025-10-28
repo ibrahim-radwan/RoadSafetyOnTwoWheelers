@@ -1,11 +1,14 @@
 import numpy as np
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 from sample_processing.radar_params import ADCParams
 from config_params import CFGS
 from utils import setup_logger
+
+if TYPE_CHECKING:
+    from sample_processing.config import RadarPipelineConfig
 
 # Set up logger for radar processing
 logger = setup_logger("RadarProc")
@@ -186,7 +189,12 @@ from mmwave.tracking import EKF
 tracker = EKF()
 
 
-def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
+def openradar_pd_process_frame(
+    frame,
+    adc_params: ADCParams,
+    IS_INDOOR=True,
+    config=None,  # type: Optional[RadarPipelineConfig]
+):
     """
     Process radar frame using OpenRadar methods with Capon beamforming and CFAR detection.
 
@@ -224,7 +232,13 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     """
     import time
     from mmwave import dsp
-    from config_params import CFGS
+    from sample_processing.config import load_radar_config
+
+    # Load config if not provided
+    if config is None:
+        config = load_radar_config(None)
+
+    edge_mask_size = config.detection.edge_mask_size
 
     function_start = time.perf_counter()
 
@@ -396,10 +410,10 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     first_pass = heatmap_log > first_pass
     second_pass = heatmap_log > second_pass.T
     peaks = first_pass & second_pass
-    peaks[: CFGS.RADAR_SKIP_SIZE, :] = 0
-    peaks[-CFGS.RADAR_SKIP_SIZE :, :] = 0
-    peaks[:, : CFGS.RADAR_SKIP_SIZE] = 0
-    peaks[:, -CFGS.RADAR_SKIP_SIZE :] = 0
+    peaks[:edge_mask_size, :] = 0
+    peaks[-edge_mask_size:, :] = 0
+    peaks[:, :edge_mask_size] = 0
+    peaks[:, -edge_mask_size:] = 0
     pairs = np.argwhere(peaks)
 
     peak_classification_time = time.perf_counter() - step_start
@@ -517,7 +531,11 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
 
 
 def process_2D_radar_frame(
-    frame, adc_params: ADCParams, IS_INDOOR=True, tuning: Optional[dict] = None
+    frame,
+    adc_params: ADCParams,
+    IS_INDOOR=True,
+    tuning: Optional[dict] = None,
+    config=None,  # type: Optional[RadarPipelineConfig]
 ):
     """
     Process a radar frame to produce a 2D range-azimuth heatmap and a 2D point cloud
@@ -568,7 +586,13 @@ def process_2D_radar_frame(
     """
     import time
     from mmwave import dsp
-    from config_params import CFGS
+    from sample_processing.config import load_radar_config
+
+    # Load config if not provided
+    if config is None:
+        config = load_radar_config(None)
+
+    edge_mask_size = config.detection.edge_mask_size
 
     function_start = time.perf_counter()
 
@@ -719,10 +743,10 @@ def process_2D_radar_frame(
     first_pass = heatmap_log > first_pass
     second_pass = heatmap_log > second_pass.T
     peaks = first_pass & second_pass
-    peaks[: CFGS.RADAR_SKIP_SIZE, :] = 0
-    peaks[-CFGS.RADAR_SKIP_SIZE :, :] = 0
-    peaks[:, : CFGS.RADAR_SKIP_SIZE] = 0
-    peaks[:, -CFGS.RADAR_SKIP_SIZE :] = 0
+    peaks[:edge_mask_size, :] = 0
+    peaks[-edge_mask_size:, :] = 0
+    peaks[:, :edge_mask_size] = 0
+    peaks[:, -edge_mask_size:] = 0
     pairs = np.argwhere(peaks)
 
     peak_classification_time = time.perf_counter() - step_start

@@ -1,7 +1,6 @@
 import os
 import time
 from typing import Optional
-from mmwave.dsp import utils
 import logging
 
 
@@ -72,32 +71,3 @@ class CFGS:
         "../../recordings/",
         time.strftime("%Y_%m_%d_%H_%M_00", time.localtime()),
     )
-
-    RADAR_TO_CAMERA_OFFSET = {"x": -0.1, "y": 0.1, "z": 0.05}
-    RADAR_RANGE_LIMIT = 10000.0
-
-    COLOR_CAMERA_MATRIX = [
-        [385.8772583, 0.0, 320.08758545],
-        [0.0, 385.4173584, 242.15074158],
-        [0.0, 0.0, 1.0],
-    ]
-    DEPTH_CAMERA_MATRIX = [
-        [397.41882324, 0.0, 326.93692017],
-        [0.0, 397.41882324, 241.10147095],
-        [
-            0.0,
-            0.0,
-            1.0,
-        ],
-    ]
-
-    RADAR_ANGLE_RES = 1.0  # degrees
-    RADAR_ANGLE_RANGE = 90.0  # degrees
-    RADAR_SKIP_SIZE = 4
-    RADAR_ANGLE_BINS = (RADAR_ANGLE_RANGE * 2) // RADAR_ANGLE_RES + 1
-    RADAR_BINS_PROCESSED = 128
-
-    RADAR_1D_FFT_WINDOW_TYPE = (
-        utils.Window.HAMMING
-    )  # Options: None or  utils.Window.[BARTLETT, BLACKMAN, HAMMING, HANNING]
-    RADAR_SKIP_SIZE = 4
