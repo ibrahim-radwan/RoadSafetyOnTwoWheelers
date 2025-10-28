@@ -420,7 +420,6 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 "ADC parameters not initialized. Call run() method first."
             )
 
-        # result = openradar_pd_process_frame(frame, self.adc_params, IS_INDOOR=True)
         # Choose 2D vs 3D pipeline based on number of TX antennas
         if int(getattr(self.adc_params, "tx", 0)) == 2:
             result = process_2D_radar_frame(
@@ -430,23 +429,13 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 tuning=getattr(self, "tuning", {}),
             )
         elif int(getattr(self.adc_params, "tx", 0)) == 3:
-            # Use FFT-based KRadar pipeline for 3 TX configuration
-            from sample_processing.radar_proc_kradar import (
-                process_3d_radar_frame_kradar,
-            )
-            from sample_processing.radar_proc import process_3D_radar_frame
+            # Use MUSIC 2D pipeline for 3 TX configuration
+            # MUSIC (Multiple Signal Classification) provides better angle estimation
+            # for elevation in 3D radar configurations compared to standard FFT-based methods
             from sample_processing.radar_proc_music2d import (
                 process_3D_radar_frame_music_2d,
             )
 
-            # Load pipeline configuration in "realtime" mode for live analysis
-            # pipeline_cfg = load_radar_config(None, mode="realtime")
-            # result = process_3d_radar_frame_kradar(
-            #     frame,
-            #     self.adc_params,
-            #     config=pipeline_cfg,
-            # )
-            # result = process_3D_radar_frame(frame, self.adc_params)
             result = process_3D_radar_frame_music_2d(frame, self.adc_params)
         else:
             raise RuntimeError(

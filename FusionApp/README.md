@@ -82,59 +82,82 @@ pip install -r requirements.txt
 
 ## Usage
 
-The application provides two main fusion modes: **Live** processing and **Replay** analysis.
+The application provides a **web-based interface** with two main modes: **Live** processing and **Replay** analysis.
 
-### Live Fusion (`fusion_live.py`)
+### Starting the Fusion Server
 
-Real-time synchronization, recording, and analysis of camera and radar data.
+Launch the web server to access the fusion application:
 
-#### Full Camera + Radar Fusion
 ```bash
-python fusion_live.py
+python fusion_server.py --host 127.0.0.1 --port 8081
 ```
 
-#### Radar-Only Mode
-```bash
-python fusion_live.py --radar-only
-```
+Then open your browser and navigate to: `http://127.0.0.1:8081`
 
-**Features:**
-- Real-time object detection and tracking
-- Simultaneous recording of radar and camera data
-- Live visualization with 2D displays
-- Automatic data synchronization
+#### Command Line Arguments
+
+- `--host`: Server host address (default: `127.0.0.1`)
+- `--port`: Server port (default: `8081`)
+- `--default-replay-path`: Default directory for replay mode (optional)
+- `--default-replay-cfg`: Default radar config file for replay mode (optional)
+
+**Example with replay defaults:**
+```bash
+python fusion_server.py --host 127.0.0.1 --port 8081 \
+    --default-replay-path C:/recordings/2025_01_15/session_001 \
+    --default-replay-cfg C:/recordings/2025_01_15/AWR2243_180m_70cm_64_3_512.txt
+```
 
 ---
 
-### Replay Fusion (`fusion_replay.py`)
+### Live Mode
+
+Real-time synchronization, recording, and analysis of camera and radar data.
+
+**Features:**
+- Real-time object detection and tracking (person, car, bicycle, motorcycle, bus, truck)
+- Simultaneous recording of radar and camera data
+- Live visualization with 2D displays (video and radar heatmap)
+- Automatic data synchronization
+- Radar-only mode option (toggle in web interface)
+- Configurable radar settings (range, resolution)
+- Process status monitoring
+
+**Controls:**
+1. Select **Live** mode in the web interface
+2. Choose radar configuration (e.g., "3D - 180m")
+3. Enable/disable "Radar only" mode
+4. Click **Start System** to initialize hardware
+5. Click **Start Recording** to capture data
+6. Adjust visualization frame rates (1-30 fps)
+
+---
+
+### Replay Mode
 
 Synchronized replay and analysis of previously recorded data.
 
-#### Full Camera + Radar Replay
-```bash
-python fusion_replay.py python fusion_replay.py --file-path /path/to/data --config-file /path/to/config.txt
-```
-
-#### Radar-Only Replay
-```bash
-python fusion_replay.py python fusion_replay.py --file-path /path/to/data --config-file /path/to/config.txt --radar-only
-```
-
 **Features:**
 - Synchronized playback of recorded sessions
-- Interactive playback controls (play, pause, seek)
-- Timeline navigation
+- Interactive playback controls (play, pause, step)
 - Frame-by-frame analysis
 - Support for custom radar configurations
+- Video and radar visualization
+- Adjustable playback speed
 
-### Command Line Arguments
+**Controls:**
+1. Select **Replay** mode in the web interface
+2. Enter recording directory path
+3. Enter radar config file path
+4. Enable/disable "Radar only" mode
+5. Click **Start System** to load data
+6. Use playback controls to navigate through recorded data
+7. Adjust visualization frame rates (1-30 fps)
 
-#### `fusion_replay.py` Arguments
-- `--file-path` (required): Path to recorded radar data directory
-- `--config-file` (optional): Path to radar configuration file
-- `--radar-only`: Run in radar-only mode (no camera replay)
+---
 
 ### System Requirements for Optimal Performance
 
-- **30fps Live Processing**: NVIDIA GPU with CUDA support
-- **Radar-Only Mode**: Can run on CPU-only systems
+- **Live Mode (30fps)**: NVIDIA GPU with CUDA support required for camera analysis
+- **Live Mode (Radar-Only)**: Can run on CPU-only systems
+- **Replay Mode**: GPU recommended but not required (video analysis disabled without CUDA)
