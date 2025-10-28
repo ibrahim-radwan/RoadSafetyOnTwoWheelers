@@ -53,8 +53,15 @@ class Rectangle:
         self.class_id = class_id
         self.confidence = confidence
 
-        # Map YOLO class IDs to names
-        self.class_names = {0: "person", 1: "bicycle", 2: "car", 3: "motorcycle"}
+        # Map YOLO class IDs to names (COCO dataset)
+        self.class_names = {
+            0: "person",
+            1: "bicycle",
+            2: "car",
+            3: "motorcycle",
+            5: "bus",
+            7: "truck",
+        }
 
         self.object_type = self.class_names.get(class_id, "unknown")
 
@@ -93,7 +100,7 @@ class D455Analyser(CameraAnalyser):
         self._backend: str = "torch"
 
     def _detect_objects(self, rgb_image: np.ndarray):
-        """Detect persons, cars, bicycles, and motorcycles in the image"""
+        """Detect persons, bicycles, cars, motorcycles, buses, and trucks in the image"""
         objects = []
         try:
             # Deactivate detection if hardware acceleration is not available
@@ -106,8 +113,8 @@ class D455Analyser(CameraAnalyser):
             results = self._yolo_model(rgb_image, verbose=False)
             height, width, _ = rgb_image.shape
 
-            # Target classes: person, bicycle, car, motorcycle
-            target_classes = {0, 1, 2, 3}
+            # Target classes: person, bicycle, car, motorcycle, bus, truck (COCO dataset IDs)
+            target_classes = {0, 1, 2, 3, 5, 7}
 
             for r in results:
                 for box, cls, conf in zip(
