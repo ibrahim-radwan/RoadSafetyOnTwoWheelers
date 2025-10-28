@@ -17,9 +17,7 @@ from sample_processing.radar_params import ADCParams
 from sample_processing.radar_proc import (
     openradar_pd_process_frame,
     process_2D_radar_frame,
-    pyradar_process_frame,
     process_3D_radar_frame,
-    custom_process_frame,
 )
 from sample_processing.config import (
     load_radar_config,
@@ -454,10 +452,6 @@ class RadarHeatmapAnalyser(RadarAnalyser):
             raise RuntimeError(
                 f"Unsupported adc_params.tx={getattr(self.adc_params, 'tx', None)}; expected 2 or 3"
             )
-
-        # frame = frame.reshape(frame.shape[0], frame.shape[1] * frame.shape[2], -1)
-        # result = pyradar_process_frame(frame, self.adc_params, doa_method="MUSIC", IS_INDOOR=False)
-        # result = custom_process_frame(frame, self.adc_params)
 
         # Extract results
         range_doppler_matrix = result[
