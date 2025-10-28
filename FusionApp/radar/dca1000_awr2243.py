@@ -15,6 +15,11 @@ import numpy as np
 
 from config_params import CFGS
 from engine.interfaces import RadarFeed
+from radar.bin_utils import (
+    generate_radar_filename,
+    scan_bin_directory,
+    parse_bin_timestamp,
+)
 from utils import setup_logger, disable_shm_resource_tracker
 from engine.sync_state import SyncStateUtils, PlaybackState as SyncPlaybackState
 
@@ -189,10 +194,9 @@ class DCA1000EVM(RadarFeed):
                     os.makedirs(self._dest_dir, exist_ok=True)
             except Exception:
                 pass
-            integer_part = f"{int(timestamp):010d}"
-            fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
-            frame_number = f"{self._last_frame_number:012d}"
-            filename = f"{integer_part}_{fraction_part}_{frame_number}.bin"
+
+            # Use shared utility to generate filename
+            filename = generate_radar_filename(timestamp, self._last_frame_number)
             filepath = os.path.join(self._dest_dir, filename)
 
             with open(filepath, "wb") as bin_file:
@@ -496,52 +500,25 @@ class DCA1000Recording(RadarFeed):
 
     def _scan_recording_files(self):
         """Scan the destination directory for .bin files matching the naming pattern"""
-        if not os.path.exists(self._dest_dir):
+        try:
+            # Use shared utility to scan directory
+            # Returns: List[Tuple[str, float, int, str]] (filepath, timestamp, frame_number, filename)
+            radar_files = scan_bin_directory(self._dest_dir)
+
+            # Convert to format expected by playback: (filepath, timestamp, frame_number)
+            self._frame_files = [(fp, ts, fn) for fp, ts, fn, _ in radar_files]
+
+            self.logger.info(f"Scanned {len(self._frame_files)} valid frame files")
+
+        except FileNotFoundError as e:
             raise FileNotFoundError(
                 f"Recording directory does not exist: {self._dest_dir}"
-            )
+            ) from e
 
-        # Pattern: {timestamp_int}_{timestamp_frac}_{frame_number}.bin
-        pattern = os.path.join(self._dest_dir, "*.bin")
-        bin_files = glob.glob(pattern)
-
-        if not bin_files:
-            raise FileNotFoundError(
-                f"No .bin files found in directory: {self._dest_dir}"
-            )
-
-        # Parse filenames and extract timing information
-        frame_info = []
-        filename_pattern = re.compile(r"(\d{10})_(\d{5})_(\d{12})\.bin$")
-
-        for filepath in bin_files:
-            filename = os.path.basename(filepath)
-            match = filename_pattern.match(filename)
-
-            if match:
-                timestamp_int = int(match.group(1))
-                timestamp_frac = int(match.group(2))
-                frame_number = int(match.group(3))
-
-                # Reconstruct timestamp
-                timestamp = timestamp_int + (timestamp_frac / 1e5)
-
-                frame_info.append((filepath, timestamp, frame_number))
-            else:
-                self.logger.warning(
-                    f"Skipping file with invalid naming pattern: {filename}"
-                )
-
-        if not frame_info:
+        if not self._frame_files:
             raise ValueError(
                 f"No valid .bin files found with correct naming pattern in: {self._dest_dir}"
             )
-
-        # Sort by timestamp to ensure proper playback order
-        frame_info.sort(key=lambda x: x[1])  # Sort by timestamp
-        self._frame_files = frame_info
-
-        self.logger.info(f"Scanned {len(self._frame_files)} valid frame files")
 
     def _load_radar_config(self):
         """Load radar configuration to extract frame rate and ADC parameters"""
@@ -567,17 +544,14 @@ class DCA1000Recording(RadarFeed):
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Frame file not found: {filepath}")
 
-        # Extract timestamp from filepath
+        # Use shared utility to parse timestamp from filepath
         filename = os.path.basename(filepath)
-        filename_pattern = re.compile(r"(\d{10})_(\d{5})_(\d{12})\.bin$")
-        match = filename_pattern.match(filename)
+        result = parse_bin_timestamp(filename)
 
-        if not match:
+        if result is None:
             raise ValueError(f"Invalid filename pattern: {filename}")
 
-        timestamp_int = int(match.group(1))
-        timestamp_frac = int(match.group(2))
-        timestamp = timestamp_int + (timestamp_frac / 1e5)
+        timestamp, _ = result  # We don't need frame_number here
 
         # Read binary data
         data_buf = np.fromfile(filepath, dtype=np.int16)

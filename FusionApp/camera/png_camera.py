@@ -3,7 +3,6 @@
 import os
 import time
 import queue
-import glob
 from typing import Optional, List, Tuple
 import threading
 import multiprocessing
@@ -16,6 +15,7 @@ import logging
 from config_params import CFGS
 from engine.interfaces import CameraFeed
 from camera.d455 import D455Frame
+from camera.png_utils import scan_png_directory
 from utils import setup_logger
 from engine.sync_state import SyncStateUtils, PlaybackState as SyncPlaybackState
 
@@ -61,48 +61,20 @@ class PNGCamera(CameraFeed):
 
     def _load_frame_files(self):
         """Load all PNG files from the recording directory"""
-        if not os.path.exists(self._recording_dir):
+        try:
+            # Use shared utility to scan directory
+            camera_files, _ = scan_png_directory(
+                self._recording_dir, include_detection_files=False
+            )
+            self._frame_files = camera_files
+
+            self.logger.info(
+                f"Loaded {len(self._frame_files)} camera frames from {self._recording_dir}"
+            )
+        except FileNotFoundError as e:
             raise FileNotFoundError(
                 f"Recording directory not found: {self._recording_dir}"
-            )
-
-        # Find all PNG files
-        png_files = glob.glob(os.path.join(self._recording_dir, "*.png"))
-
-        # Parse timestamps from filenames and sort
-        for filepath in png_files:
-            filename = os.path.basename(filepath)
-
-            # Only process PNG files whose names contain only numbers and underscores
-            # and end with a number (e.g., 0000000412_06917_000000012314.png)
-            # Exclude files like _xz.png, frame_001.png, heatmap_xz.png, etc.
-            name_without_ext = filename[:-4] if filename.endswith(".png") else filename
-            if not name_without_ext or not name_without_ext[-1].isdigit():
-                continue
-
-            # Check that name only contains digits and underscores
-            if not all(c.isdigit() or c == "_" for c in name_without_ext):
-                continue
-
-            try:
-                # Parse timestamp from filename format: {integer_part}_{fraction_part}_{frame_number}.png
-                parts = filename.split("_")
-                if len(parts) >= 3:
-                    integer_part = int(parts[0])
-                    fraction_part = int(parts[1])
-                    timestamp = integer_part + fraction_part / 100000.0
-                    self._frame_files.append((filepath, timestamp, filename))
-            except (ValueError, IndexError):
-                self.logger.warning(
-                    f"Could not parse timestamp from filename: {filename}"
-                )
-                continue
-
-        # Sort by timestamp
-        self._frame_files.sort(key=lambda x: x[1])
-        self.logger.info(
-            f"Loaded {len(self._frame_files)} camera frames from {self._recording_dir}"
-        )
+            ) from e
 
         # Signal readiness for synchronized mode
         if self._sync_state is not None:
