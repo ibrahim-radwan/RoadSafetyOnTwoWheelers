@@ -1,7 +1,6 @@
 """
 Unified Fusion web server with live and replay modes.
 
-Routes are compatible with the previous live server and add:
 - /fs/list for simple home-scoped file browsing
 - /replay/control for playback controls in replay mode (play/pause/stop/seek)
 """

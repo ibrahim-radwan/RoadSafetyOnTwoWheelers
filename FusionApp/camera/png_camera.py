@@ -4,13 +4,10 @@ import os
 import time
 import queue
 from typing import Optional, List, Tuple
-import threading
 import multiprocessing
 import os
-import numpy as np
 import cv2
 from enum import Enum
-import logging
 
 from config_params import CFGS
 from engine.interfaces import CameraFeed

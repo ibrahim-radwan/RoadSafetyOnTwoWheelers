@@ -116,7 +116,6 @@ class D455(CameraFeed):
         # Only use color stream to reduce bandwidth and CPU
         rgb_frame = frames.get_color_frame()
 
-        # ir_data = np.asanyarray(ir_frame.get_data())
         rgb_data = np.asanyarray(rgb_frame.get_data())
 
         # Only save frame if recording is enabled

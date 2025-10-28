@@ -7,7 +7,6 @@ used in both live recording and replay modes.
 
 import os
 import glob
-import re
 from typing import Optional, List, Tuple
 from pathlib import Path
 

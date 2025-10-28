@@ -3,9 +3,6 @@ import time
 import queue
 import multiprocessing
 from multiprocessing import shared_memory
-import logging
-import glob
-import re
 from enum import Enum
 from mmwave.dataloader import DCA1000
 import threading
@@ -1075,8 +1072,6 @@ class DCA1000Recording(RadarFeed):
             pass
 
         return
-
-        self.logger.info("Playback stopped")
 
     def _handle_control_command(self, command):
         """Handle playback control commands from UI"""

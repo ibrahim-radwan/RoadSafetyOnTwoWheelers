@@ -15,13 +15,7 @@ import os
 from config_params import CFGS
 from sample_processing.radar_params import ADCParams
 from sample_processing.radar_proc import (
-    openradar_pd_process_frame,
     process_2D_radar_frame,
-    process_3D_radar_frame,
-)
-from sample_processing.config import (
-    load_radar_config,
-    DEFAULT_CONFIG_NAME,
 )
 from utils import setup_logger, disable_shm_resource_tracker
 from multiprocessing import shared_memory
@@ -229,7 +223,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 _np.clip(t, 0.0, 1.0, out=t)
                 return idx_clipped, t.astype(_np.float32), valid
 
-            Ny, Nx = y_grid.shape
+            # Ny, Nx = y_grid.shape
             # Iterate only along Z to keep memory bounded; vectorize X/Y plane
             report_every = max(1, zs.size // 10)
             for iz, z in enumerate(zs):

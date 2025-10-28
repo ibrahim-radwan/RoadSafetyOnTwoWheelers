@@ -1,10 +1,8 @@
 import numpy as np
-import logging
 from typing import Optional, TYPE_CHECKING
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 from sample_processing.radar_params import ADCParams
-from config_params import CFGS
 from utils import setup_logger
 
 if TYPE_CHECKING:
@@ -136,59 +134,6 @@ def ranges_angles_to_xy(ranges, angles):
     return x, y
 
 
-def apply_radar_clustering(
-    x_coords, y_coords, velocities, eps=0.5, min_samples=2, velocity_weight=1.0
-):
-    """
-    Apply DBSCAN clustering to radar detections with spatial and velocity features.
-
-    Args:
-        x_coords: X coordinates (m)
-        y_coords: Y coordinates (m)
-        velocities: Doppler velocities (m/s)
-        eps: Maximum distance between samples for clustering
-        min_samples: Minimum samples in neighborhood for core point
-        velocity_weight: Weight factor for velocity in distance metric
-
-    Returns:
-        cluster_labels: Array of cluster labels (-1 for noise, 0+ for clusters)
-        n_clusters: Number of clusters found
-        n_noise: Number of noise points
-    """
-    if len(x_coords) < min_samples:
-        return np.full(len(x_coords), -1), 0, len(x_coords)
-
-    try:
-        # Create feature matrix: [X, Y, weighted_velocity]
-        features = np.column_stack(
-            [x_coords, y_coords, np.array(velocities) * velocity_weight]
-        )
-
-        # Standardize features for balanced clustering
-        scaler = StandardScaler()
-        features_scaled = scaler.fit_transform(features)
-
-        # Apply DBSCAN clustering
-        dbscan = DBSCAN(eps=eps, min_samples=min_samples)
-        cluster_labels = dbscan.fit_predict(features_scaled)
-
-        # Count clusters and noise
-        unique_labels = np.unique(cluster_labels)
-        n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-        n_noise = list(cluster_labels).count(-1)
-
-        return cluster_labels, n_clusters, n_noise
-
-    except Exception as e:
-        logger.error(f"Clustering failed: {e}")
-        return np.full(len(x_coords), -1), 0, len(x_coords)
-
-
-from mmwave.tracking import EKF
-
-tracker = EKF()
-
-
 def openradar_pd_process_frame(
     frame,
     adc_params: ADCParams,
@@ -318,22 +263,12 @@ def openradar_pd_process_frame(
     range_doppler = np.fft.fft(radar_cube, axis=0)
     range_doppler = np.fft.fftshift(range_doppler, axes=0)
 
-    import scipy
-
     # Take log first (similar to what you do for CFAR)
     range_doppler_log = np.log(
         range_doppler + 1e-8
     )  # Add small epsilon to avoid log(0)
-    # range_doppler_softmax = scipy.special.softmax(range_doppler_log.flatten()).reshape(
-    #     range_doppler.shape
-    # )
-    # range_doppler[:, :, :2] = 1
-    # zs_bin = range_doppler.shape[0]//2
-    # range_doppler[zs_bin:zs_bin+1, :, :] = 1
-    range_doppler = np.abs(range_doppler_log).sum(axis=1)
 
-    # concat_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] Radar cube concatenation: {concat_time:.4f}s")
+    range_doppler = np.abs(range_doppler_log).sum(axis=1)
 
     # Note that when replacing with generic doppler estimation functions, radarCube is interleaved and
     # has doppler at the last dimension.
@@ -343,9 +278,6 @@ def openradar_pd_process_frame(
             radar_cube[:, :, i].T, steering_vec, magnitude=True
         )
 
-    # range_azimuth, beamWeights = dsp.aoa_capon_jitted(
-    #     radar_cube, adc_params.tx, adc_params.rx, adc_params.samples, magnitude=True
-    # )
     capon_time = time.perf_counter() - capon_start
     logger.debug(
         f"    [RADAR_PROFILE] Capon beamforming ({adc_params.samples} iterations): {capon_time:.4f}s"
@@ -359,9 +291,6 @@ def openradar_pd_process_frame(
     heatmap_log = np.log2(range_azimuth)
     heatmap_time = time.perf_counter() - step_start
     logger.debug(f"    [RADAR_PROFILE] Heatmap log computation: {heatmap_time:.4f}s")
-
-    # logger.debug(f"Range-Doppler shape: {range_doppler.shape}")
-    # logger.debug(f"Range-Azimuth shape: {range_azimuth.shape}")
 
     if IS_INDOOR:
         AZ_LBOUND = 1.5
@@ -488,28 +417,7 @@ def openradar_pd_process_frame(
         f"    [RADAR_PROFILE] Unit conversion and coordinate transform: {conversion_time:.4f}s"
     )
 
-    # cluster_labels, n_clusters, n_noise = apply_radar_clustering(
-    #     x_pos, y_pos, dopplers, eps=0.2, min_samples=2, velocity_weight=0.0
-    # )
-
     cluster_labels = np.array([])
-    # tracker.update_point_cloud(ranges, azimuths, dopplers, snrs)
-    # targetDescr, tNum = tracker.step()
-
-    # print(f"[DEBUG] EKF tracking step completed with {tNum} targets")
-
-    # x_pos = np.array([])
-    # y_pos = np.array([])
-    # velocities = np.array([])
-
-    # for t, tid in zip(targetDescr, range(int(tNum[0]))):
-    #     x, y, x_vel, y_vel = t.S[:4]
-    #     x = -x
-    #     # z_pos = 0
-    #     velocity = np.sqrt(x_vel**2 + y_vel**2)
-    #     x_pos = np.append(x_pos, x)
-    #     y_pos = np.append(y_pos, y)
-    #     velocities = np.append(velocities, velocity)
 
     # Profile logging every 10 frames
     if openradar_pd_process_frame.frame_count % 50 == 0:
@@ -981,26 +889,6 @@ def process_3D_radar_frame(frame, adc_params, tuning: Optional[dict] = None):
         guard_len=gl_r,
         noise_len=nl_r,
     )
-
-    # thresholdDoppler, noiseFloorDoppler = np.apply_along_axis(
-    #     func1d=dsp.os_,
-    #     axis=0,
-    #     arr=fft2d_sum.T,
-    #     scale=1.0,
-    #     k=12,
-    #     guard_len=4,
-    #     noise_len=16,
-    # )
-
-    # thresholdRange, noiseFloorRange = np.apply_along_axis(
-    #     func1d=dsp.os_,
-    #     axis=0,
-    #     arr=fft2d_sum,
-    #     scale=1.0,
-    #     k=12,
-    #     guard_len=4,
-    #     noise_len=16,
-    # )
 
     thresholdDoppler, noiseFloorDoppler = thresholdDoppler.T, noiseFloorDoppler.T
 

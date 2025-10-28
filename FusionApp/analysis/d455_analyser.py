@@ -1,5 +1,4 @@
 from utils import setup_logger
-from config_params import CFGS
 from engine.interfaces import CameraAnalyser
 import torch
 from ultralytics import YOLO
@@ -108,10 +107,8 @@ class D455Analyser(CameraAnalyser):
                 return objects
             if self._yolo_model is None:
                 self._yolo_model = YOLO("models/video_analysis/yolov8n.pt")
-            start_time = time.perf_counter()
             # Simpler call path observed to be faster in your setup
             results = self._yolo_model(rgb_image, verbose=False)
-            height, width, _ = rgb_image.shape
 
             # Target classes: person, bicycle, car, motorcycle, bus, truck (COCO dataset IDs)
             target_classes = {0, 1, 2, 3, 5, 7}
@@ -135,9 +132,6 @@ class D455Analyser(CameraAnalyser):
                         objects.append(
                             Rectangle(x, y, box_width, box_height, class_id, confidence)
                         )
-
-            end_time = time.perf_counter()
-            detection_time = end_time - start_time
         except Exception as e:
             if self.logger is not None:
                 self.logger.error(f"YOLOv8 error: {e}")
@@ -264,9 +258,7 @@ class D455Analyser(CameraAnalyser):
         while not stop_event.is_set():
             try:
                 # Measure queue wait separately (not part of total processing time)
-                queue_wait_start = time.perf_counter()
                 video_frame = input_queue.get(timeout=1)
-                queue_wait_end = time.perf_counter()
                 # Allow immediate shutdown via sentinel
                 if isinstance(video_frame, dict) and video_frame.get("STOP"):
                     break
@@ -319,8 +311,9 @@ class D455Analyser(CameraAnalyser):
                 # Print average statistics every log_interval frames at INFO level
                 if frame_count % log_interval == 0:
                     avg_total_time = total_processing_time / frame_count
+                    avg_analysis_time = total_analysis_time / frame_count
                     self.logger.info(
-                        f"AVG Runtime: {avg_total_time:.4f}s (frame {frame_count})"
+                        f"AVG Runtime: {avg_total_time:.4f}s, AVG Analysis: {avg_analysis_time:.4f}s (frame {frame_count})"
                     )
 
             except Empty:

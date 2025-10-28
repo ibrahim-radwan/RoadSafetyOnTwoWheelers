@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator

@@ -1,5 +1,4 @@
 import os
-import glob
 import time
 import threading
 from collections import deque
@@ -717,11 +716,6 @@ class FusionRunner:
                     self._ra_shape, dtype=np_dtype, buffer=self._ra_blocks[slot].buf
                 )
                 arr = np.array(view, copy=True)
-                # Don't rotate for polar RA display - polar transform handles orientation
-                # try:
-                #     arr = np.rot90(arr, 1)
-                # except Exception:
-                #     pass
                 pc = self._latest_point_cloud or {}
                 mr = pc.get("max_range") if isinstance(pc, dict) else None
                 # Get actual azimuth range from the data
@@ -746,11 +740,6 @@ class FusionRunner:
         except Exception:
             pass
         if isinstance(self._latest_ra, np.ndarray):
-            # Don't rotate for polar display - polar transform handles orientation
-            # try:
-            #     arr = np.rot90(self._latest_ra, 1)
-            # except Exception:
-            #     arr = self._latest_ra
             arr = self._latest_ra
             pc = self._latest_point_cloud or {}
             mr = pc.get("max_range") if isinstance(pc, dict) else None
