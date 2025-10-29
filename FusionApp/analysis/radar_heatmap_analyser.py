@@ -15,11 +15,7 @@ import os
 from config_params import CFGS
 from sample_processing.radar_params import ADCParams
 from sample_processing.radar_proc import (
-    openradar_pd_process_frame,
     process_2D_radar_frame,
-    pyradar_process_frame,
-    process_3D_radar_frame,
-    custom_process_frame,
 )
 from utils import setup_logger, disable_shm_resource_tracker
 from multiprocessing import shared_memory
@@ -227,7 +223,7 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 _np.clip(t, 0.0, 1.0, out=t)
                 return idx_clipped, t.astype(_np.float32), valid
 
-            Ny, Nx = y_grid.shape
+            # Ny, Nx = y_grid.shape
             # Iterate only along Z to keep memory bounded; vectorize X/Y plane
             report_every = max(1, zs.size // 10)
             for iz, z in enumerate(zs):
@@ -418,7 +414,6 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 "ADC parameters not initialized. Call run() method first."
             )
 
-        # result = openradar_pd_process_frame(frame, self.adc_params, IS_INDOOR=True)
         # Choose 2D vs 3D pipeline based on number of TX antennas
         if int(getattr(self.adc_params, "tx", 0)) == 2:
             result = process_2D_radar_frame(
@@ -428,28 +423,18 @@ class RadarHeatmapAnalyser(RadarAnalyser):
                 tuning=getattr(self, "tuning", {}),
             )
         elif int(getattr(self.adc_params, "tx", 0)) == 3:
-            # Use FFT-based KRadar pipeline for 3 TX configuration
-            from sample_processing.radar_proc_kradar import (
-                process_3d_radar_frame_kradar,
+            # Use MUSIC 2D pipeline for 3 TX configuration
+            # MUSIC (Multiple Signal Classification) provides better angle estimation
+            # for elevation in 3D radar configurations compared to standard FFT-based methods
+            from sample_processing.radar_proc_music2d import (
+                process_3D_radar_frame_music_2d,
             )
 
-            az_range = (-53, 53)
-            el_range = (-18, 18)
-            result = process_3d_radar_frame_kradar(
-                frame,
-                self.adc_params,
-                tuning=getattr(self, "tuning", {}),
-                az_range=az_range,
-                el_range=el_range,
-            )
+            result = process_3D_radar_frame_music_2d(frame, self.adc_params)
         else:
             raise RuntimeError(
                 f"Unsupported adc_params.tx={getattr(self.adc_params, 'tx', None)}; expected 2 or 3"
             )
-
-        # frame = frame.reshape(frame.shape[0], frame.shape[1] * frame.shape[2], -1)
-        # result = pyradar_process_frame(frame, self.adc_params, doa_method="MUSIC", IS_INDOOR=False)
-        # result = custom_process_frame(frame, self.adc_params)
 
         # Extract results
         range_doppler_matrix = result[

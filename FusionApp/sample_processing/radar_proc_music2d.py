@@ -262,15 +262,6 @@ def _music_2d_peak(
     return float(az_grid[az_idx]), float(el_grid[el_idx])
 
 
-def _compute_noise_subspace(Rxx: np.ndarray, num_sources: int = 1) -> np.ndarray:
-    """Noise subspace En for Hermitian Rxx; En shape (M, M-d)."""
-    _, v = np.linalg.eigh(Rxx.astype(np.complex64))
-    M = Rxx.shape[0]
-    d = max(1, min(num_sources, M - 1))
-    En = v[:, : (M - d)]
-    return En
-
-
 def _music_peak_with_A(
     En: np.ndarray, A: np.ndarray, az_grid: np.ndarray, el_grid: np.ndarray
 ) -> Tuple[float, float]:
@@ -752,8 +743,8 @@ def process_3D_radar_frame_music_2d(
         # Return RD transposed to match analyser RD SHM shape (chirps, samples) before UI rotation
         "range_doppler": det_matrix.T,
         "range_azimuth": range_azimuth,
-        "x_pos": xs,
-        "y_pos": ys,
+        "x_pos": ys,
+        "y_pos": xs,
         "z_pos": zs,
         "velocities": velocities,
         "snrs": snrs,

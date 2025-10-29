@@ -11,6 +11,7 @@ import cv2
 
 from config_params import CFGS
 from engine.interfaces import CameraFeed
+from camera.png_utils import generate_camera_filename
 from utils import setup_logger
 
 
@@ -79,7 +80,9 @@ class D455(CameraFeed):
                             if rec_dir:
                                 self._dest_dir = rec_dir
                                 if self.logger:
-                                    self.logger.info(f"Recording directory set to: {self._dest_dir}")
+                                    self.logger.info(
+                                        f"Recording directory set to: {self._dest_dir}"
+                                    )
                     except Exception:
                         pass
                     self._is_recording = True
@@ -113,7 +116,6 @@ class D455(CameraFeed):
         # Only use color stream to reduce bandwidth and CPU
         rgb_frame = frames.get_color_frame()
 
-        # ir_data = np.asanyarray(ir_frame.get_data())
         rgb_data = np.asanyarray(rgb_frame.get_data())
 
         # Only save frame if recording is enabled
@@ -124,10 +126,9 @@ class D455(CameraFeed):
                     os.makedirs(self._dest_dir, exist_ok=True)
             except Exception:
                 pass
-            integer_part = f"{int(timestamp):010d}"
-            fraction_part = f"{int((timestamp - int(timestamp)) * 1e5):05d}"
-            frame_number = f"{frames.get_frame_number():012d}"
-            filename = f"{integer_part}_{fraction_part}_{frame_number}.png"
+
+            # Use shared utility to generate filename
+            filename = generate_camera_filename(timestamp, frames.get_frame_number())
             filepath = os.path.join(self._dest_dir, filename)
 
             # Save as numpy array

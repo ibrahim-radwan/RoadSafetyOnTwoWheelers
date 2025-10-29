@@ -1,5 +1,4 @@
 from utils import setup_logger
-from config_params import CFGS
 from engine.interfaces import CameraAnalyser
 import torch
 from ultralytics import YOLO
@@ -53,8 +52,15 @@ class Rectangle:
         self.class_id = class_id
         self.confidence = confidence
 
-        # Map YOLO class IDs to names
-        self.class_names = {0: "person", 1: "bicycle", 2: "car", 3: "motorcycle"}
+        # Map YOLO class IDs to names (COCO dataset)
+        self.class_names = {
+            0: "person",
+            1: "bicycle",
+            2: "car",
+            3: "motorcycle",
+            5: "bus",
+            7: "truck",
+        }
 
         self.object_type = self.class_names.get(class_id, "unknown")
 
@@ -93,21 +99,19 @@ class D455Analyser(CameraAnalyser):
         self._backend: str = "torch"
 
     def _detect_objects(self, rgb_image: np.ndarray):
-        """Detect persons, cars, bicycles, and motorcycles in the image"""
+        """Detect persons, bicycles, cars, motorcycles, buses, and trucks in the image"""
         objects = []
         try:
             # Deactivate detection if hardware acceleration is not available
             if not self._analysis_enabled:
                 return objects
             if self._yolo_model is None:
-                self._yolo_model = YOLO("yolov8n.pt")
-            start_time = time.perf_counter()
+                self._yolo_model = YOLO("models/video_analysis/yolov8n.pt")
             # Simpler call path observed to be faster in your setup
             results = self._yolo_model(rgb_image, verbose=False)
-            height, width, _ = rgb_image.shape
 
-            # Target classes: person, bicycle, car, motorcycle
-            target_classes = {0, 1, 2, 3}
+            # Target classes: person, bicycle, car, motorcycle, bus, truck (COCO dataset IDs)
+            target_classes = {0, 1, 2, 3, 5, 7}
 
             for r in results:
                 for box, cls, conf in zip(
@@ -128,9 +132,6 @@ class D455Analyser(CameraAnalyser):
                         objects.append(
                             Rectangle(x, y, box_width, box_height, class_id, confidence)
                         )
-
-            end_time = time.perf_counter()
-            detection_time = end_time - start_time
         except Exception as e:
             if self.logger is not None:
                 self.logger.error(f"YOLOv8 error: {e}")
@@ -188,48 +189,56 @@ class D455Analyser(CameraAnalyser):
             self._half = False
             self._device_arg = "cpu"
 
-        # Deactivate analysis if no CUDA and log an error once
+        # Exit analyser process if no CUDA acceleration available
         if self._device != "cuda":
-            self._analysis_enabled = False
             self.logger.error(
-                "GPU/HW acceleration is not available. Object detection is deactivated."
+                "GPU/HW acceleration is not available. Object detection requires CUDA. Exiting analyser process."
             )
-            self.logger.info(f"AVG Runtime: {0.0:.4f}s (frame {0})")
-        else:
-            # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
-            model_loaded = False
-            if _running_on_jetson():
-                try:
-                    self._yolo_model = YOLO("yolov8n.engine")
-                    self._backend = "tensorrt"
-                    model_loaded = True
-                    self.logger.info("Loaded TensorRT engine 'yolov8n.engine'")
-                except Exception as e:
-                    self.logger.info(
-                        f"TensorRT engine not used ({e}); falling back to PyTorch 'yolov8n.pt'"
-                    )
-            else:
-                self.logger.info(
-                    "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
-                )
+            # Exit the analyser process gracefully
+            return
+
+        # Load YOLO model (CUDA is available)
+        model_loaded = False
+
+        # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
+        if _running_on_jetson():
             try:
-                if not model_loaded:
-                    self._yolo_model = YOLO("yolov8n.pt")
-                    self._backend = "torch"
-                    model_loaded = True
+                self._yolo_model = YOLO("models/video_analysis/yolov8n.engine")
+                self._backend = "tensorrt"
+                model_loaded = True
+                self.logger.info(
+                    "Loaded TensorRT engine 'models/video_analysis/yolov8n.engine'"
+                )
+            except Exception as e:
+                self.logger.info(
+                    f"TensorRT engine not used ({e}); falling back to PyTorch 'models/video_analysis/yolov8n.pt'"
+                )
+        else:
+            self.logger.info(
+                "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
+            )
+
+        # Load PyTorch model if TensorRT was not loaded
+        if not model_loaded:
+            try:
+                self._yolo_model = YOLO("models/video_analysis/yolov8n.pt")
+                self._backend = "torch"
+                model_loaded = True
+                self.logger.info(f"Loaded YOLO PyTorch model on device={self._device}")
             except Exception as e:
                 self.logger.error(f"Failed to load YOLO model: {e}")
                 self._analysis_enabled = False
+                return
 
-            # Log device and optimization info (keep minimal)
-            if self._analysis_enabled and model_loaded:
-                try:
-                    name = torch.cuda.get_device_name(0)
-                    self.logger.info(
-                        f"Using CUDA device: {name}, backend={self._backend}, imgsz={self._imgsz}"
-                    )
-                except Exception:
-                    pass
+        # Log device and optimization info (keep minimal)
+        if self._analysis_enabled and model_loaded:
+            try:
+                name = torch.cuda.get_device_name(0)
+                self.logger.info(
+                    f"Using CUDA device: {name}, backend={self._backend}, imgsz={self._imgsz}"
+                )
+            except Exception:
+                pass
 
             # Warm up kernels to reduce first-frame latency
             try:
@@ -249,9 +258,7 @@ class D455Analyser(CameraAnalyser):
         while not stop_event.is_set():
             try:
                 # Measure queue wait separately (not part of total processing time)
-                queue_wait_start = time.perf_counter()
                 video_frame = input_queue.get(timeout=1)
-                queue_wait_end = time.perf_counter()
                 # Allow immediate shutdown via sentinel
                 if isinstance(video_frame, dict) and video_frame.get("STOP"):
                     break
@@ -304,8 +311,9 @@ class D455Analyser(CameraAnalyser):
                 # Print average statistics every log_interval frames at INFO level
                 if frame_count % log_interval == 0:
                     avg_total_time = total_processing_time / frame_count
+                    avg_analysis_time = total_analysis_time / frame_count
                     self.logger.info(
-                        f"AVG Runtime: {avg_total_time:.4f}s (frame {frame_count})"
+                        f"AVG Runtime: {avg_total_time:.4f}s, AVG Analysis: {avg_analysis_time:.4f}s (frame {frame_count})"
                     )
 
             except Empty:

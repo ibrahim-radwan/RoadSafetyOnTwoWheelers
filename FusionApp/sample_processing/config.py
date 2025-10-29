@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -282,12 +282,21 @@ class FFTWindowConfig(BaseModel):
     doppler: str = "hamming"
 
 
+class DetectionConfig(BaseModel):
+    """Detection-related parameters for peak detection."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    edge_mask_size: int = 4
+
+
 class RadarPipelineConfig(BaseModel):
     """Top-level configuration for the radar processing pipeline."""
 
     model_config = ConfigDict(extra="ignore")
 
     windows: FFTWindowConfig = Field(default_factory=FFTWindowConfig)
+    detection: DetectionConfig = Field(default_factory=DetectionConfig)
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     angle: AngleProcessingConfig = Field(default_factory=AngleProcessingConfig)
     polar_detection: PolarDetectionConfig = Field(default_factory=PolarDetectionConfig)
@@ -382,6 +391,7 @@ __all__ = [
     "AngleProcessingConfig",
     "CalibrationConfig",
     "CartesianQuantileConfig",
+    "DetectionConfig",
     "FFTWindowConfig",
     "PowerNormalizationConfig",
     "PointCloudConfig",

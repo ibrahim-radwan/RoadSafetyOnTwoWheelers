@@ -1,6 +1,45 @@
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
 build/
+*.log
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Testing and Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+
+# Project-specific
 fpga_udp.egg-info/
 FusionApp/fpga_udp/fpga_udp.cpython-310-x86_64-linux-gnu.so
-.vscode/
 cp_KRADAR/
+*/kradar/**/*.pyd
+
+# Python wheel files
+*.whl
+
+# Large model files (download separately)
+*.engine
+*.onnx
+*.pt
+
+# Temporary and cache directories
+tmp/
+~

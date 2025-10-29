@@ -1,12 +1,12 @@
 import numpy as np
-import logging
-from typing import Optional
-from pyapril.caCfar import CA_CFAR
+from typing import Optional, TYPE_CHECKING
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 from sample_processing.radar_params import ADCParams
-from config_params import CFGS
 from utils import setup_logger
+
+if TYPE_CHECKING:
+    from sample_processing.config import RadarPipelineConfig
 
 # Set up logger for radar processing
 logger = setup_logger("RadarProc")
@@ -127,50 +127,6 @@ def range_azimuth_fft(range_doppler: np.ndarray) -> np.ndarray:
     return range_azimuth
 
 
-def pyapril_cfar(range_doppler, cfar_params=[10, 2, 1, 1], threshold=8):
-    """
-    Performs Constant False Alarm Rate (CFAR) detection on range-doppler data using PyApril's CA-CFAR implementation.
-    This function processes range-doppler data by first computing the absolute sum across one axis to create
-    a 2D map, then applies CA-CFAR detection to identify targets above the adaptive threshold.
-
-    Args:
-        range_doppler (numpy.ndarray): Input range-doppler data matrix
-        cfar_params (list or tuple): CFAR window parameters in the following order:
-            - [win_width, win_height, guard_width, guard_height]
-        threshold (float, optional): Detection threshold multiplier. Defaults to 8.
-
-    Returns:
-        numpy.ndarray: 2D array of hit coordinates where each row contains [range_idx, doppler_idx]
-                      of detected targets that exceed the CFAR threshold
-    """
-    rd_map = np.abs(range_doppler).sum(axis=1)
-
-    # Use PyApril's fast CFAR implementation
-    ca_cfar_obj = CA_CFAR(cfar_params, threshold, rd_map.shape)
-    hit_matrix_fast_from_instance = ca_cfar_obj(rd_map)
-
-    hit_rd = np.column_stack(np.where(hit_matrix_fast_from_instance))
-    return hit_rd
-
-
-def rd_hit_bin_to_value(hit_rd, adc_params):
-    def _doppler_bins_to_velocity(doppler_bins, adc_params):
-        velocities = []
-        center_doppler_bin = adc_params.chirps // 2
-
-        for doppler_bin in doppler_bins:
-            velocity = (
-                doppler_bin - center_doppler_bin
-            ) * adc_params.doppler_resolution
-            velocities.append(velocity)
-        return velocities
-
-    ranges = hit_rd[:, 1] * adc_params.range_resolution
-    dopplers = _doppler_bins_to_velocity(hit_rd[:, 0], adc_params)
-
-    return ranges, dopplers
-
-
 def ranges_angles_to_xy(ranges, angles):
     x = ranges * -np.sin(np.deg2rad(angles))
     y = ranges * np.cos(np.deg2rad(angles))
@@ -178,71 +134,12 @@ def ranges_angles_to_xy(ranges, angles):
     return x, y
 
 
-# Convert all DOA lists to angles, filtering out NaN values
-def pyapril_convert_to_angles(doa_list):
-    def _doa_index_to_angle(doa_index, num_bins=180):
-        if np.isnan(doa_index):
-            return np.nan
-        return (doa_index / num_bins) * 180 - 90
-
-    angles = [_doa_index_to_angle(doa) for doa in doa_list if not np.isnan(doa)]
-    return angles
-
-
-def apply_radar_clustering(
-    x_coords, y_coords, velocities, eps=0.5, min_samples=2, velocity_weight=1.0
+def openradar_pd_process_frame(
+    frame,
+    adc_params: ADCParams,
+    IS_INDOOR=True,
+    config=None,  # type: Optional[RadarPipelineConfig]
 ):
-    """
-    Apply DBSCAN clustering to radar detections with spatial and velocity features.
-
-    Args:
-        x_coords: X coordinates (m)
-        y_coords: Y coordinates (m)
-        velocities: Doppler velocities (m/s)
-        eps: Maximum distance between samples for clustering
-        min_samples: Minimum samples in neighborhood for core point
-        velocity_weight: Weight factor for velocity in distance metric
-
-    Returns:
-        cluster_labels: Array of cluster labels (-1 for noise, 0+ for clusters)
-        n_clusters: Number of clusters found
-        n_noise: Number of noise points
-    """
-    if len(x_coords) < min_samples:
-        return np.full(len(x_coords), -1), 0, len(x_coords)
-
-    try:
-        # Create feature matrix: [X, Y, weighted_velocity]
-        features = np.column_stack(
-            [x_coords, y_coords, np.array(velocities) * velocity_weight]
-        )
-
-        # Standardize features for balanced clustering
-        scaler = StandardScaler()
-        features_scaled = scaler.fit_transform(features)
-
-        # Apply DBSCAN clustering
-        dbscan = DBSCAN(eps=eps, min_samples=min_samples)
-        cluster_labels = dbscan.fit_predict(features_scaled)
-
-        # Count clusters and noise
-        unique_labels = np.unique(cluster_labels)
-        n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-        n_noise = list(cluster_labels).count(-1)
-
-        return cluster_labels, n_clusters, n_noise
-
-    except Exception as e:
-        logger.error(f"Clustering failed: {e}")
-        return np.full(len(x_coords), -1), 0, len(x_coords)
-
-
-from mmwave.tracking import EKF
-
-tracker = EKF()
-
-
-def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     """
     Process radar frame using OpenRadar methods with Capon beamforming and CFAR detection.
 
@@ -280,7 +177,13 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     """
     import time
     from mmwave import dsp
-    from config_params import CFGS
+    from sample_processing.config import load_radar_config
+
+    # Load config if not provided
+    if config is None:
+        config = load_radar_config(None)
+
+    edge_mask_size = config.detection.edge_mask_size
 
     function_start = time.perf_counter()
 
@@ -360,22 +263,12 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     range_doppler = np.fft.fft(radar_cube, axis=0)
     range_doppler = np.fft.fftshift(range_doppler, axes=0)
 
-    import scipy
-
     # Take log first (similar to what you do for CFAR)
     range_doppler_log = np.log(
         range_doppler + 1e-8
     )  # Add small epsilon to avoid log(0)
-    # range_doppler_softmax = scipy.special.softmax(range_doppler_log.flatten()).reshape(
-    #     range_doppler.shape
-    # )
-    # range_doppler[:, :, :2] = 1
-    # zs_bin = range_doppler.shape[0]//2
-    # range_doppler[zs_bin:zs_bin+1, :, :] = 1
-    range_doppler = np.abs(range_doppler_log).sum(axis=1)
 
-    # concat_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] Radar cube concatenation: {concat_time:.4f}s")
+    range_doppler = np.abs(range_doppler_log).sum(axis=1)
 
     # Note that when replacing with generic doppler estimation functions, radarCube is interleaved and
     # has doppler at the last dimension.
@@ -385,9 +278,6 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
             radar_cube[:, :, i].T, steering_vec, magnitude=True
         )
 
-    # range_azimuth, beamWeights = dsp.aoa_capon_jitted(
-    #     radar_cube, adc_params.tx, adc_params.rx, adc_params.samples, magnitude=True
-    # )
     capon_time = time.perf_counter() - capon_start
     logger.debug(
         f"    [RADAR_PROFILE] Capon beamforming ({adc_params.samples} iterations): {capon_time:.4f}s"
@@ -401,9 +291,6 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     heatmap_log = np.log2(range_azimuth)
     heatmap_time = time.perf_counter() - step_start
     logger.debug(f"    [RADAR_PROFILE] Heatmap log computation: {heatmap_time:.4f}s")
-
-    # logger.debug(f"Range-Doppler shape: {range_doppler.shape}")
-    # logger.debug(f"Range-Azimuth shape: {range_azimuth.shape}")
 
     if IS_INDOOR:
         AZ_LBOUND = 1.5
@@ -452,10 +339,10 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
     first_pass = heatmap_log > first_pass
     second_pass = heatmap_log > second_pass.T
     peaks = first_pass & second_pass
-    peaks[: CFGS.RADAR_SKIP_SIZE, :] = 0
-    peaks[-CFGS.RADAR_SKIP_SIZE :, :] = 0
-    peaks[:, : CFGS.RADAR_SKIP_SIZE] = 0
-    peaks[:, -CFGS.RADAR_SKIP_SIZE :] = 0
+    peaks[:edge_mask_size, :] = 0
+    peaks[-edge_mask_size:, :] = 0
+    peaks[:, :edge_mask_size] = 0
+    peaks[:, -edge_mask_size:] = 0
     pairs = np.argwhere(peaks)
 
     peak_classification_time = time.perf_counter() - step_start
@@ -530,28 +417,7 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
         f"    [RADAR_PROFILE] Unit conversion and coordinate transform: {conversion_time:.4f}s"
     )
 
-    # cluster_labels, n_clusters, n_noise = apply_radar_clustering(
-    #     x_pos, y_pos, dopplers, eps=0.2, min_samples=2, velocity_weight=0.0
-    # )
-
     cluster_labels = np.array([])
-    # tracker.update_point_cloud(ranges, azimuths, dopplers, snrs)
-    # targetDescr, tNum = tracker.step()
-
-    # print(f"[DEBUG] EKF tracking step completed with {tNum} targets")
-
-    # x_pos = np.array([])
-    # y_pos = np.array([])
-    # velocities = np.array([])
-
-    # for t, tid in zip(targetDescr, range(int(tNum[0]))):
-    #     x, y, x_vel, y_vel = t.S[:4]
-    #     x = -x
-    #     # z_pos = 0
-    #     velocity = np.sqrt(x_vel**2 + y_vel**2)
-    #     x_pos = np.append(x_pos, x)
-    #     y_pos = np.append(y_pos, y)
-    #     velocities = np.append(velocities, velocity)
 
     # Profile logging every 10 frames
     if openradar_pd_process_frame.frame_count % 50 == 0:
@@ -573,7 +439,11 @@ def openradar_pd_process_frame(frame, adc_params: ADCParams, IS_INDOOR=True):
 
 
 def process_2D_radar_frame(
-    frame, adc_params: ADCParams, IS_INDOOR=True, tuning: Optional[dict] = None
+    frame,
+    adc_params: ADCParams,
+    IS_INDOOR=True,
+    tuning: Optional[dict] = None,
+    config=None,  # type: Optional[RadarPipelineConfig]
 ):
     """
     Process a radar frame to produce a 2D range-azimuth heatmap and a 2D point cloud
@@ -624,7 +494,13 @@ def process_2D_radar_frame(
     """
     import time
     from mmwave import dsp
-    from config_params import CFGS
+    from sample_processing.config import load_radar_config
+
+    # Load config if not provided
+    if config is None:
+        config = load_radar_config(None)
+
+    edge_mask_size = config.detection.edge_mask_size
 
     function_start = time.perf_counter()
 
@@ -775,10 +651,10 @@ def process_2D_radar_frame(
     first_pass = heatmap_log > first_pass
     second_pass = heatmap_log > second_pass.T
     peaks = first_pass & second_pass
-    peaks[: CFGS.RADAR_SKIP_SIZE, :] = 0
-    peaks[-CFGS.RADAR_SKIP_SIZE :, :] = 0
-    peaks[:, : CFGS.RADAR_SKIP_SIZE] = 0
-    peaks[:, -CFGS.RADAR_SKIP_SIZE :] = 0
+    peaks[:edge_mask_size, :] = 0
+    peaks[-edge_mask_size:, :] = 0
+    peaks[:, :edge_mask_size] = 0
+    peaks[:, -edge_mask_size:] = 0
     pairs = np.argwhere(peaks)
 
     peak_classification_time = time.perf_counter() - step_start
@@ -1014,26 +890,6 @@ def process_3D_radar_frame(frame, adc_params, tuning: Optional[dict] = None):
         noise_len=nl_r,
     )
 
-    # thresholdDoppler, noiseFloorDoppler = np.apply_along_axis(
-    #     func1d=dsp.os_,
-    #     axis=0,
-    #     arr=fft2d_sum.T,
-    #     scale=1.0,
-    #     k=12,
-    #     guard_len=4,
-    #     noise_len=16,
-    # )
-
-    # thresholdRange, noiseFloorRange = np.apply_along_axis(
-    #     func1d=dsp.os_,
-    #     axis=0,
-    #     arr=fft2d_sum,
-    #     scale=1.0,
-    #     k=12,
-    #     guard_len=4,
-    #     noise_len=16,
-    # )
-
     thresholdDoppler, noiseFloorDoppler = thresholdDoppler.T, noiseFloorDoppler.T
 
     # Debug: Check threshold statistics
@@ -1210,357 +1066,6 @@ def process_3D_radar_frame(frame, adc_params, tuning: Optional[dict] = None):
         "x_pos": xyzVec[0],
         "y_pos": xyzVec[1],
         "z_pos": xyzVec[2],
-        "velocities": velocities,
-        "snrs": snrs,
-        "cluster_labels": cluster_labels,
-    }
-
-
-def pyradar_process_frame(frame, adc_params, doa_method="MUSIC", IS_INDOOR=True):
-    """
-    Process radar frame using PyRadar methods with FFT processing, CFAR detection, and DOA estimation.
-
-    This function performs range FFT, Doppler FFT, azimuth FFT processing, followed by CFAR detection
-    for target identification and Direction of Arrival (DOA) estimation using various beamforming methods.
-
-    Args:
-        frame (numpy.ndarray): Input radar frame data with shape (chirps, tx, rx, samples).
-                              Expected to be complex-valued data from radar ADC.
-        adc_params (ADCParams): ADC parameters object containing:
-                               - tx: Number of transmit antennas
-                               - rx: Number of receive antennas
-                               - samples: Number of range samples
-                               - chirps: Number of chirps per frame
-                               - range_resolution: Range resolution in meters
-                               - doppler_resolution: Doppler resolution in m/s
-        doa_method (str, optional): DOA estimation method to use. Tested options are:
-                                   - "Fourier": Classical Fourier-based beamforming
-                                   - "Capon": Minimum variance distortionless response (MVDR)
-                                   - "MUSIC": Multiple signal classification algorithm
-                                   Defaults to "MUSIC".
-        IS_INDOOR (bool, optional): Flag indicating indoor vs outdoor environment.
-                                   Affects windowing parameters, clutter removal, and CFAR thresholds.
-                                   Defaults to True.
-
-    Returns:
-        dict: A dictionary containing:
-            - "range_doppler" (numpy.ndarray): Range-doppler map with shape (chirps, tx*rx, samples)
-            - "range_azimuth" (numpy.ndarray): Range-azimuth map with shape (chirps, tx*rx, samples)
-            - "x_pos" (numpy.ndarray): X coordinates of detected targets in meters
-            - "y_pos" (numpy.ndarray): Y coordinates of detected targets in meters
-            - "z_pos" (numpy.ndarray): Z coordinates of detected targets in meters (zeros for ground-level targets)
-            - "velocities" (numpy.ndarray): Doppler velocities of detected targets in m/s
-            - "snrs" (numpy.ndarray): Signal-to-noise ratios of detected targets (default values)
-            - "cluster_labels" (numpy.ndarray): DBSCAN cluster labels for detected targets
-
-    Note:
-        The function reshapes the input frame internally from (chirps, tx, rx, samples) to
-        (chirps, tx*rx, samples) for processing. For outdoor scenarios, static clutter removal
-        is performed by subtracting the mean across chirps.
-    """
-    from pyapril.hitProcessor import target_DOA_estimation
-    import time
-
-    function_start = time.perf_counter()
-    logger.debug(
-        f"pyradar_process_frame: Processing frame with shape {frame.shape}, IS_INDOOR={IS_INDOOR}, doa_method={doa_method}"
-    )
-    logger.debug(
-        f"ADC Params - tx: {adc_params.tx}, rx: {adc_params.rx}, samples: {adc_params.samples}, chirps: {adc_params.chirps}, range_resolution: {adc_params.range_resolution}, doppler_resolution: {adc_params.doppler_resolution}"
-    )
-
-    # Range FFT processing
-    step_start = time.perf_counter()
-    if IS_INDOOR:
-        range_cube = range_cube_fft(frame, window_type="kaiser", beta=4)
-    else:
-        range_cube = range_cube_fft(frame, window_type="kaiser", beta=4)
-        mean = range_cube.mean(0)
-        range_cube = range_cube - mean
-    range_fft_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] Range FFT processing: {range_fft_time:.4f}s")
-
-    # Doppler FFT processing
-    step_start = time.perf_counter()
-    if IS_INDOOR:
-        range_doppler = range_doppler_fft(range_cube, window_type="kaiser")
-    else:
-        range_doppler = range_doppler_fft(range_cube, window_type="kaiser", beta=8)
-    doppler_fft_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] Doppler FFT processing: {doppler_fft_time:.4f}s")
-
-    # Azimuth FFT processing
-    step_start = time.perf_counter()
-    range_azimuth = range_azimuth_fft(range_doppler)
-    azimuth_fft_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] Azimuth FFT processing: {azimuth_fft_time:.4f}s")
-
-    logger.debug(f"Range-Doppler shape: {range_doppler.shape}")
-    logger.debug(f"Range-Azimuth shape: {range_azimuth.shape}")
-
-    # CFAR detection
-    step_start = time.perf_counter()
-    if IS_INDOOR:
-        CFAR_PARAMS = [4, 2, 1, 1]
-        THRESHOLD = 9
-    else:
-        CFAR_PARAMS = [4, 2, 1, 1]
-        THRESHOLD = 5
-
-    hit_rd = pyapril_cfar(range_doppler, cfar_params=CFAR_PARAMS, threshold=THRESHOLD)
-    cfar_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] CFAR detection: {cfar_time:.4f}s")
-
-    # Prepare data for DOA estimation
-    step_start = time.perf_counter()
-    range_doppler_transposed = np.transpose(range_doppler, (1, 0, 2))
-    data_prep_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] Data preparation for DOA: {data_prep_time:.4f}s")
-
-    logger.debug(f"Hit RD shape: {hit_rd.shape}")
-    logger.debug(f"Range-Doppler Transposed shape: {range_doppler_transposed.shape}")
-
-    # DOA estimation
-    step_start = time.perf_counter()
-    d = 0.5
-    Rx = 8
-    array_alignment = np.arange(0, Rx, 1) * d
-
-    logger.debug(f"Processing {doa_method} DOA estimation...")
-    estimated_angle_bins = target_DOA_estimation(
-        range_doppler_transposed, hit_rd, doa_method, array_alignment
-    )
-    doa_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] {doa_method} DOA estimation: {doa_time:.4f}s")
-    logger.debug(
-        f"{doa_method} completed successfully. Found {len(estimated_angle_bins)} angle estimates."
-    )
-
-    # Angle conversion and coordinate transformation
-    step_start = time.perf_counter()
-    angles = pyapril_convert_to_angles(estimated_angle_bins)
-    logger.debug(f"{doa_method} angles: {angles}")
-
-    ranges, velocities = rd_hit_bin_to_value(hit_rd, adc_params)
-    x_pos, y_pos = ranges_angles_to_xy(ranges, angles)
-    z_pos = np.zeros_like(x_pos)  # Assuming targets are at ground level
-    snrs = np.ones_like(x_pos)  # Default SNR values for pyradar method
-    coordinate_transform_time = time.perf_counter() - step_start
-    logger.debug(
-        f"    [RADAR_PROFILE] Coordinate transformation: {coordinate_transform_time:.4f}s"
-    )
-
-    # Clustering (currently disabled)
-    step_start = time.perf_counter()
-    if IS_INDOOR:
-        EPS = 0.2
-        SAMPLES = 2
-        VELOCITY_WEIGHT = 0.0
-    else:
-        EPS = 0.05
-        SAMPLES = 2
-        VELOCITY_WEIGHT = 0.0
-
-    # cluster_labels, n_clusters, n_noise = apply_radar_clustering(
-    #     x_pos,
-    #     y_pos,
-    #     velocities,
-    #     eps=EPS,
-    #     min_samples=SAMPLES,
-    #     velocity_weight=VELOCITY_WEIGHT,
-    # )
-    cluster_labels = np.array([])
-    clustering_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] Clustering (disabled): {clustering_time:.4f}s")
-
-    # Optional concise profile (disabled by default)
-    # total_time = time.perf_counter() - function_start
-    # logger.info(f"AVG Runtime: {total_time:.4f}s (frame 1)")
-
-    return {
-        "range_doppler": range_doppler,
-        "range_azimuth": range_azimuth,
-        "x_pos": x_pos,
-        "y_pos": y_pos,
-        "z_pos": z_pos,
-        "velocities": velocities,
-        "snrs": snrs,
-        "cluster_labels": cluster_labels,
-    }
-
-
-def custom_process_frame(frame, adc_params):
-    """
-    Process radar frame using PyRadar methods with FFT processing, CFAR detection, and DOA estimation.
-
-    This function performs range FFT, Doppler FFT, azimuth FFT processing, followed by CFAR detection
-    for target identification and Direction of Arrival (DOA) estimation using various beamforming methods.
-
-    Args:
-        frame (numpy.ndarray): Input radar frame data with shape (chirps, tx, rx, samples).
-                              Expected to be complex-valued data from radar ADC.
-        adc_params (ADCParams): ADC parameters object containing:
-                               - tx: Number of transmit antennas
-                               - rx: Number of receive antennas
-                               - samples: Number of range samples
-                               - chirps: Number of chirps per frame
-                               - range_resolution: Range resolution in meters
-                               - doppler_resolution: Doppler resolution in m/s
-        doa_method (str, optional): DOA estimation method to use. Tested options are:
-                                   - "Fourier": Classical Fourier-based beamforming
-                                   - "Capon": Minimum variance distortionless response (MVDR)
-                                   - "MUSIC": Multiple signal classification algorithm
-                                   Defaults to "MUSIC".
-        IS_INDOOR (bool, optional): Flag indicating indoor vs outdoor environment.
-                                   Affects windowing parameters, clutter removal, and CFAR thresholds.
-                                   Defaults to True.
-
-    Returns:
-        dict: A dictionary containing:
-            - "range_doppler" (numpy.ndarray): Range-doppler map with shape (chirps, tx*rx, samples)
-            - "range_azimuth" (numpy.ndarray): Range-azimuth map with shape (chirps, tx*rx, samples)
-            - "x_pos" (numpy.ndarray): X coordinates of detected targets in meters
-            - "y_pos" (numpy.ndarray): Y coordinates of detected targets in meters
-            - "z_pos" (numpy.ndarray): Z coordinates of detected targets in meters (zeros for ground-level targets)
-            - "velocities" (numpy.ndarray): Doppler velocities of detected targets in m/s
-            - "snrs" (numpy.ndarray): Signal-to-noise ratios of detected targets (default values)
-            - "cluster_labels" (numpy.ndarray): DBSCAN cluster labels for detected targets
-
-    Note:
-        The function reshapes the input frame internally from (chirps, tx, rx, samples) to
-        (chirps, tx*rx, samples) for processing. For outdoor scenarios, static clutter removal
-        is performed by subtracting the mean across chirps.
-    """
-    from pyapril.hitProcessor import target_DOA_estimation
-    import time
-
-    function_start = time.perf_counter()
-    logger.debug(f"pyradar_process_frame: Processing frame with shape {frame.shape}")
-
-    logger.debug(
-        f"ADC Params - tx: {adc_params.tx}, rx: {adc_params.rx}, samples: {adc_params.samples}, chirps: {adc_params.chirps}, range_resolution: {adc_params.range_resolution}, doppler_resolution: {adc_params.doppler_resolution}"
-    )
-
-    # Range FFT processing
-    step_start = time.perf_counter()
-
-    # range_cube = range_cube_fft(frame, window_type="kaiser", beta=4)
-    range_cube = range_cube_fft(frame)
-    mean = range_cube.mean(0)
-    range_cube = range_cube - mean
-
-    range_fft_time = time.perf_counter() - step_start
-
-    logger.debug(f"    [RADAR_PROFILE] Range FFT processing: {range_fft_time:.4f}s")
-
-    # Doppler FFT processing
-    step_start = time.perf_counter()
-
-    # range_doppler = range_doppler_fft(range_cube, window_type="kaiser", beta=8)
-    range_doppler = range_doppler_fft(range_cube)
-
-    doppler_fft_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] Doppler FFT processing: {doppler_fft_time:.4f}s")
-
-    # Azimuth FFT processing
-    step_start = time.perf_counter()
-
-    range_azimuth = range_azimuth_fft(range_doppler)
-
-    azimuth_fft_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] Azimuth FFT processing: {azimuth_fft_time:.4f}s")
-
-    logger.debug(f"Range-Doppler shape: {range_doppler.shape}")
-    logger.debug(f"Range-Azimuth shape: {range_azimuth.shape}")
-
-    # CFAR detection
-    step_start = time.perf_counter()
-
-    CFAR_PARAMS = [4, 2, 1, 1]
-    THRESHOLD = 5
-
-    hit_rd = pyapril_cfar(range_doppler, cfar_params=CFAR_PARAMS, threshold=THRESHOLD)
-    cfar_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] CFAR detection: {cfar_time:.4f}s")
-
-    # Prepare data for DOA estimation
-    step_start = time.perf_counter()
-    range_doppler_transposed = np.transpose(range_doppler, (1, 0, 2))
-    data_prep_time = time.perf_counter() - step_start
-    logger.debug(f"    [RADAR_PROFILE] Data preparation for DOA: {data_prep_time:.4f}s")
-
-    logger.debug(f"Hit RD shape: {hit_rd.shape}")
-    logger.debug(f"Range-Doppler Transposed shape: {range_doppler_transposed.shape}")
-
-    # DOA estimation
-    # step_start = time.perf_counter()
-    # d = 0.5
-    # Rx = 8
-    # array_alignment = np.arange(0, Rx, 1) * d
-
-    # logger.debug(f"Processing {doa_method} DOA estimation...")
-    # estimated_angle_bins = target_DOA_estimation(
-    #     range_doppler_transposed, hit_rd, doa_method, array_alignment
-    # )
-    # doa_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] {doa_method} DOA estimation: {doa_time:.4f}s")
-    # logger.debug(
-    #     f"{doa_method} completed successfully. Found {len(estimated_angle_bins)} angle estimates."
-    # )
-
-    # # Angle conversion and coordinate transformation
-    # step_start = time.perf_counter()
-    # angles = pyapril_convert_to_angles(estimated_angle_bins)
-    # logger.debug(f"{doa_method} angles: {angles}")
-
-    # ranges, velocities = rd_hit_bin_to_value(hit_rd, adc_params)
-    # x_pos, y_pos = ranges_angles_to_xy(ranges, angles)
-    # z_pos = np.zeros_like(x_pos)  # Assuming targets are at ground level
-    # snrs = np.ones_like(x_pos)  # Default SNR values for pyradar method
-    # coordinate_transform_time = time.perf_counter() - step_start
-    # logger.debug(
-    #     f"    [RADAR_PROFILE] Coordinate transformation: {coordinate_transform_time:.4f}s"
-    # )
-
-    # Clustering (currently disabled)
-    # step_start = time.perf_counter()
-    # if IS_INDOOR:
-    #     EPS = 0.2
-    #     SAMPLES = 2
-    #     VELOCITY_WEIGHT = 0.0
-    # else:
-    #     EPS = 0.05
-    #     SAMPLES = 2
-    #     VELOCITY_WEIGHT = 0.0
-
-    # cluster_labels, n_clusters, n_noise = apply_radar_clustering(
-    #     x_pos,
-    #     y_pos,
-    #     velocities,
-    #     eps=EPS,
-    #     min_samples=SAMPLES,
-    #     velocity_weight=VELOCITY_WEIGHT,
-    # )
-    cluster_labels = np.array([])
-    x_pos = np.array([])
-    y_pos = np.array([])
-    z_pos = np.array([])
-    velocities = np.array([])
-    snrs = np.array([])  # Use the SNR values from the detected objects
-    # clustering_time = time.perf_counter() - step_start
-    # logger.debug(f"    [RADAR_PROFILE] Clustering (disabled): {clustering_time:.4f}s")
-
-    # total_time = time.perf_counter() - function_start
-    # logger.info(
-    #     f"    [RADAR_PROFILE] TOTAL pyradar_process_frame time: {total_time:.4f}s"
-    # )
-
-    return {
-        "range_doppler": range_doppler,
-        "range_azimuth": range_azimuth,
-        "x_pos": x_pos,
-        "y_pos": y_pos,
-        "z_pos": z_pos,
         "velocities": velocities,
         "snrs": snrs,
         "cluster_labels": cluster_labels,

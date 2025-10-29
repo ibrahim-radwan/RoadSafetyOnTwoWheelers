@@ -61,9 +61,9 @@ int boxes_aligned_overlap_bev_gpu(at::Tensor boxes_a, at::Tensor boxes_b, at::Te
 
     assert(num_box == num_b);
 
-    const float * boxes_a_data = boxes_a.data<float>();
-    const float * boxes_b_data = boxes_b.data<float>();
-    float * ans_overlap_data = ans_overlap.data<float>();
+    const float * boxes_a_data = boxes_a.data_ptr<float>();
+    const float * boxes_b_data = boxes_b.data_ptr<float>();
+    float * ans_overlap_data = ans_overlap.data_ptr<float>();
 
     boxesalignedoverlapLauncher(num_box, boxes_a_data, boxes_b_data, ans_overlap_data);
 
@@ -82,9 +82,9 @@ int boxes_overlap_bev_gpu(at::Tensor boxes_a, at::Tensor boxes_b, at::Tensor ans
     int num_a = boxes_a.size(0);
     int num_b = boxes_b.size(0);
 
-    const float * boxes_a_data = boxes_a.data<float>();
-    const float * boxes_b_data = boxes_b.data<float>();
-    float * ans_overlap_data = ans_overlap.data<float>();
+    const float * boxes_a_data = boxes_a.data_ptr<float>();
+    const float * boxes_b_data = boxes_b.data_ptr<float>();
+    float * ans_overlap_data = ans_overlap.data_ptr<float>();
 
     boxesoverlapLauncher(num_a, boxes_a_data, num_b, boxes_b_data, ans_overlap_data);
 
@@ -105,9 +105,9 @@ int paired_boxes_overlap_bev_gpu(at::Tensor boxes_a, at::Tensor boxes_b, at::Ten
 
     assert(num_a == num_b);
 
-    const float * boxes_a_data = boxes_a.data<float>();
-    const float * boxes_b_data = boxes_b.data<float>();
-    float * ans_overlap_data = ans_overlap.data<float>();
+    const float * boxes_a_data = boxes_a.data_ptr<float>();
+    const float * boxes_b_data = boxes_b.data_ptr<float>();
+    float * ans_overlap_data = ans_overlap.data_ptr<float>();
 
     PairedBoxesOverlapLauncher(num_a, boxes_a_data, num_b, boxes_b_data, ans_overlap_data);
 
@@ -125,9 +125,9 @@ int boxes_iou_bev_gpu(at::Tensor boxes_a, at::Tensor boxes_b, at::Tensor ans_iou
     int num_a = boxes_a.size(0);
     int num_b = boxes_b.size(0);
 
-    const float * boxes_a_data = boxes_a.data<float>();
-    const float * boxes_b_data = boxes_b.data<float>();
-    float * ans_iou_data = ans_iou.data<float>();
+    const float * boxes_a_data = boxes_a.data_ptr<float>();
+    const float * boxes_b_data = boxes_b.data_ptr<float>();
+    float * ans_iou_data = ans_iou.data_ptr<float>();
 
     boxesioubevLauncher(num_a, boxes_a_data, num_b, boxes_b_data, ans_iou_data);
 
@@ -141,8 +141,8 @@ int nms_gpu(at::Tensor boxes, at::Tensor keep, float nms_overlap_thresh){
     CHECK_CONTIGUOUS(keep);
 
     int boxes_num = boxes.size(0);
-    const float * boxes_data = boxes.data<float>();
-    long * keep_data = keep.data<long>();
+    const float * boxes_data = boxes.data_ptr<float>();
+    int64_t * keep_data = keep.data_ptr<int64_t>();
 
     const int col_blocks = DIVUP(boxes_num, THREADS_PER_BLOCK_NMS);
 
@@ -160,8 +160,7 @@ int nms_gpu(at::Tensor boxes, at::Tensor keep, float nms_overlap_thresh){
 
     cudaFree(mask_data);
 
-    unsigned long long remv_cpu[col_blocks];
-    memset(remv_cpu, 0, col_blocks * sizeof(unsigned long long));
+    std::vector<unsigned long long> remv_cpu(col_blocks, 0);
 
     int num_to_keep = 0;
 
@@ -191,8 +190,8 @@ int nms_normal_gpu(at::Tensor boxes, at::Tensor keep, float nms_overlap_thresh){
     CHECK_CONTIGUOUS(keep);
 
     int boxes_num = boxes.size(0);
-    const float * boxes_data = boxes.data<float>();
-    long * keep_data = keep.data<long>();
+    const float * boxes_data = boxes.data_ptr<float>();
+    int64_t * keep_data = keep.data_ptr<int64_t>();
 
     const int col_blocks = DIVUP(boxes_num, THREADS_PER_BLOCK_NMS);
 
@@ -210,8 +209,7 @@ int nms_normal_gpu(at::Tensor boxes, at::Tensor keep, float nms_overlap_thresh){
 
     cudaFree(mask_data);
 
-    unsigned long long remv_cpu[col_blocks];
-    memset(remv_cpu, 0, col_blocks * sizeof(unsigned long long));
+    std::vector<unsigned long long> remv_cpu(col_blocks, 0);
 
     int num_to_keep = 0;
 

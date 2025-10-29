@@ -1,7 +1,6 @@
 """
 Unified Fusion web server with live and replay modes.
 
-Routes are compatible with the previous live server and add:
 - /fs/list for simple home-scoped file browsing
 - /replay/control for playback controls in replay mode (play/pause/stop/seek)
 """
@@ -43,16 +42,12 @@ class FusionRunner:
         radar_only: bool = False,
         radar_config_file: Optional[str] = None,
         replay_path: Optional[str] = None,
-        enable_tesseract: Optional[bool] = None,
-        enable_zyx_cube: Optional[bool] = None,
     ) -> bool:
         return self._impl.start(
             radar_only=radar_only,
             radar_config_file=radar_config_file,
             mode=mode,
             replay_path=replay_path,
-            enable_tesseract=enable_tesseract,
-            enable_zyx_cube=enable_zyx_cube,
         )
 
     def stop(self) -> None:
@@ -190,22 +185,11 @@ def system_start():
     radar_only = bool(request.args.get("radar_only", "0") in ("1", "true", "True"))
     replay_path = request.args.get("replay_path")
     radar_cfg = request.args.get("radar_cfg")
-    # Artefact toggle query params (only effective in full mode, but accept always)
-    enable_tess_q = request.args.get("tesseract")  # expected '1'/'0'
-    enable_cube_q = request.args.get("zyx_cube")
-    enable_tess = None
-    enable_cube = None
-    if enable_tess_q is not None:
-        enable_tess = enable_tess_q in ("1", "true", "True")
-    if enable_cube_q is not None:
-        enable_cube = enable_cube_q in ("1", "true", "True")
     ok = runner.start(
         mode=mode,
         radar_only=radar_only,
         radar_config_file=radar_cfg,
         replay_path=replay_path,
-        enable_tesseract=enable_tess,
-        enable_zyx_cube=enable_cube,
     )
     if not ok and (runner._running or runner._starting):
         return ("already running or starting", 409)
@@ -222,22 +206,6 @@ def system_stop():
         return ("runner not initialized", 503)
     runner.stop()
     return ("OK", 200)
-
-
-@app.route("/system/retry", methods=["POST"])
-def system_retry():
-    global runner
-    if runner is None:
-        return ("runner not initialized", 503)
-    try:
-        runner.stop()
-    except Exception:
-        pass
-    ok = runner.start()
-    return (
-        "OK" if ok else f"FAILED: {runner._failure_reason or 'unknown'}",
-        200 if ok else 500,
-    )
 
 
 @app.route("/replay/control", methods=["POST"])
@@ -280,7 +248,14 @@ def replay_info():
                     if l.endswith(".bin"):
                         rad += 1
                     elif l.endswith(".png"):
-                        cam += 1
+                        # Only count PNG files whose names contain only numbers and underscores
+                        # and end with a number (e.g., 0000000412_06917_000000012314.png)
+                        # Exclude files like _xz.png, frame_001.png, heatmap_xz.png, etc.
+                        name_without_ext = l[:-4]  # Remove .png extension
+                        if name_without_ext and name_without_ext[-1].isdigit():
+                            # Check that name only contains digits and underscores
+                            if all(c.isdigit() or c == "_" for c in name_without_ext):
+                                cam += 1
         except Exception:
             pass
         return jsonify({"radar_frames": int(rad), "camera_frames": int(cam)})

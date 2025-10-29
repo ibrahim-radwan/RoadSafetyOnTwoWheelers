@@ -27,44 +27,44 @@ All Rights Reserved 2020.
 } while (0)
 #define CHECK_INPUT(x) CHECK_CUDA(x);CHECK_CONTIGUOUS(x)
 
-inline float min(float a, float b){
+static inline float min(float a, float b){
     return a > b ? b : a;
 }
 
-inline float max(float a, float b){
+static inline float max(float a, float b){
     return a > b ? a : b;
 }
 
 const float EPS = 1e-8;
 struct Point {
     float x, y;
-    __device__ Point() {}
-    __device__ Point(double _x, double _y){
+    Point() {}
+    Point(double _x, double _y){
         x = _x, y = _y;
     }
 
-    __device__ void set(float _x, float _y){
+    void set(float _x, float _y){
         x = _x; y = _y;
     }
 
-    __device__ Point operator +(const Point &b)const{
+    Point operator +(const Point &b)const{
         return Point(x + b.x, y + b.y);
     }
 
-    __device__ Point operator -(const Point &b)const{
+    Point operator -(const Point &b)const{
         return Point(x - b.x, y - b.y);
     }
 };
 
-inline float cross(const Point &a, const Point &b){
+static inline float cross(const Point &a, const Point &b){
     return a.x * b.y - a.y * b.x;
 }
 
-inline float cross(const Point &p1, const Point &p2, const Point &p0){
+static inline float cross(const Point &p1, const Point &p2, const Point &p0){
     return (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
 }
 
-inline int check_rect_cross(const Point &p1, const Point &p2, const Point &q1, const Point &q2){
+static inline int check_rect_cross(const Point &p1, const Point &p2, const Point &q1, const Point &q2){
     int ret = min(p1.x,p2.x) <= max(q1.x,q2.x)  &&
               min(q1.x,q2.x) <= max(p1.x,p2.x) &&
               min(p1.y,p2.y) <= max(q1.y,q2.y) &&
@@ -72,7 +72,7 @@ inline int check_rect_cross(const Point &p1, const Point &p2, const Point &q1, c
     return ret;
 }
 
-inline int check_in_box2d(const float *box, const Point &p){
+static inline int check_in_box2d(const float *box, const Point &p){
     //params: (7) [x, y, z, dx, dy, dz, heading]
     const float MARGIN = 1e-2;
 
@@ -84,7 +84,7 @@ inline int check_in_box2d(const float *box, const Point &p){
     return (fabs(rot_x) < box[3] / 2 + MARGIN && fabs(rot_y) < box[4] / 2 + MARGIN);
 }
 
-inline int intersection(const Point &p1, const Point &p0, const Point &q1, const Point &q0, Point &ans){
+static inline int intersection(const Point &p1, const Point &p0, const Point &q1, const Point &q0, Point &ans){
     // fast exclusion
     if (check_rect_cross(p0, p1, q0, q1) == 0) return 0;
 
@@ -115,17 +115,17 @@ inline int intersection(const Point &p1, const Point &p0, const Point &q1, const
     return 1;
 }
 
-inline void rotate_around_center(const Point &center, const float angle_cos, const float angle_sin, Point &p){
+static inline void rotate_around_center(const Point &center, const float angle_cos, const float angle_sin, Point &p){
     float new_x = (p.x - center.x) * angle_cos + (p.y - center.y) * (-angle_sin) + center.x;
     float new_y = (p.x - center.x) * angle_sin + (p.y - center.y) * angle_cos + center.y;
     p.set(new_x, new_y);
 }
 
-inline int point_cmp(const Point &a, const Point &b, const Point &center){
+static inline int point_cmp(const Point &a, const Point &b, const Point &center){
     return atan2(a.y - center.y, a.x - center.x) > atan2(b.y - center.y, b.x - center.x);
 }
 
-inline float box_overlap(const float *box_a, const float *box_b){
+static inline float box_overlap(const float *box_a, const float *box_b){
     // params: box_a (7) [x, y, z, dx, dy, dz, heading]
     // params: box_b (7) [x, y, z, dx, dy, dz, heading]
 
@@ -219,7 +219,7 @@ inline float box_overlap(const float *box_a, const float *box_b){
     return fabs(area) / 2.0;
 }
 
-inline float iou_bev(const float *box_a, const float *box_b){
+static inline float iou_bev(const float *box_a, const float *box_b){
     // params: box_a (7) [x, y, z, dx, dy, dz, heading]
     // params: box_b (7) [x, y, z, dx, dy, dz, heading]
     float sa = box_a[3] * box_a[4];
@@ -239,9 +239,9 @@ int boxes_iou_bev_cpu(at::Tensor boxes_a_tensor, at::Tensor boxes_b_tensor, at::
 
     int num_boxes_a = boxes_a_tensor.size(0);
     int num_boxes_b = boxes_b_tensor.size(0);
-    const float *boxes_a = boxes_a_tensor.data<float>();
-    const float *boxes_b = boxes_b_tensor.data<float>();
-    float *ans_iou = ans_iou_tensor.data<float>();
+    const float *boxes_a = boxes_a_tensor.data_ptr<float>();
+    const float *boxes_b = boxes_b_tensor.data_ptr<float>();
+    float *ans_iou = ans_iou_tensor.data_ptr<float>();
 
     for (int i = 0; i < num_boxes_a; i++){
         for (int j = 0; j < num_boxes_b; j++){
@@ -262,9 +262,9 @@ int boxes_aligned_iou_bev_cpu(at::Tensor boxes_a_tensor, at::Tensor boxes_b_tens
     int num_boxes = boxes_a_tensor.size(0);
     int num_boxes_b = boxes_b_tensor.size(0);
     assert(num_boxes == num_boxes_b);
-    const float *boxes_a = boxes_a_tensor.data<float>();
-    const float *boxes_b = boxes_b_tensor.data<float>();
-    float *ans_iou = ans_iou_tensor.data<float>();
+    const float *boxes_a = boxes_a_tensor.data_ptr<float>();
+    const float *boxes_b = boxes_b_tensor.data_ptr<float>();
+    float *ans_iou = ans_iou_tensor.data_ptr<float>();
 
     for (int i = 0; i < num_boxes; i++){
         ans_iou[i] = iou_bev(boxes_a + i * 7, boxes_b + i * 7);

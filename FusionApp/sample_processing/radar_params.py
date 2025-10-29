@@ -3,17 +3,8 @@ Radar parameter processing functions
 """
 
 import numpy as np
-import logging
 from mmwave.dataloader.adc import DCA1000
-from config_params import CFGS
 from utils import setup_logger
-
-INDOOR_CONFIG_FILE = "sample_data/AWR2243_indoor_2d.txt"
-OUTDOOR_CONFIG_FILE = "sample_data/AWR2243_outdoor_2d.txt"
-INDOOR_SAMPLE_1 = "sample_data/indoor_f1.bin"
-INDOOR_SAMPLE_2 = "sample_data/indoor_f2.bin"
-OUTDOOR_SAMPLE_1 = "sample_data/outdoor_f1.bin"
-OUTDOOR_SAMPLE_2 = "sample_data/outdoor_f2.bin"
 
 
 class ADCParams:

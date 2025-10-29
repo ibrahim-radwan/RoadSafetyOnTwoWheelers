@@ -2,6 +2,9 @@ windows:
   range: hamming
   doppler: hamming
 
+detection:
+  edge_mask_size: 4
+
 calibration:
   dc_offset:
     enabled: true

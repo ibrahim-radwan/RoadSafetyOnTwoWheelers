@@ -1,5 +1,4 @@
 import os
-import glob
 import time
 import threading
 from collections import deque
@@ -552,14 +551,19 @@ class FusionRunner:
 
     def _draw_detections(self, bgr: np.ndarray, objects: Optional[Any]) -> np.ndarray:
         try:
-            if bgr is None or objects is None:
+            if bgr is None:
+                return bgr
+            if objects is None:
+                return bgr
+            obj_list = list(objects) if isinstance(objects, (list, tuple)) else []
+            if len(obj_list) == 0:
                 return bgr
             img = bgr.copy()
             h, w = img.shape[:2]
             base_thickness = max(1, int(round(min(h, w) / 240)))
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = max(0.3, min(1.0, base_thickness * 0.6))
-            for obj in list(objects) if isinstance(objects, (list, tuple)) else []:
+            for obj in obj_list:
                 x = int(getattr(obj, "x", getattr(obj, "left", 0)))
                 y = int(getattr(obj, "y", getattr(obj, "top", 0)))
                 w_box = int(getattr(obj, "width", getattr(obj, "w", 0)))
@@ -712,15 +716,12 @@ class FusionRunner:
                     self._ra_shape, dtype=np_dtype, buffer=self._ra_blocks[slot].buf
                 )
                 arr = np.array(view, copy=True)
-                # Don't rotate for polar RA display - polar transform handles orientation
-                # try:
-                #     arr = np.rot90(arr, 1)
-                # except Exception:
-                #     pass
                 pc = self._latest_point_cloud or {}
                 mr = pc.get("max_range") if isinstance(pc, dict) else None
                 # Get actual azimuth range from the data
-                az_grid = pc.get("tesseract_az_grid_deg") if isinstance(pc, dict) else None
+                az_grid = (
+                    pc.get("tesseract_az_grid_deg") if isinstance(pc, dict) else None
+                )
                 if isinstance(az_grid, np.ndarray) and az_grid.size > 0:
                     az_min, az_max = float(np.min(az_grid)), float(np.max(az_grid))
                 else:
@@ -730,16 +731,15 @@ class FusionRunner:
                 else:
                     extents = (az_min, az_max, 0.0, 10.0)
                 return heatmap_to_png(
-                    arr, extents=extents, force_square=False, target_size=(640, 480), polar=True
+                    arr,
+                    extents=extents,
+                    force_square=False,
+                    target_size=(640, 480),
+                    polar=True,
                 )
         except Exception:
             pass
         if isinstance(self._latest_ra, np.ndarray):
-            # Don't rotate for polar display - polar transform handles orientation
-            # try:
-            #     arr = np.rot90(self._latest_ra, 1)
-            # except Exception:
-            #     arr = self._latest_ra
             arr = self._latest_ra
             pc = self._latest_point_cloud or {}
             mr = pc.get("max_range") if isinstance(pc, dict) else None
@@ -754,7 +754,11 @@ class FusionRunner:
             else:
                 extents = (az_min, az_max, 0.0, 10.0)
             return heatmap_to_png(
-                arr, extents=extents, force_square=False, target_size=(640, 480), polar=True
+                arr,
+                extents=extents,
+                force_square=False,
+                target_size=(640, 480),
+                polar=True,
             )
         return None
 

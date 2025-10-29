@@ -53,9 +53,138 @@
       border-radius: 6px;
     }
 
+    /* Modern Button Styles */
     button {
-      padding: 8px 12px;
-      margin-right: 8px;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      font-family: inherit;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    }
+
+    button:active {
+      transform: translateY(0);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    }
+
+    /* Primary action buttons (Start) */
+    button.btn-start {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: white;
+      border: none;
+    }
+
+    button.btn-start:hover {
+      background: linear-gradient(135deg, #059669 0%, #047857 100%);
+    }
+
+    /* Secondary action buttons (Stop) */
+    button.btn-stop {
+      background: white;
+      color: #dc2626;
+      border: 2px solid #dc2626;
+      box-shadow: 0 2px 4px rgba(220, 38, 38, 0.1);
+    }
+
+    button.btn-stop:hover {
+      background: #fef2f2;
+      border-color: #b91c1c;
+      color: #b91c1c;
+    }
+
+    /* Recording buttons (special style) */
+    button.btn-record {
+      background: white;
+      color: #2563eb;
+      border: 2px solid #2563eb;
+      box-shadow: 0 2px 4px rgba(37, 99, 235, 0.1);
+    }
+
+    button.btn-record:hover {
+      background: #eff6ff;
+      border-color: #1d4ed8;
+      color: #1d4ed8;
+    }
+
+    /* Neutral/utility buttons */
+    button.btn-neutral {
+      background: #f3f4f6;
+      color: #374151;
+      border: 1px solid #d1d5db;
+    }
+
+    button.btn-neutral:hover {
+      background: #e5e7eb;
+      border-color: #9ca3af;
+    }
+
+    /* Small buttons */
+    button.btn-sm {
+      padding: 6px 12px;
+      font-size: 13px;
+    }
+
+    /* Modern Select/Dropdown Styles */
+    select {
+      padding: 10px 36px 10px 14px;
+      border: 2px solid #e5e7eb;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      color: #374151;
+      background: white;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath fill='%23374151' d='M4.427 6.427l3.396 3.396a.25.25 0 00.354 0l3.396-3.396A.25.25 0 0011.396 6H4.604a.25.25 0 00-.177.427z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      font-family: inherit;
+    }
+
+    select:hover {
+      border-color: #2563eb;
+      box-shadow: 0 2px 6px rgba(37, 99, 235, 0.1);
+    }
+
+    select:focus {
+      outline: none;
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+
+    /* Modern Input Styles */
+    input[type="text"],
+    input[type="number"] {
+      padding: 10px 14px;
+      border: 2px solid #e5e7eb;
+      border-radius: 8px;
+      font-size: 14px;
+      color: #374151;
+      transition: all 0.2s ease;
+      font-family: inherit;
+    }
+
+    input[type="text"]:hover,
+    input[type="number"]:hover {
+      border-color: #d1d5db;
+    }
+
+    input[type="text"]:focus,
+    input[type="number"]:focus {
+      outline: none;
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
     }
 
     img {
@@ -169,6 +298,334 @@
     .picker .entry.selected {
       background: #cfe3ff;
     }
+
+    /* Tab Navigation Styles */
+    .tab-nav {
+      display: flex;
+      gap: 0;
+      border-bottom: 2px solid #ddd;
+      margin-bottom: 16px;
+    }
+
+    .tab-btn {
+      background: #f5f5f5;
+      border: 1px solid #ddd;
+      border-bottom: none;
+      padding: 10px 24px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: #666;
+      transition: all 0.2s ease;
+      border-radius: 6px 6px 0 0;
+      margin-right: 4px;
+      position: relative;
+      bottom: -2px;
+    }
+
+    .tab-btn:hover {
+      background: #e8e8e8;
+      color: #333;
+    }
+
+    .tab-btn.active {
+      background: white;
+      color: #2563eb;
+      border-color: #2563eb;
+      border-bottom: 2px solid white;
+      font-weight: 600;
+    }
+
+    /* Toggle Switch Styles */
+    .toggle-container {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-left: 48px;
+    }
+
+    .toggle-label {
+      font-size: 13px;
+      color: #666;
+      font-weight: 500;
+    }
+
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 52px;
+      height: 28px;
+    }
+
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #2563eb;
+      transition: 0.3s;
+      border-radius: 28px;
+    }
+
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 22px;
+      width: 22px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.3s;
+      border-radius: 50%;
+    }
+
+    .toggle-switch input:checked+.toggle-slider {
+      background-color: #f59e0b;
+    }
+
+    .toggle-switch input:checked+.toggle-slider:before {
+      transform: translateX(24px);
+    }
+
+    .toggle-switch input:focus+.toggle-slider {
+      box-shadow: 0 0 1px #2563eb;
+    }
+
+    /* Control row layout */
+    .control-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .control-row .buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    /* Control Cards */
+    .control-card {
+      background: white;
+      border: 2px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    }
+
+    .control-card-header {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f2937;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .control-card.disabled {
+      opacity: 0.6;
+      pointer-events: none;
+    }
+
+    /* Status Indicators */
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      margin-top: 12px;
+    }
+
+    .status-badge.stopped {
+      background: #f3f4f6;
+      color: #6b7280;
+    }
+
+    .status-badge.starting {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .status-badge.running {
+      background: #d1fae5;
+      color: #065f46;
+    }
+
+    .status-badge.error {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    /* Loading Spinner */
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: white;
+      animation: spin 0.6s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* Process Status Inline */
+    .process-inline {
+      padding: 12px;
+      background: #f9fafb;
+      border-radius: 8px;
+    }
+
+    .process-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #374151;
+      padding: 6px 10px;
+      background: white;
+      border-radius: 6px;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .process-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    .process-dot.stopped {
+      background: #e5e7eb;
+      position: relative;
+    }
+
+    .process-dot.stopped::before {
+      content: '−';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 14px;
+      font-weight: bold;
+      color: #6b7280;
+      line-height: 1;
+    }
+
+    .process-dot.starting {
+      background: #fbbf24;
+      animation: pulse 1.5s ease-in-out infinite;
+      position: relative;
+    }
+
+    .process-dot.starting::before {
+      content: '⟳';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 10px;
+      color: white;
+      line-height: 1;
+    }
+
+    .process-dot.running {
+      background: #10b981;
+      position: relative;
+    }
+
+    .process-dot.running::before {
+      content: '✓';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 10px;
+      color: white;
+      font-weight: bold;
+      line-height: 1;
+    }
+
+    .process-dot.error {
+      background: #ef4444;
+      position: relative;
+    }
+
+    .process-dot.error::before {
+      content: '✗';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 10px;
+      color: white;
+      font-weight: bold;
+      line-height: 1;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.5;
+      }
+    }
+
+    /* Warning/Info Messages */
+    .info-message {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      color: #1e40af;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+
+    .info-message.warning {
+      background: #fef3c7;
+      border-color: #fde68a;
+      color: #92400e;
+    }
+
+    /* Disabled button state */
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none !important;
+    }
+
+    button:disabled:hover {
+      transform: none !important;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
+    }
   </style>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <script>
@@ -182,20 +639,9 @@
       const params = [];
       const radarOnly = document.getElementById('radar_only').checked;
       if (radarOnly) params.push('radar_only=1');
-      const mode = document.querySelector('input[name="server_mode"]:checked').value;
+      const activeTab = document.querySelector('.tab-btn.active');
+      const mode = activeTab ? activeTab.getAttribute('data-mode') : 'live';
       params.push('mode=' + encodeURIComponent(mode));
-      // Artefact toggles only meaningful for full-analysis mode; only append when mode==='full'
-      if (mode === 'full') {
-        try {
-          const tcb = document.getElementById('af_tesseract');
-          // default to enabled if checkbox missing
-          const tval = (tcb ? tcb.checked : true) ? '1' : '0';
-          const zcb = document.getElementById('af_zyx_cube');
-          const zval = (zcb ? zcb.checked : true) ? '1' : '0';
-          params.push('tesseract=' + tval);
-          params.push('zyx_cube=' + zval);
-        } catch (e) { /* ignore */ }
-      }
       if (mode === 'live') {
         const sel = document.getElementById('radar_cfg_sel');
         const cfg = sel && sel.value ? sel.value : '';
@@ -218,9 +664,6 @@
     async function systemStop() {
       await fetch('/system/stop', { method: 'POST' });
     }
-    async function systemRetry() {
-      await fetch('/system/retry', { method: 'POST' });
-    }
     async function refreshStatus() {
       try {
         const r = await fetch('/status');
@@ -228,18 +671,6 @@
         document.getElementById('status').textContent = JSON.stringify(j, null, 2);
         fetchProcesses();
         renderTimes(j);
-        // Sync artefact checkboxes when running or after status pull (do not override user edits if not full mode)
-        try {
-          const art = j && j.artefacts ? j.artefacts : {};
-          if (typeof art.enable_tesseract === 'boolean') {
-            const tcb = document.getElementById('af_tesseract');
-            if (tcb && isRunning) tcb.checked = art.enable_tesseract;
-          }
-          if (typeof art.enable_zyx_cube === 'boolean') {
-            const zcb = document.getElementById('af_zyx_cube');
-            if (zcb && isRunning) zcb.checked = art.enable_zyx_cube;
-          }
-        } catch (e) { }
         try {
           if (typeof j.running === 'boolean') {
             isRunning = j.running;
@@ -268,18 +699,6 @@
                   if (radarTimer) clearInterval(radarTimer);
                   // When engine stops, reset replay playing flag
                   rpPlaying = false;
-                }
-              }
-            } catch (e) { }
-            // Sync artefact checkbox states while engine running
-            try {
-              const art = j && j.artefacts ? j.artefacts : {};
-              if (isRunning) {
-                if (typeof art.enable_tesseract === 'boolean') {
-                  const tcb = document.getElementById('af_tesseract'); if (tcb) tcb.checked = art.enable_tesseract;
-                }
-                if (typeof art.enable_zyx_cube === 'boolean') {
-                  const zcb = document.getElementById('af_zyx_cube'); if (zcb) zcb.checked = art.enable_zyx_cube;
                 }
               }
             } catch (e) { }
@@ -345,12 +764,12 @@
               // Brief delay to allow process to initialize queues
               await new Promise(r => setTimeout(r, 300));
             }
-          } catch (e) { 
+          } catch (e) {
             console.error('Failed to start system before seek:', e);
             return;  // Don't proceed if start failed
           }
           rpCur = n;
-          await replayCmd('seek:' + n); 
+          await replayCmd('seek:' + n);
           seekEl.value = ''; // Clear input after seeking
         }
       };
@@ -428,6 +847,8 @@
     let unifiedTimer = null;
     let lastVideoTick = 0;
     let lastRadarTick = 0;
+    let videoFPS = 1;
+    let radarFPS = 1;
     let procTimer = null;
     let pc3dInitialized = false; // preserve 3D camera across frames
     let pc3dResetOnNext = false; // force reset camera when switching to 3D
@@ -443,22 +864,12 @@
         if (!isRunning) return;
         const now = Date.now();
         try {
-          const vMode = document.querySelector('input[name="video_mode"]:checked').value;
-          if (vMode === 'live') {
-            let vfps = parseInt((document.getElementById('video_fps').value || '1'), 10);
-            vfps = Math.max(1, vfps);
-            const vPeriod = Math.max(50, Math.floor(1000 / vfps));
-            if (now - lastVideoTick >= vPeriod) { fetchVideoFrame(); lastVideoTick = now; }
-          }
+          const vPeriod = Math.max(50, Math.floor(1000 / videoFPS));
+          if (now - lastVideoTick >= vPeriod) { fetchVideoFrame(); lastVideoTick = now; }
         } catch (e) { }
         try {
-          const rMode = document.querySelector('input[name="radar_mode"]:checked').value;
-          if (rMode === 'live') {
-            let rfps = parseInt((document.getElementById('radar_fps').value || '1'), 10);
-            rfps = Math.max(1, rfps);
-            const rPeriod = Math.max(50, Math.floor(1000 / rfps));
-            if (now - lastRadarTick >= rPeriod) { fetchRadarFrame(); lastRadarTick = now; }
-          }
+          const rPeriod = Math.max(50, Math.floor(1000 / radarFPS));
+          if (now - lastRadarTick >= rPeriod) { fetchRadarFrame(); lastRadarTick = now; }
         } catch (e) { }
       }, basePeriod);
     }
@@ -481,17 +892,45 @@
       el.src = url;
     }
     function bindViewerControls() {
-      // Defaults to 1 fps
-      const vSel = document.getElementById('video_fps');
-      if (vSel) vSel.value = '1';
-      const rSel = document.getElementById('radar_fps');
-      if (rSel) rSel.value = '1';
-      document.querySelectorAll('input[name="video_mode"]').forEach(r => r.addEventListener('change', () => { scheduleVideoPoll(); }));
-      document.querySelectorAll('input[name="radar_mode"]').forEach(r => r.addEventListener('change', () => { scheduleRadarPoll(); }));
-      document.getElementById('video_fps').addEventListener('change', () => { scheduleVideoPoll(); });
-      document.getElementById('radar_fps').addEventListener('change', () => { scheduleRadarPoll(); });
-      document.getElementById('video_next').addEventListener('click', () => { clearInterval(videoTimer); fetchVideoFrame(); });
-      document.getElementById('radar_next').addEventListener('click', () => { clearInterval(radarTimer); fetchRadarFrame(); });
+      // Video FPS button handlers
+      document.querySelectorAll('[data-vfps]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const fps = parseInt(e.target.getAttribute('data-vfps'), 10);
+          if (fps) {
+            videoFPS = fps;
+            // Highlight active button
+            document.querySelectorAll('[data-vfps]').forEach(b => b.style.opacity = '0.6');
+            e.target.style.opacity = '1';
+          }
+        });
+        // Set default (1 fps)
+        if (btn.getAttribute('data-vfps') === '1') {
+          btn.style.opacity = '1';
+        } else {
+          btn.style.opacity = '0.6';
+        }
+      });
+
+      // Radar FPS button handlers
+      document.querySelectorAll('[data-rfps]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const fps = parseInt(e.target.getAttribute('data-rfps'), 10);
+          if (fps) {
+            radarFPS = fps;
+            // Highlight active button
+            document.querySelectorAll('[data-rfps]').forEach(b => b.style.opacity = '0.6');
+            e.target.style.opacity = '1';
+          }
+        });
+        // Set default (1 fps)
+        if (btn.getAttribute('data-rfps') === '1') {
+          btn.style.opacity = '1';
+        } else {
+          btn.style.opacity = '0.6';
+        }
+      });
+
+      // Radar mode button handlers
       document.querySelectorAll('[data-rmode]').forEach(b => b.addEventListener('click', (e) => {
         const m = e.target.getAttribute('data-rmode');
         if (m) {
@@ -677,28 +1116,117 @@
       } catch (e) { renderProcesses([]); }
     }
     function renderProcesses(list) {
-      const container = document.getElementById('proc_grid');
+      // Update inline process status display
+      const container = document.getElementById('process-status-inline');
       if (!container) return;
-      container.innerHTML = '';
-      const colorMap = {
-        'not_exists': 'white',
-        'unknown': 'white',
-        'dead': 'red',
-        'sleeping': 'yellow',
-        'running': 'green',
+
+      const statusMap = {
+        'not_exists': 'stopped',
+        'unknown': 'stopped',
+        'dead': 'error',
+        'sleeping': 'starting',
+        'running': 'running',
       };
+
+      const radarOnly = document.getElementById('radar_only')?.checked || false;
+
       const expected = [
         'WebServer', 'FusionEngine', 'RadarFeed', 'RadarAnalyser', 'CameraFeed', 'CameraAnalyser'
       ];
-      const byLabel = {}; (list || []).forEach(p => { if (p && p.label) byLabel[p.label] = p; });
-      expected.forEach(name => {
-        const p = byLabel[name] || { label: name, status: 'not_exists', pid: null };
-        const div = document.createElement('div');
-        const color = colorMap[p.status] || 'white';
-        div.className = 'proc ' + color;
-        div.innerHTML = name + '<div class="meta">' + (p.status || 'not_exists') + (p.pid ? (' · pid ' + p.pid) : '') + '</div>';
-        container.appendChild(div);
+
+      const byLabel = {};
+      (list || []).forEach(p => { if (p && p.label) byLabel[p.label] = p; });
+
+      // Hide/show camera items in radar-only mode
+      const cameraItems = container.querySelectorAll('[data-requires="camera"]');
+      cameraItems.forEach(item => {
+        item.style.display = radarOnly ? 'none' : 'flex';
       });
+
+      // Update each process item
+      const items = container.querySelectorAll('.process-item');
+      items.forEach((item, index) => {
+        const name = expected[index];
+        if (!name) return;
+
+        const p = byLabel[name] || { label: name, status: 'not_exists', pid: null };
+        const dot = item.querySelector('.process-dot');
+        if (dot) {
+          dot.className = 'process-dot ' + (statusMap[p.status] || 'stopped');
+        }
+      });
+
+      // Update system-wide status
+      updateSystemStatus(byLabel, radarOnly);
+    }
+
+    function updateSystemStatus(processes, radarOnly) {
+      const badge = document.getElementById('system-status-badge');
+      const statusText = document.getElementById('system-status-text');
+      const startBtn = document.getElementById('btn-system-start');
+      const stopBtn = document.getElementById('btn-system-stop');
+      const startBtnText = document.getElementById('start-btn-text');
+      const recordStartBtn = document.getElementById('btn-start-record');
+      const recordStopBtn = document.getElementById('btn-stop-record');
+      const radarCfgSel = document.getElementById('radar_cfg_sel');
+
+      if (!badge || !statusText) return;
+
+      // Determine required processes based on radar-only mode
+      const requiredProcesses = radarOnly
+        ? ['WebServer', 'FusionEngine', 'RadarFeed', 'RadarAnalyser']
+        : ['WebServer', 'FusionEngine', 'RadarFeed', 'RadarAnalyser', 'CameraFeed', 'CameraAnalyser'];
+
+      // Check if all required processes are running
+      const allRunning = requiredProcesses.every(name => {
+        const p = processes[name];
+        return p && p.status === 'running';
+      });
+
+      // Check if any required process is starting (sleeping status)
+      const anyStarting = requiredProcesses.some(name => {
+        const p = processes[name];
+        return p && p.status === 'sleeping';
+      });
+
+      // Update status badge and buttons
+      if (allRunning) {
+        badge.className = 'status-badge running';
+        badge.style.display = 'inline-flex';
+        statusText.innerHTML = '✓ System Running';
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        if (radarCfgSel) radarCfgSel.disabled = true;
+
+        // Enable recording buttons and ensure button has icon
+        recordStartBtn.disabled = false;
+        startBtnText.innerHTML = '▶ Start System';
+      } else if (anyStarting) {
+        badge.className = 'status-badge starting';
+        badge.style.display = 'inline-flex';
+        statusText.innerHTML = '<span class="spinner" style="border-color: #92400e; border-top-color: transparent; width:12px; height:12px;"></span> Starting System...';
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        if (radarCfgSel) radarCfgSel.disabled = true;
+
+        // Keep button text simple (starting state)
+        startBtnText.innerHTML = '▶ Start System';
+
+        // Disable recording buttons while starting
+        recordStartBtn.disabled = true;
+        recordStopBtn.disabled = true;
+      } else {
+        // System stopped - hide status badge
+        badge.style.display = 'none';
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        if (radarCfgSel) radarCfgSel.disabled = false;
+
+        // Disable recording buttons and ensure button has icon
+        recordStartBtn.disabled = true;
+        recordStopBtn.disabled = true;
+        startBtnText.innerHTML = '▶ Start System';
+      }
     }
     function renderTimes(j) {
       const el = document.getElementById('times');
@@ -721,6 +1249,14 @@
         document.getElementById('bytes_total').textContent = mb.toFixed(2);
         document.getElementById('bw_bps').textContent = mbs.toFixed(2);
         document.getElementById('rec_dur').textContent = j.recording_duration_hms || '00:00:00';
+
+        // Update recording button states
+        const stopRecBtn = document.getElementById('btn-stop-record');
+        if (stopRecBtn && j.recording_dir) {
+          stopRecBtn.disabled = false; // Enable stop when recording
+        } else if (stopRecBtn && !j.recording_dir) {
+          stopRecBtn.disabled = true; // Disable stop when not recording
+        }
       } catch (e) { }
     }
     // Init binds
@@ -731,6 +1267,14 @@
       bindReplayControls();
       // Ensure processes grid updates even if SSE is delayed
       procTimer = setInterval(fetchProcesses, 1000);
+
+      // Update process display when radar-only toggle changes
+      const radarOnlyToggle = document.getElementById('radar_only');
+      if (radarOnlyToggle) {
+        radarOnlyToggle.addEventListener('change', () => {
+          fetchProcesses(); // Refresh to update visibility
+        });
+      }
       // Fetch initial tuning and populate minimal UI if present
       try {
         fetch('/tuning').then(r => r.json()).then(j => {
@@ -833,17 +1377,14 @@
     // Mode toggle: live vs replay (bind after DOM is ready)
     window.addEventListener('load', function () {
       function setModeUI() {
-        const modeEl = document.querySelector('input[name="server_mode"]:checked');
-        const mode = modeEl ? modeEl.value : 'live';
+        const activeTab = document.querySelector('.tab-btn.active');
+        const mode = activeTab ? activeTab.getAttribute('data-mode') : 'live';
         const liveOnlyEls = document.querySelectorAll('.live-only');
         const replayOnlyEls = document.querySelectorAll('.replay-only');
-        const fullOnlyEls = document.querySelectorAll('.full-only');
         liveOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'live'));
-        // Treat 'full' like 'replay' for UI purposes
         replayOnlyEls.forEach(el => el.classList.toggle('hidden', mode === 'live'));
-        fullOnlyEls.forEach(el => el.classList.toggle('hidden', mode !== 'full'));
-        // Prefill defaults when switching into replay/full mode
-        if ((mode === 'replay' || mode === 'full') && window.__defaults) {
+        // Prefill defaults when switching into replay mode
+        if (mode === 'replay' && window.__defaults) {
           try {
             if (window.__defaults.default_replay_path) {
               const rp = document.getElementById('replay_path');
@@ -856,7 +1397,17 @@
           } catch (e) { }
         }
       }
-      document.querySelectorAll('input[name="server_mode"]').forEach(r => r.addEventListener('change', setModeUI));
+      // Tab click handlers
+      document.querySelectorAll('.tab-btn').forEach(tab => {
+        tab.addEventListener('click', function () {
+          // Remove active class from all tabs
+          document.querySelectorAll('.tab-btn').forEach(t => t.classList.remove('active'));
+          // Add active class to clicked tab
+          this.classList.add('active');
+          // Update UI based on selected mode
+          setModeUI();
+        });
+      });
       setModeUI();
     });
   </script>
@@ -893,59 +1444,180 @@
 </head>
 
 <body>
-  <h2>Fusion Live Server</h2>
   <div class="row">
     <div class="col panel" style="flex:2;">
-      <h3>Controls</h3>
-      <div style="margin-bottom:6px;">
-        <label>Server Mode:</label>
-        <label><input type="radio" name="server_mode" value="live" checked> Live</label>
-        <label><input type="radio" name="server_mode" value="replay"> Replay</label>
-        <label><input type="radio" name="server_mode" value="full"> Full-Analysis</label>
+      <div class="tab-nav">
+        <button class="tab-btn active" data-mode="live">Live</button>
+        <button class="tab-btn" data-mode="replay">Replay</button>
+        <div class="toggle-container">
+          <span class="toggle-label">Camera + Radar</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="radar_only">
+            <span class="toggle-slider"></span>
+          </label>
+          <span class="toggle-label">Radar Only</span>
+        </div>
       </div>
-      <label><input type="checkbox" id="radar_only"> Radar only</label>
-      <div class="full-only hidden" style="margin-top:6px;">
-        <fieldset style="display:inline-block; min-width:220px;">
-          <legend>Full Analysis Artefacts</legend>
-          <label style="display:block; margin-bottom:4px;"><input type="checkbox" id="af_tesseract" checked> Tesseract
-            (4D MUSIC)</label>
-          <label style="display:block; margin-bottom:4px;"><input type="checkbox" id="af_zyx_cube" checked> ZYX Cube
-            (Cartesian)</label>
-          <div class="meta">Effective only in Full-Analysis mode.</div>
-        </fieldset>
+      <!-- System Control & Processes Row -->
+      <div style="margin-top:12px; display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap;">
+        <!-- System Control Card -->
+        <div class="control-card" style="min-width:200px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; gap:16px;">
+            <div class="control-card-header" style="margin:0;">System Control</div>
+            <div class="live-only">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <label style="font-size:13px; color:#6b7280; margin:0; white-space:nowrap;">Radar Config</label>
+                <select id="radar_cfg_sel" style="min-width:120px;">
+                  {% if radar_config_options %}
+                  {% for o in radar_config_options %}
+                  <option value="{{ o.path }}" {% if o.mode=='3D' and ('180m' in (o.label|lower)) %}selected{% endif %}>
+                    {{ o.label }}</option>
+                  {% endfor %}
+                  {% endif %}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex; gap:8px;">
+            <button class="btn-start" id="btn-system-start" onclick="systemStart()">
+              <span id="start-btn-text">▶ Start System</span>
+            </button>
+            <button class="btn-stop" id="btn-system-stop" onclick="systemStop()" disabled>⏹ Stop System</button>
+          </div>
+
+          <!-- System Status Badge (only shown when starting or running) -->
+          <div class="status-badge stopped" id="system-status-badge" style="display:none; margin-top:12px;">
+            <span id="system-status-text"></span>
+          </div>
+        </div>
+
+        <!-- System Processes Card -->
+        <div class="control-card" style="flex:1; min-width:420px; max-width:500px;">
+          <div class="control-card-header" style="margin-bottom:12px;">System Processes</div>
+          <div style="display:flex; flex-direction:column; gap:6px;" id="process-status-inline">
+            <!-- Row 1: WebServer, FusionEngine, RadarFeed -->
+            <div style="display:flex; gap:12px;">
+              <div class="process-item" style="width:130px;">
+                <span class="process-dot stopped"></span>
+                <span>WebServer</span>
+              </div>
+              <div class="process-item" style="width:130px;">
+                <span class="process-dot stopped"></span>
+                <span>FusionEngine</span>
+              </div>
+              <div class="process-item" style="width:130px;">
+                <span class="process-dot stopped"></span>
+                <span>RadarFeed</span>
+              </div>
+            </div>
+
+            <!-- Row 2: RadarAnalyser, CameraFeed, CameraAnalyser -->
+            <div style="display:flex; gap:12px;">
+              <div class="process-item" style="width:130px;">
+                <span class="process-dot stopped"></span>
+                <span>RadarAnalyser</span>
+              </div>
+              <div class="process-item" data-requires="camera" style="width:130px;">
+                <span class="process-dot stopped"></span>
+                <span>CameraFeed</span>
+              </div>
+              <div class="process-item" data-requires="camera" style="width:130px;">
+                <span class="process-dot stopped"></span>
+                <span>CameraAnalyser</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="live-only">
-        <button onclick="systemStart()">Start System</button>
-        <button onclick="systemStop()">Stop System</button>
-        <button onclick="systemRetry()">Retry</button>
-        <button onclick="startRecord()">Start Recording</button>
-        <button onclick="stopRecord()">Stop Recording</button>
+
+      <!-- Video and Radar Visualizers -->
+      <div class="row" style="gap:16px;">
+        <div class="col panel" style="max-width:656px; padding:8px;">
+          <div style="position:relative;">
+            <img id="video_view" alt="Video"
+              style="width:640px; height:640px; display:block; background:#000; object-fit:contain;" />
+            <div
+              style="position:absolute; top:8px; left:8px; background:rgba(0,0,0,0.7); padding:4px 6px; border-radius:6px; display:flex; align-items:center; gap:6px;">
+              <span style="color:#fff; font-size:42px; line-height:1;">📹</span>
+              <button class="btn-neutral btn-sm" data-vfps="1" style="padding:4px 8px; font-size:11px;">1 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="3" style="padding:4px 8px; font-size:11px;">3 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="5" style="padding:4px 8px; font-size:11px;">5 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="10" style="padding:4px 8px; font-size:11px;">10 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="15" style="padding:4px 8px; font-size:11px;">15 fps</button>
+              <button class="btn-neutral btn-sm" data-vfps="30" style="padding:4px 8px; font-size:11px;">30 fps</button>
+            </div>
+          </div>
+        </div>
+        <div class="col panel" style="max-width:656px; padding:8px;">
+          <div style="position:relative;">
+            <img id="radar_view" alt="Radar"
+              style="width:640px; height:640px; display:block; background:#000; object-fit:contain;" />
+            <div id="radar_plot" style="width:640px;height:640px;display:none;"></div>
+            <div
+              style="position:absolute; top:8px; left:8px; background:rgba(0,0,0,0.7); padding:4px 6px; border-radius:6px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+              <span style="color:#fff; font-size:42px; line-height:1;">📡</span>
+              <button class="btn-neutral btn-sm" data-rmode="rd" style="padding:4px 10px; font-size:11px;">RD</button>
+              <button class="btn-neutral btn-sm" data-rmode="ra" style="padding:4px 10px; font-size:11px;">RA</button>
+              <button class="btn-neutral btn-sm" data-rmode="pc2d"
+                style="padding:4px 10px; font-size:11px;">PC-2D</button>
+              <button class="btn-neutral btn-sm" data-rmode="pc3d"
+                style="padding:4px 10px; font-size:11px;">PC-3D</button>
+              <span style="width:4px;"></span>
+              <button class="btn-neutral btn-sm" data-rfps="1" style="padding:4px 8px; font-size:11px;">1 fps</button>
+              <button class="btn-neutral btn-sm" data-rfps="2" style="padding:4px 8px; font-size:11px;">2 fps</button>
+              <button class="btn-neutral btn-sm" data-rfps="5" style="padding:4px 8px; font-size:11px;">5 fps</button>
+              <button class="btn-neutral btn-sm" data-rfps="10" style="padding:4px 8px; font-size:11px;">10 fps</button>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="live-only" style="margin-top:8px;">
-        <label>Radar Config:</label>
-        <select id="radar_cfg_sel">
-          {% if radar_config_options %}
-          {% for o in radar_config_options %}
-          <option value="{{ o.path }}" {% if o.mode=='2D' and ('10m' in (o.label|lower)) %}selected{% endif %}>{{
-            o.label }}</option>
-          {% endfor %}
-          {% endif %}
-        </select>
-        <span class="meta">(only when not running)</span>
+
+      <!-- Recording Control Card -->
+      <div class="live-only control-card" id="recording-card">
+        <div style="display:flex; gap:16px; align-items:flex-start;">
+          <!-- Recording Buttons -->
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <button class="btn-record" id="btn-start-record" onclick="startRecord()" disabled>● Start Recording</button>
+            <button class="btn-stop" id="btn-stop-record" onclick="stopRecord()" disabled>⏹ Stop Recording</button>
+          </div>
+
+          <!-- Recording Stats -->
+          <div style="flex:1; padding:12px; background:#f9fafb; border-radius:8px; border:1px solid #e5e7eb;">
+            <div id="rec_dir" class="meta" style="margin-bottom:8px; font-weight:500; font-size:12px;">dir: -</div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px 16px; font-size:12px;">
+              <div class="meta">
+                <span style="font-weight:500;">Camera:</span> <span id="cam_total">0</span> frames | <span
+                  id="cam_fps">0.00</span> fps
+              </div>
+              <div class="meta">
+                <span style="font-weight:500;">Radar:</span> <span id="rad_total">0</span> frames | <span
+                  id="rad_fps">0.00</span> fps
+              </div>
+              <div class="meta">
+                <span style="font-weight:500;">Data:</span> <span id="bytes_total">0.00</span> MB | <span
+                  id="bw_bps">0.00</span> MB/s
+              </div>
+              <div class="meta">
+                <span style="font-weight:500;">Duration:</span> <span id="rec_dur">00:00:00</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="replay-only hidden" style="margin-top:8px;">
-        <h4>Replay Inputs</h4>
+      <div class="replay-only hidden" style="margin-top:12px;">
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <div style="min-width:320px;">
             <div class="meta">Recording directory</div>
             <div style="display:flex; gap:6px;">
-              <input id="replay_path" style="flex:1;" placeholder="/home/user/recording_dir" />
-              <button
+              <input id="replay_path" style="flex:1; direction:rtl; text-align:left;"
+                placeholder="/home/user/recording_dir" />
+              <button class="btn-neutral btn-sm"
                 onclick="document.getElementById('picker_dir').classList.toggle('hidden'); listDir('picker_dir_list','');">Browse</button>
             </div>
             <div id="picker_dir" class="picker hidden">
               <div class="picker-toolbar">
-                <button
+                <button class="btn-neutral btn-sm"
                   onclick="pickCurrent('picker_dir_list','replay_path'); document.getElementById('picker_dir').classList.add('hidden');">Use
                   This</button>
                 <span class="meta">Tip: single-click to select, double-click to open</span>
@@ -956,13 +1628,14 @@
           <div style="min-width:320px;">
             <div class="meta">Radar config file</div>
             <div style="display:flex; gap:6px;">
-              <input id="replay_cfg" style="flex:1;" placeholder="/home/user/configs/AWR...txt" />
-              <button
+              <input id="replay_cfg" style="flex:1; direction:rtl; text-align:left;"
+                placeholder="/home/user/configs/AWR...txt" />
+              <button class="btn-neutral btn-sm"
                 onclick="document.getElementById('picker_cfg').classList.toggle('hidden'); listDir('picker_cfg_list','');">Browse</button>
             </div>
             <div id="picker_cfg" class="picker hidden">
               <div class="picker-toolbar">
-                <button
+                <button class="btn-neutral btn-sm"
                   onclick="pickCurrent('picker_cfg_list','replay_cfg'); document.getElementById('picker_cfg').classList.add('hidden');">Use
                   This</button>
                 <span class="meta">Tip: single-click to select, double-click to open</span>
@@ -972,10 +1645,9 @@
           </div>
         </div>
         <div style="margin-top:8px;">
-          <h4>Playback</h4>
-          <button id="rp_play">Play</button>
-          <button id="rp_pause">Pause</button>
-          <button id="rp_stop">Stop</button>
+          <button class="btn-start" id="rp_play">▶ Play</button>
+          <button class="btn-neutral" id="rp_pause">⏸ Pause</button>
+          <button class="btn-stop" id="rp_stop">⏹ Stop</button>
           <span class="gap"></span>
           <label>Frame</label>
           <span id="rp_current">0</span>
@@ -983,7 +1655,7 @@
           <span class="gap"></span>
           <label>Seek to:</label>
           <input id="rp_seek" type="number" placeholder="frame #" style="width:100px;" />
-          <button id="rp_seek_btn">Seek</button>
+          <button class="btn-neutral" id="rp_seek_btn">Seek</button>
         </div>
       </div>
       <div class="panel" style="margin-top:8px;">
@@ -1034,73 +1706,8 @@
             <input id="pk_y2" type="number" step="1" style="width:70px;">
           </fieldset>
         </div>
-        <div style="margin-top:8px;"><button id="t_apply">Apply</button></div>
+        <div style="margin-top:8px;"><button class="btn-start" id="t_apply">Apply</button></div>
       </div>
-    </div>
-    <div class="col panel" style="flex:1;">
-      <h3>Recording Stats</h3>
-      <div id="rec_dir" class="meta"></div>
-      <div class="meta">Camera frames: <span id="cam_total">0</span> | write FPS(5s): <span id="cam_fps">0.00</span>
-      </div>
-      <div class="meta">Radar frames: <span id="rad_total">0</span> | write FPS(5s): <span id="rad_fps">0.00</span>
-      </div>
-      <div class="meta">Total data: <span id="bytes_total">0.00</span> MB | Duration: <span id="rec_dur">00:00:00</span>
-      </div>
-      <div class="meta">Avg bandwidth(5s): <span id="bw_bps">0.00</span> MB/s</div>
-    </div>
-  </div>
-  <div class="row">
-    <div class="col panel">
-      <h3>Processes</h3>
-      <div id="proc_grid" class="proc-grid"></div>
-    </div>
-  </div>
-  <div class="row">
-    <div class="col panel">
-      <h3>Video</h3>
-      <div>
-        <label>Mode: </label>
-        <label><input type="radio" name="video_mode" value="live" checked> Live</label>
-        <label>FPS:</label>
-        <select id="video_fps">
-          <option selected>1</option>
-          <option>3</option>
-          <option>5</option>
-          <option>10</option>
-          <option>15</option>
-          <option>30</option>
-        </select>
-        <span class="gap"></span>
-        <label><input type="radio" name="video_mode" value="manual"> Manual</label>
-        <button id="video_next">Next frame</button>
-      </div>
-      <img id="video_view" alt="Video" />
-    </div>
-    <div class="col panel">
-      <h3>Radar</h3>
-      <div>
-        <label>Mode: </label>
-        <button data-rmode="rd">RD</button>
-        <button data-rmode="ra">RA</button>
-        <button data-rmode="pc2d">PC-2D</button>
-        <button data-rmode="pc3d">PC-3D</button>
-        <label><input type="radio" name="radar_mode" value="live" checked> Live</label>
-        <label>FPS:</label>
-        <select id="radar_fps">
-          <option selected>1</option>
-          <option>2</option>
-          <option>5</option>
-          <option>10</option>
-        </select>
-        <span class="gap"></span>
-        <label><input type="radio" name="radar_mode" value="manual"> Manual</label>
-        <button id="radar_next">Next frame</button>
-      </div>
-      <div style="margin:8px 0;">
-
-      </div>
-      <img id="radar_view" alt="Radar" />
-      <div id="radar_plot" style="width:640px;height:480px;display:none;"></div>
     </div>
   </div>
   <div class="row">
