@@ -33,19 +33,11 @@ from sample_processing.config import (
 )
 from utils import setup_logger
 
-try:
-    import matplotlib
+import matplotlib
 
-    matplotlib.use("Agg")  # Non-interactive backend
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LinearSegmentedColormap
-
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-    plt = None  # type: ignore[assignment]
-    LinearSegmentedColormap = None  # type: ignore[assignment]
-
+matplotlib.use("Agg")  # Non-interactive backend
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 def load_bin_frame(filepath: str) -> np.ndarray:
     """
@@ -243,10 +235,6 @@ def save_point_cloud_pngs(output_stem: str, result: dict, adc_params, logger) ->
         adc_params: ADC parameters for max_range
         logger: Logger instance
     """
-    if not MATPLOTLIB_AVAILABLE or plt is None or LinearSegmentedColormap is None:
-        logger.warning("Matplotlib not available, skipping PNG visualizations")
-        return
-
     try:
         x_pos = np.asarray(result.get("x_pos", []), dtype=float)
         y_pos = np.asarray(result.get("y_pos", []), dtype=float)
@@ -398,10 +386,6 @@ def save_heatmap_pngs(
         adc_params: ADC parameters for max_range and range_resolution
         logger: Logger instance
     """
-    if not MATPLOTLIB_AVAILABLE or plt is None:
-        logger.warning("Matplotlib not available, skipping heatmap visualizations")
-        return
-
     try:
         # Get range-azimuth map
         range_azimuth = result.get("range_azimuth")
@@ -562,9 +546,6 @@ def save_tesseract_mat(output_stem: str, tesseract: np.ndarray, logger) -> None:
     try:
         from scipy.io import savemat
 
-        if tesseract is None:
-            tesseract = np.zeros((0, 0, 0, 0), dtype=np.float32)
-
         output_path = output_stem + "_tesseract.mat"
         savemat(output_path, {"arrDREA": tesseract})
         logger.info(f"Saved tesseract: {output_path} (shape={tesseract.shape})")
@@ -583,6 +564,7 @@ def save_arr_zyx_mat(
 ) -> None:
     """
     Generate and save K-Radar style arr_zyx cube from tesseract.
+    This function is a translation of the MATLAB gen_3_get_zyx_cube.m script.
 
     The arr_zyx cube is derived from the tesseract via:
     1. Aggregate across Doppler dimension (mean)
@@ -686,7 +668,7 @@ def save_arr_zyx_mat(
             np.clip(t, 0.0, 1.0, out=t)
             return idx_clipped, t.astype(np.float32), valid
 
-        Ny, Nx = y_grid.shape
+        # Ny, Nx = y_grid.shape
         # Iterate only along Z to keep memory bounded; vectorize X/Y plane
         report_every = max(1, zs.size // 10)
         for iz, z in enumerate(zs):
