@@ -360,7 +360,7 @@ class DCA1000EVM(RadarFeed):
 
         # Initialize board
         try:
-            self._dca = DCA1000(self._config.cli_port, self._config.data_port)
+            self._dca = DCA1000()
         except Exception as e:
             self.logger.error(f"Failed to create DCA1000 instance: {e}")
             return
