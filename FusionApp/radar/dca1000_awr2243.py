@@ -67,12 +67,15 @@ class DCA1000Frame:
 
 
 class DCA1000EVM(RadarFeed):
+    """Interface for the TI DCA1000 radar capture card in live-acquisition mode."""
+
     def __init__(
         self,
         dca1000_config: DCA1000Config = DCA1000Config(),
         *,
         prealloc_shm_meta: Optional[dict] = None,
     ):
+        """Capture settings and shared-memory handles are provided by the fusion engine."""
         # Store only serializable configuration
         self._config = dca1000_config
         self._dest_dir = dca1000_config.dest_dir
@@ -104,9 +107,11 @@ class DCA1000EVM(RadarFeed):
         self._control_queue: Optional[multiprocessing.Queue] = None
 
     def __enter__(self):
+        """Support context-manager usage so higher layers can manage setup/teardown."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Close the physical radar connection and release shared memory blocks."""
         if self._dca is not None:
             self._dca.fastRead_in_Cpp_thread_stop()
             self._dca.stream_stop()
@@ -166,6 +171,7 @@ class DCA1000EVM(RadarFeed):
             pass
 
     def _read_and_store_frame(self):
+        """Fetch a single radar frame from the card and optionally write it to disk."""
         # Read the data from the DCA1000
         start = time.perf_counter()
         assert self._dca is not None, "DCA1000 is not initialized"
@@ -241,6 +247,7 @@ class DCA1000EVM(RadarFeed):
             return False
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
+        """Loop that copies captured frames into shared memory and notifies the engine."""
         # Producer-consumer thread removed; send directly from capture loop via a small local buffer
         while not stop_event.is_set():
             self._check_control_commands()
@@ -330,6 +337,7 @@ class DCA1000EVM(RadarFeed):
         status_queue: Optional[multiprocessing.Queue] = None,
         ack_queue: Optional[multiprocessing.Queue] = None,
     ):
+        """Main process entry: boot hardware, stream frames, and respond to stop signals."""
         # Initialize logger in target process
         self.logger = setup_logger("DCA1000EVM")
         try:
