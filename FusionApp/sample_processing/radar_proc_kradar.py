@@ -101,10 +101,12 @@ def apply_radar_calibrations(
 ) -> np.ndarray:
     """Apply DC offset removal and channel equalisation as configured."""
 
+    # All downstream math expects complex64 so we convert once up front.
     calibrated = frame.astype(np.complex64, copy=True)
 
     if calibration.dc_offset.enabled:
         method = calibration.dc_offset.method.lower()
+        # Per-channel removal keeps stationary reflections from polluting FFT bins.
         if method in {"per_channel", "per_virtual", "per_vrx"}:
             offsets = np.mean(calibrated, axis=-1, keepdims=True)
             calibrated -= offsets
@@ -160,6 +162,7 @@ def _compute_fft_drea(
     angle_mode_norm = str(angle_mode).strip().lower()
 
     if angle_mode_norm in {"1d", "1d_fft", "legacy"}:
+        # The 1D path treats azimuth and elevation separately by selecting virtual rows.
         missing_tx = [
             idx
             for idx in AWR2243_AZ_TX_INDICES + AWR2243_EL_TX_INDICES
@@ -191,6 +194,7 @@ def _compute_fft_drea(
         az_spectrum = np.abs(np.fft.fftshift(az_fft, axes=2)) ** 2
         el_spectrum = np.abs(np.fft.fftshift(el_fft, axes=2)) ** 2
 
+        # Outer product fuses azimuth-only and elevation-only responses into a 3D map.
         tesseract = el_spectrum[:, :, :, None] * az_spectrum[:, :, None, :]
         tesseract = tesseract.astype(np.float32, copy=False)
 
@@ -268,6 +272,7 @@ def _compute_fft_drea(
         fft2d = np.fft.fft2(spatial_cube, s=(el_bins, az_bins), axes=(-2, -1))
         fft2d_shift = np.fft.fftshift(fft2d, axes=(-2, -1))
         tesseract = np.abs(fft2d_shift) ** 2
+        # Rescale power so the 2D FFT path matches the historical rectangular-array energy.
         effective_virtual = float(np.count_nonzero(AWR2243_SPATIAL_VALID_MASK))
         nominal_virtual = float(
             max(
@@ -389,6 +394,7 @@ def _polar_cfar_detect(
         for az_idx in range(rea_cube.shape[2]):
             cut = rea_cube[:, el_idx, az_idx]
             if method_norm == "ca":
+                # Cell-averaging CFAR: average both sides of the CUT then scale.
                 _, noise_floor = dsp.cfar.ca_(
                     cut,
                     guard_len=range_guard,
@@ -398,6 +404,7 @@ def _polar_cfar_detect(
                 )
                 threshold = noise_floor * alpha
             elif method_norm == "go":
+                # Greatest-of both halves: robust when one side is contaminated by a target.
                 _, noise_floor = dsp.cfar.cago_(
                     cut,
                     guard_len=range_guard,
@@ -407,6 +414,7 @@ def _polar_cfar_detect(
                 )
                 threshold = noise_floor * alpha
             elif method_norm == "so":
+                # Smallest-of both halves: better near edges or with multi-target scenes.
                 _, noise_floor = dsp.cfar.caso_(
                     cut,
                     guard_len=range_guard,
@@ -416,6 +424,7 @@ def _polar_cfar_detect(
                 )
                 threshold = noise_floor * alpha
             elif method_norm == "gos":
+                # GOS takes the minimum of GO and SO thresholds for additional robustness.
                 _, noise_go = dsp.cfar.cago_(
                     cut,
                     guard_len=range_guard,
@@ -432,6 +441,7 @@ def _polar_cfar_detect(
                 )
                 threshold = np.minimum(noise_go, noise_so) * alpha
             else:  # OS-CFAR
+                # Ordered-statistic CFAR: pick the k-th largest sample in the window.
                 num_train_cells = max(2 * range_train, 1)
                 if num_train_cells <= 0:
                     detections[:, el_idx, az_idx] = False
@@ -498,6 +508,7 @@ def _apply_polar_detection(
         :,
     ] = 0
 
+    # Collapse Doppler to get a power map per range/elevation/azimuth cell.
     rea_cube = np.max(tesseract_moving, axis=0).astype(np.float32)
     doppler_idx_max = np.argmax(tesseract_moving, axis=0)
 
@@ -609,6 +620,7 @@ def _apply_polar_detection(
     az = -az
     el = -el
 
+    # Convert spherical coordinates (r, az, el) into Cartesian XYZ.
     cos_el = np.cos(el)
     cos_az = np.cos(az)
     sin_az = np.sin(az)
@@ -668,10 +680,13 @@ def _compute_zyx_cube(
     """
     # Aggregate across Doppler dimension
     if doppler_aggregation == "max":
+        # Moving-object friendly: keep the strongest Doppler response per cell.
         rea = np.max(tesseract, axis=0)  # (R, E, A)
     elif doppler_aggregation == "percentile_90":
+        # Percentile is a compromise between max and mean, suppressing narrow spikes.
         rea = np.percentile(tesseract, 90, axis=0)  # (R, E, A)
     elif doppler_aggregation == "mean":
+        # Mean favors stable reflectors at the cost of blurring fast movers.
         rea = np.mean(tesseract, axis=0)  # (R, E, A)
     else:
         raise ValueError(f"Unknown doppler_aggregation: {doppler_aggregation}")
@@ -721,6 +736,7 @@ def _compute_zyx_cube(
     arr_zyx = np.full((arr_z.size, arr_y.size, arr_x.size), -1.0, dtype=np.float32)
 
     # Precompute 2D grids for X-Y plane
+    # Meshgrid builds planar coordinates reused for every height slice.
     y_grid, x_grid = np.meshgrid(arr_y, arr_x, indexing="ij")  # (Ny, Nx)
     x2 = x_grid * x_grid
     y2 = y_grid * y_grid
@@ -838,9 +854,11 @@ def _generate_cartesian_quantile_point_cloud(
     if arr_zyx.size == 0:
         return np.empty((0, 5), dtype=np.float32)
 
+    # Skip voxels that were never populated by interpolation.
     valid_mask = arr_zyx > 0.0
 
     if roi is not None and roi.enabled:
+        # Apply ROI masking in Cartesian space to restrict detections.
         x_mask = (arr_x >= float(roi.x[0])) & (arr_x <= float(roi.x[1]))
         y_mask = (arr_y >= float(roi.y[0])) & (arr_y <= float(roi.y[1]))
         z_mask = (arr_z >= float(roi.z[0])) & (arr_z <= float(roi.z[1]))
@@ -864,6 +882,7 @@ def _generate_cartesian_quantile_point_cloud(
         top_k = int(np.ceil(tail_rate * total_candidates))
         top_k = max(min(top_k, total_candidates), 1)
 
+    # Equivalent to selecting the strongest "top_k" voxel powers.
     threshold = np.partition(values, total_candidates - top_k)[total_candidates - top_k]
     detection_mask = valid_mask & (arr_zyx >= threshold)
 
@@ -930,21 +949,26 @@ def process_3d_radar_frame_kradar(
     if int(getattr(adc_params, "tx", 0)) != 3:
         raise ValueError("KRadar pipeline requires 3 TX antennas")
 
+    # Reshape raw frame to [chirps * TX, RX, samples] as expected by calibration and range processing
     frame = frame.reshape(
         adc_params.chirps * adc_params.tx, adc_params.rx, adc_params.samples
     )
 
     step_start = time.perf_counter()
+    # Apply hardware/phase/gain calibrations to ADC data
     calibrated = apply_radar_calibrations(frame, adc_params, cfg.calibration)
 
+    # 1) Range processing: window + FFT over fast-time (samples) to form range bins
     range_window = _resolve_dsp_window(cfg.windows.range)
     radar_cube = dsp.range_processing(calibrated, window_type_1d=range_window)
+    # Reshape to [chirps, virtual_antennas (TX*RX), range_bins]
     radar_cube = radar_cube.reshape(
         adc_params.chirps, adc_params.tx * adc_params.rx, adc_params.samples
     )
     t_range = time.perf_counter() - step_start
 
     step_start = time.perf_counter()
+    # 2) Doppler processing: window + FFT over slow-time (chirps) to obtain velocity bins
     doppler_window = _resolve_dsp_window(cfg.windows.doppler)
     clutter_enabled = bool(cfg.calibration.clutter_removal.enabled)
 
@@ -959,10 +983,13 @@ def process_3d_radar_frame_kradar(
     if clutter_enabled:
         logger.info("[Calibration] Clutter removal applied (static target suppression)")
 
+    # Center zero Doppler: shift DC to the middle so velocities map [-v_max..0..+v_max]
     det_matrix = np.fft.fftshift(det_matrix, axes=1)
+    # Align AoA input along Doppler for subsequent angle estimation
     aoa_input = np.fft.fftshift(aoa_input, axes=2)
     t_doppler = time.perf_counter() - step_start
 
+    # Angle processing configuration (requested azimuth/elevation spans and FFT sizes)
     angle_cfg = cfg.angle
     az_range_cfg = (
         float(angle_cfg.azimuth_range[0]),
@@ -990,6 +1017,8 @@ def process_3d_radar_frame_kradar(
     )
 
     step_start = time.perf_counter()
+    # 3) Angle processing: build 3D energy tesseract [doppler, range, elevation, azimuth]
+    #    using 1D/2D spatial FFTs; returns angle grids used to index detections later
     tesseract, azimuth_grid_deg, elevation_grid_deg = _compute_fft_drea(
         aoa_input,
         adc_params,
@@ -1002,6 +1031,7 @@ def process_3d_radar_frame_kradar(
     )
     t_aoa = time.perf_counter() - step_start
 
+    # Suppress near-zero Doppler (static clutter) in the tesseract for range-azimuth map
     doppler_center = tesseract.shape[0] // 2
     doppler_guard = int(max(cfg.polar_detection.doppler_guard_bins, 0))
     tesseract_for_ra = tesseract.copy()
@@ -1010,10 +1040,12 @@ def process_3d_radar_frame_kradar(
         stop = min(doppler_center + doppler_guard + 1, tesseract.shape[0])
         tesseract_for_ra[start:stop, :, :, :] = 0
 
+    # Collapse elevation and Doppler to produce a range-azimuth intensity map (for viz/diagnostics)
     range_azimuth_map = np.max(tesseract_for_ra, axis=0)
     range_azimuth_map = np.max(range_azimuth_map, axis=1)
     range_azimuth_map = 20.0 * np.log10(np.abs(range_azimuth_map) + 1e-10)
 
+    # Choose point cloud generation branch: polar-domain or cartesian grid aggregation
     pc_cfg = cfg.point_cloud
     generation_mode = pc_cfg.generation_mode.strip().lower()
     cartesian_aliases = {"cartesian_quantile", "zyx_quantile", "cartesian"}
@@ -1028,6 +1060,7 @@ def process_3d_radar_frame_kradar(
     log_tag = "[KRadar-Polar]"
 
     if generation_mode in polar_aliases:
+        # Polar: detect peaks directly in (range, azimuth, elevation) from tesseract
         step_start = time.perf_counter()
         point_cloud = _apply_polar_detection(
             tesseract,
@@ -1045,6 +1078,7 @@ def process_3d_radar_frame_kradar(
         log_tag = "[KRadar-Cartesian]"
         cart_cfg = pc_cfg.cartesian_quantile
 
+        # Cartesian: aggregate energy into a 3D voxel grid (Z,Y,X), optionally over Doppler
         step_start = time.perf_counter()
         arr_zyx_cube, arr_z_grid, arr_y_grid, arr_x_grid = _compute_zyx_cube(
             tesseract,
@@ -1059,6 +1093,7 @@ def process_3d_radar_frame_kradar(
         )
         t_zyx = time.perf_counter() - step_start
 
+        # Select voxels by quantile within ROI to form the sparse point cloud
         step_start = time.perf_counter()
         roi_for_cart = pc_cfg.roi if pc_cfg.roi.enabled else None
         point_cloud = _generate_cartesian_quantile_point_cloud(
@@ -1079,6 +1114,7 @@ def process_3d_radar_frame_kradar(
             f"Unsupported point_cloud.generation_mode '{generation_mode}'. Use 'polar_quantile' or 'cartesian_quantile'."
         )
 
+    # Optional ROI-based filtering in Cartesian coordinates (X,Y,Z)
     pn_cfg = pc_cfg.power_normalization
     divide_by = float(getattr(pn_cfg, "divide_by", 1.0))
     range_based_dividers = getattr(pn_cfg, "range_based_divide_by", None)
@@ -1112,6 +1148,7 @@ def process_3d_radar_frame_kradar(
     raw_max_observed = 0.0
 
     if point_cloud.shape[0] > 0:
+        # Optional global range scaling of coordinates
         if pc_cfg.range_scale != 1.0:
             point_cloud[:, :3] *= float(pc_cfg.range_scale)
 
@@ -1128,6 +1165,7 @@ def process_3d_radar_frame_kradar(
         clip_input_max_cfg = pn_cfg.clip_input_max
         power_to_scale = raw_power
 
+        # Optional clipping of power before normalization to limit outliers
         if clip_input_max_cfg is not None:
             clip_input_max = float(clip_input_max_cfg)
             if clip_input_max > 0.0:
@@ -1136,6 +1174,7 @@ def process_3d_radar_frame_kradar(
 
         normalized: np.ndarray = power_to_scale.copy()
         if range_divider_segments:
+            # Apply range-dependent normalization (piecewise scalar per X-range segment)
             roi_x_min, roi_x_max = float(pc_cfg.roi.x[0]), float(pc_cfg.roi.x[1])
             if pc_cfg.range_scale != 1.0:
                 scale = float(pc_cfg.range_scale)
@@ -1210,6 +1249,7 @@ def process_3d_radar_frame_kradar(
                 range_bin_indices = bin_indices
 
         if range_divider_used is None:
+            # Fallback to a single scalar divider
             normalized = power_to_scale / fallback_divider
 
         point_cloud[:, 3] = normalized.astype(np.float32, copy=False)

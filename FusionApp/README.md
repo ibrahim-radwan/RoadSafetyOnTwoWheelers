@@ -25,55 +25,66 @@ This application provides real-time object detection for road safety, specifical
 
 ### Prerequisites
 
-- **Python**: 3.10 (tested) - newer versions (3.11+) expected to work but untested
-- **GPU**: NVIDIA GPU with CUDA 12.1+ support (recommended for 30fps live processing)
-  - **With GPU**: Full camera+radar fusion supported
-  - **Without GPU**: Radar-only mode recommended (CPU-only video analysis not supported)
-  - **Note**: Other GPU models and CUDA versions are acceptable if they properly support GPU acceleration of the video processing pipeline
-- **Camera**: Intel RealSense D455 (optional, for camera fusion)
-- **OS**: Windows 11 (Ubuntu x64 and NVIDIA Ubuntu support coming soon)
+- **Python**: 3.10 (validated on Windows 11 and x64 Linux). On NVIDIA Jetson platforms we have tested the pipelines on Python 3.8.
+- **GPU**: NVIDIA CUDA-capable GPU on Windows/Ubuntu x64, or the integrated CUDA cores on NVIDIA Jetson devices (required for camera object detection at real-time rates).
+  - **With GPU acceleration**: Full camera+radar fusion is available.
+  - **Without GPU acceleration**: Disable video object detection or run radar-only mode for live streaming; CPU-only video inference is too slow for real time.
+  - On Windows/Ubuntu x64 the video pipeline runs on PyTorch CUDA; on Jetson it runs on TensorRT (via the bundled `yolov8n.engine`). Ensure your toolchain matches the hardware.
+- **Camera**: Intel RealSense D455 (optional, for camera fusion).
+- **OS**: Windows 11, Ubuntu x64, and NVIDIA Ubuntu (Jetson) are officially supported.
 
 ### Installation Steps
 
-#### 1. Update Python Package Tools
+#### 1. Install the inference toolchain
+
+Choose the stack that matches your platform:
+
+- **Windows / Ubuntu x64 with CUDA GPU** – install the PyTorch wheels built for your CUDA toolkit. Example for CUDA 12.4:
+  ```bash
+  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+  ```
+
+- **CPU-only systems (radar-only mode)** – install the CPU wheels (camera object detection must be disabled for live streaming):
+  ```bash
+  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+  ```
+
+- **NVIDIA Jetson** – use the JetPack image which already ships with CUDA, cuDNN, TensorRT, and the Python `tensorrt` bindings. PyTorch is not required for the camera pipeline; the analyser loads `models/video_analysis/yolov8n.engine` through TensorRT. Verify TensorRT is importable:
+  ```bash
+  python -c "import tensorrt as trt; print(trt.__version__)"
+  ```
+
+> CPU-only video analysis is not recommended. Disable video object detection and rely on radar-only mode if GPU acceleration is unavailable.
+
+#### 2. Build and install `fpga_udp`
+
+The fusion server streams live radar frames through the `fpga_udp` UDP interface. Follow the upstream instructions to build it:
 
 ```bash
-python -m pip install --upgrade pip setuptools
+git clone https://github.com/gaoweifan/pyRadar.git
+cd pyRadar
+# Build using the guidance in the repository's README (CMake + MSVC on Windows)
 ```
 
-#### 2. Install PyTorch
+Install the resulting wheel/shared library into the active environment (e.g., `pip install <fpga_udp wheel>` or `pip install -e fpga_udp`).
 
-Choose the appropriate command based on your hardware:
-
-**For CUDA-compatible GPU** (recommended for 30fps processing):
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-```
-
-**For CPU-only systems** (radar-only mode):
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-```
-
-> **Note**: CPU-only video analysis is not recommended. Use radar-only mode if GPU acceleration is unavailable.
-
-#### 3. Build and Install fpga_udp
-
-1. Clone and build the fpga_udp module:
-   ```bash
-   git clone https://github.com/gaoweifan/pyRadar.git
-   cd pyRadar
-   # Follow the build instructions in the repository
-   ```
-
-2. Install the built module according to the repository instructions.
-
-
-#### 4. Install Remaining Dependencies
+#### 3. Install the remaining Python packages
 
 ```bash
 pip install -r requirements.txt
 ```
+
+#### 4. Build the K-Radar CUDA operators (manual step)
+
+The sparse K-Radar pipeline depends on custom CUDA extensions found under `kradar/ops/`. These extensions are **not** installed by `requirements.txt` and must be compiled manually:
+
+1. Linux/WSL: run `kradar/build_cuda_extensions.sh`. This helper script targets common CUDA toolchain layouts but may require edits for your distribution.
+2. Native Windows: follow the setup instructions in `kradar/ops/README.md` (or inline comments) to compile each extension with MSVC + CUDA. The provided shell script does not officially support Windows.
+3. Verify the resulting `.pyd`/`.so` files are importable (e.g., `python -c "from kradar.ops import sparse_pooling"`).
+
+Without these extensions, `process_radar_kradar.py` and the related pipelines will fall back to slower CPU implementations or fail to import.
+
+> **Platform notes:** The `requirements.txt` pins CUDA-enabled wheels (`cumm-cu124`, `spconv-cu124`, etc.) that match the reference Windows build used by the authors. Deployments on other operating systems or different hardware (including Jetson) may require alternative wheel versions or source builds. Treat the versions as guidance—align them with the PyTorch stack you installed (or TensorRT on Jetson, where PyTorch is optional).
 
 ### Troubleshooting
 

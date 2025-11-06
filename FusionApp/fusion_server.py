@@ -19,9 +19,13 @@ from flask import render_template
 from utils import setup_logger, disable_shm_resource_tracker
 from config_params import CFGS
 
-from services.radar_hw import radar_hw_cleanup
-from services.fusion_runner import FusionRunner as FusionRunnerService
-from services.process_inspector import get_process_statuses
+from services.radar_hw import radar_hw_cleanup  # Hardware driver cleanup hook.
+from services.fusion_runner import (
+    FusionRunner as FusionRunnerService,
+)  # Core fusion pipeline controller.
+from services.process_inspector import (
+    get_process_statuses,
+)  # Helper describing child process state.
 
 
 logger = setup_logger("fusion_server")
@@ -33,6 +37,7 @@ class FusionRunner:
     """
 
     def __init__(self):
+        """Instantiate the process-aware FusionRunner service used by the CLI code path."""
         self._impl = FusionRunnerService()
 
     def start(
@@ -43,6 +48,7 @@ class FusionRunner:
         radar_config_file: Optional[str] = None,
         replay_path: Optional[str] = None,
     ) -> bool:
+        """Launch the fusion pipeline subprocesses for live sensors or replayed logs."""
         return self._impl.start(
             radar_only=radar_only,
             radar_config_file=radar_config_file,
@@ -51,65 +57,87 @@ class FusionRunner:
         )
 
     def stop(self) -> None:
+        """Signal the underlying FusionRunnerService to tear down spawned processes."""
         self._impl.stop()
 
     def send_control(self, command: str) -> None:
+        """Forward player-style commands (play, pause, seek) to the fusion controller."""
         self._impl.send_control(command)
 
     def get_status(self) -> Dict[str, Any]:
+        """Expose health metrics, timestamps, and runtime mode gathered by FusionRunnerService."""
         return self._impl.get_status()
 
     def _get_process_statuses(self) -> List[Dict[str, Any]]:
+        # Surface subprocess health so the UI can warn when radar or engine processes crash.
         engine = getattr(self._impl, "_engine_process", None)
         engine_pid = engine.pid if engine else None
         radar_only = bool(getattr(self._impl, "_radar_only", False))
         return get_process_statuses(engine_pid, radar_only)
 
     def _draw_detections(self, bgr, objects):
+        """Overlay radar/camera detections on camera frames using the shared drawing util."""
+        # Delegate to the underlying runner for consistent overlay logic.
         return self._impl._draw_detections(bgr, objects)
 
     def get_latest_frame_jpeg(self, quality: int = 80) -> Optional[bytes]:
+        """Retrieve the newest fused camera frame the engine encoded as JPEG bytes."""
         return self._impl.get_latest_frame_jpeg(quality)
 
     def mjpeg_generator(
         self, fps_limit: float = 10.0, quality: int = 70
     ) -> Generator[bytes, None, None]:
+        """Yield multipart MJPEG chunks for streaming endpoints.
+
+        Flask wraps this generator inside a multipart response for live video in browsers.
+        """
         return self._impl.mjpeg_generator(fps_limit=fps_limit, quality=quality)
 
     def get_latest_rd_png(self) -> Optional[bytes]:
+        """Return the range-doppler heatmap rendered by the radar post-processing pipeline."""
         return self._impl.get_latest_rd_png()
 
     def get_latest_ra_png(self) -> Optional[bytes]:
+        """Return the range-azimuth heatmap rendered by the radar post-processing pipeline."""
         return self._impl.get_latest_ra_png()
 
     def get_latest_point_cloud_json(self) -> Optional[Dict[str, Any]]:
+        """Expose the most recent radar point-cloud as a JSON-serializable structure."""
         return self._impl.get_latest_point_cloud_json()
 
     def get_tuning(self) -> Dict[str, Any]:
+        """Fetch the current sensor-tuning parameters tracked by FusionRunnerService."""
         return self._impl.get_tuning()
 
     def set_tuning(self, tuning: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply tuning parameters (e.g., radar thresholds) and return sanitized values."""
         return self._impl.set_tuning(tuning)
 
     @property
     def _running(self) -> bool:
+        """True while the fusion subprocess is actively streaming sensor data."""
         return bool(getattr(self._impl, "_running", False))
 
     @property
     def _starting(self) -> bool:
+        """True while FusionRunnerService is still spinning up child processes."""
         return bool(getattr(self._impl, "_starting", False))
 
     @property
     def _failure_reason(self) -> Optional[str]:
+        """Provide a short error string captured during the most recent failed start."""
         return getattr(self._impl, "_failure_reason", None)
 
 
+# Flask wires functions to HTTP endpoints via the @app.route decorators defined below.
 app = Flask(__name__, template_folder="templates")
 runner: Optional[FusionRunner] = None
+# Runner stays module-global so the HTTP handlers can manipulate a single engine instance.
 
 
 @app.route("/")
 def index():
+    # Flask calls this when a browser hits GET /; render_template injects data into HTML.
     # Build config options for radar configs (for live mode quick select)
     try:
         base_dir = getattr(CFGS, "AWR2243_CONFIG_DIR", "")
@@ -133,6 +161,7 @@ def index():
                     }
                 )
     except Exception:
+        # Missing config entries should not block page load; fall back gracefully.
         options = []
     # Defaults for replay inputs from server config
     default_replay_path = app.config.get("DEFAULT_REPLAY_PATH", "")
@@ -149,7 +178,9 @@ def index():
 def status():
     global runner
     if runner is None:
+        # Surface a 503 so callers know the service has not been initialized yet.
         return jsonify({"running": False}), 503
+    # jsonify converts dictionaries to JSON HTTP responses with the correct headers.
     st = runner.get_status()
     return jsonify(st)
 
@@ -160,11 +191,14 @@ def tuning():
     if runner is None:
         return ("runner not initialized", 503)
     if request.method == "GET":
+        # GET requests have no body; just reflect current tuning as JSON.
         return jsonify(runner.get_tuning())
     try:
+        # For POST, Flask makes query/body data available through request.get_json().
         body = request.get_json(force=True, silent=True) or {}
     except Exception:
         body = {}
+    # Forward sanitized tuning payloads to the engine; FusionRunner validates values.
     return jsonify(runner.set_tuning(body))
 
 
@@ -173,6 +207,7 @@ def status_processes():
     global runner
     if runner is None:
         return jsonify({"process_statuses": []}), 503
+    # Provide UI-friendly metadata for watchdog dashboards.
     return jsonify({"process_statuses": runner._get_process_statuses()})
 
 
@@ -181,6 +216,7 @@ def system_start():
     global runner
     if runner is None:
         return ("runner not initialized", 503)
+    # request.args reads query-string values like /system/start?mode=replay&radar_only=1.
     mode = request.args.get("mode", "live").lower()
     radar_only = bool(request.args.get("radar_only", "0") in ("1", "true", "True"))
     replay_path = request.args.get("replay_path")
@@ -192,7 +228,9 @@ def system_start():
         replay_path=replay_path,
     )
     if not ok and (runner._running or runner._starting):
+        # Expose a conflict status when a start request races with an active session.
         return ("already running or starting", 409)
+    # HTTP 200/500 tell the UI whether boot succeeded; the body includes a short message.
     return (
         "OK" if ok else f"FAILED: {runner._failure_reason or 'unknown'}",
         200 if ok else 500,
@@ -204,6 +242,7 @@ def system_stop():
     global runner
     if runner is None:
         return ("runner not initialized", 503)
+    # stop() is idempotent; swallow repeated stop requests from the UI.
     runner.stop()
     return ("OK", 200)
 
@@ -218,10 +257,12 @@ def replay_control():
             "cmd"
         )
         if isinstance(cmd, str) and cmd:
+            # Commands are thin wrappers around FusionRunner IPC (play, pause, stop, seek).
             runner.send_control(cmd)
             return ("OK", 200)
     except Exception:
         pass
+    # Returning 400 signals the client supplied an invalid payload.
     return ("bad command", 400)
 
 
@@ -255,6 +296,7 @@ def replay_info():
                         if name_without_ext and name_without_ext[-1].isdigit():
                             # Check that name only contains digits and underscores
                             if all(c.isdigit() or c == "_" for c in name_without_ext):
+                                # Guard against counting thumbnails or debug exports.
                                 cam += 1
         except Exception:
             pass
@@ -281,6 +323,7 @@ def fs_list():
     try:
         # Constrain to home
         if os.path.commonpath([home, target]) != os.path.commonpath([home]):
+            # Reject attempts to traverse outside the user home directory.
             return jsonify({"cwd": home, "entries": []})
         entries = []
         with os.scandir(target) as it:
@@ -292,6 +335,7 @@ def fs_list():
                     entries.append({"name": e.name, "path": e.path, "type": etype})
                 except Exception:
                     pass
+        # Present directories first, then files sorted alphabetically for predictable UX.
         entries.sort(key=lambda x: (x["type"] != "dir", x["name"].lower()))
         return jsonify({"cwd": target, "entries": entries})
     except Exception:
@@ -307,6 +351,7 @@ def start_record():
         ts_dir = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime())
         recording_dir = os.path.join(CFGS.DEST_STORAGE, ts_dir)
         os.makedirs(recording_dir, exist_ok=True)
+        # Pass an absolute recording path so the engine writes into a unique session folder.
         runner.send_control(f"start_recording:{recording_dir}")
     except Exception:
         runner.send_control("start_recording")
@@ -331,6 +376,7 @@ def video_frame():
     jpg = runner.get_latest_frame_jpeg(quality=quality)
     if jpg is None:
         return ("no frame", 204)
+    # Disable caching so the browser always fetches the freshest frame.
     resp = make_response(jpg)
     resp.headers["Content-Type"] = "image/jpeg"
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -344,6 +390,7 @@ def video_stream():
         return ("runner not started", 503)
     boundary = "frame"
     gen = runner.mjpeg_generator(fps_limit=10.0, quality=70)
+    # Serve a multipart MJPEG stream that browsers can consume as a video element.
     return Response(gen, mimetype=f"multipart/x-mixed-replace; boundary={boundary}")
 
 
@@ -383,6 +430,7 @@ def radar_point_cloud_json():
     data = runner.get_latest_point_cloud_json()
     if data is None:
         return jsonify({})
+    # JSON is lightweight enough for polling dashboards that render 2D/3D views.
     return jsonify(data)
 
 
@@ -406,6 +454,7 @@ def radar_frame_png():
     resp.headers["Content-Type"] = "image/png"
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     try:
+        # Track payload sizes to help diagnose network bottlenecks.
         logger.info(f"PC reply bytes={len(png)}")
     except Exception:
         pass
@@ -424,6 +473,7 @@ def status_stream():
         assert rr is not None
         while True:
             data = rr.get_status()
+            # Use Server-Sent Events format so the UI can react without polling.
             yield f"data: {json.dumps(data)}\n\n"
             time.sleep(1.0)
 
@@ -434,6 +484,7 @@ def _signal_handler(signum, frame):
     logger.info(f"Signal {signum} received, shutting down...")
     try:
         if runner is not None:
+            # Ensure the engine terminates cleanly before tearing down shared resources.
             runner.stop()
     except Exception:
         pass
@@ -462,10 +513,12 @@ def main():
     args = parser.parse_args()
 
     atexit.register(radar_hw_cleanup)
+    # Mirror signal handling with the CLI usage so Ctrl+C cleans up hardware.
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
     try:
+        # Multiprocessing on Linux can leak shared memory trackers; disable where possible.
         disable_shm_resource_tracker(logger)
     except Exception:
         pass
@@ -483,6 +536,7 @@ def main():
     except Exception:
         pass
 
+    # Enable threaded mode so camera and radar endpoints can respond concurrently.
     app.run(host=args.host, port=args.port, threaded=True)
 
 

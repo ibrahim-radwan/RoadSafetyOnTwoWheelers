@@ -1,22 +1,49 @@
-# Tested with Python 3.10
-# Newer versions (3.11+) are expected to work but untested at this stage
+# Runtime Core
+numpy==2.2.6
+scipy==1.15.3
+scikit-learn==1.7.2
+scikit-image==0.25.2
+numba==0.62.1
+pydantic==2.12.1
+PyYAML==6.0.3
+configargparse==1.7.1
+easydict==1.13
+fire==0.7.1
+psutil==7.1.2
+requests==2.32.5
 
-# GUI and Visualization
-PyQt5
-matplotlib
-opencv-python
-pyqtgraph
+# Visualization & Sensors
+matplotlib==3.10.7
+opencv-python==4.12.0.88
+open3d==0.19.0
+dash==3.2.0
+plotly==6.3.1
+pyrealsense2==2.56.5.9235
 
-# Scientific Computing
-numpy>=2.0.0
-scipy>=1.15.0
-scikit-learn>=1.6.0
-numba
-pydantic>=2.5.0
-PyYAML>=6.0
+# Radar / ML Tooling
+ultralytics==8.3.221
+ultralytics-thop==2.0.17
+einops==0.8.1
+imageio==2.37.0
+tifffile==2025.5.10
 
-# # Computer Vision and ML
-ultralytics
+# Sparse CNN / CUDA Dependencies (required for K-Radar extensions)
+ccimport==0.4.4
+cumm-cu124==0.7.11
+spconv-cu124==2.3.8
+pccm==0.4.16
+ninja==1.13.0
+pybind11==3.0.1
+nms==0.1.6
 
-# Camera Support
-pyrealsense2
+# Web Server
+Flask==3.1.2
+Werkzeug==3.1.3
+Jinja2==3.1.6
+itsdangerous==2.2.0
+click==8.3.0
+
+# Notes
+# - Install torch/torchvision/torchaudio separately following the platform-specific
+#   commands in README.md (CUDA vs CPU vs Jetson).
+# - Build the custom CUDA operators under kradar/ops after installing these wheels.
