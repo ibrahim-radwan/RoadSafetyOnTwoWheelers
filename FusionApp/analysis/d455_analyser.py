@@ -1,7 +1,7 @@
 from utils import setup_logger
 from engine.interfaces import CameraAnalyser
 import torch
-from ultralytics import YOLO
+from ultralytics import YOLO  # type: ignore[attr-defined]
 import multiprocessing
 import os
 import sys
@@ -189,49 +189,53 @@ class D455Analyser(CameraAnalyser):
             self._half = False
             self._device_arg = "cpu"
 
-        # Exit analyser process if no CUDA acceleration available
-        if self._device != "cuda":
-            self.logger.error(
-                "GPU/HW acceleration is not available. Object detection requires CUDA. Exiting analyser process."
-            )
-            # Exit the analyser process gracefully
-            return
-
-        # Load YOLO model (CUDA is available)
+        # Load YOLO/TensorRT model if acceleration is available; otherwise forward frames without detection
         model_loaded = False
 
-        # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
-        if _running_on_jetson():
-            try:
-                self._yolo_model = YOLO("models/video_analysis/yolov8n.engine")
-                self._backend = "tensorrt"
-                model_loaded = True
-                self.logger.info(
-                    "Loaded TensorRT engine 'models/video_analysis/yolov8n.engine'"
-                )
-            except Exception as e:
-                self.logger.info(
-                    f"TensorRT engine not used ({e}); falling back to PyTorch 'models/video_analysis/yolov8n.pt'"
-                )
-        else:
-            self.logger.info(
-                "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
+        if self._device != "cuda":
+            self._analysis_enabled = False
+            self._backend = "disabled"
+            self.logger.warning(
+                "CUDA device not available; camera detection disabled. Frames will still be forwarded to the UI without bounding boxes."
             )
+        else:
+            # Prefer TensorRT engine on Jetson; fall back to PyTorch elsewhere
+            if _running_on_jetson():
+                try:
+                    self._yolo_model = YOLO("models/video_analysis/yolov8n.engine")
+                    self._backend = "tensorrt"
+                    model_loaded = True
+                    self.logger.info(
+                        "Loaded TensorRT engine 'models/video_analysis/yolov8n.engine'"
+                    )
+                except Exception as e:
+                    self.logger.info(
+                        f"TensorRT engine not used ({e}); falling back to PyTorch 'models/video_analysis/yolov8n.pt'"
+                    )
+            else:
+                self.logger.info(
+                    "Non-Jetson platform detected; skipping TensorRT and using PyTorch"
+                )
 
-        # Load PyTorch model if TensorRT was not loaded
-        if not model_loaded:
-            try:
-                self._yolo_model = YOLO("models/video_analysis/yolov8n.pt")
-                self._backend = "torch"
-                model_loaded = True
-                self.logger.info(f"Loaded YOLO PyTorch model on device={self._device}")
-            except Exception as e:
-                self.logger.error(f"Failed to load YOLO model: {e}")
-                self._analysis_enabled = False
-                return
+            # Load PyTorch model if TensorRT was not loaded
+            if not model_loaded:
+                try:
+                    self._yolo_model = YOLO("models/video_analysis/yolov8n.pt")
+                    self._backend = "torch"
+                    model_loaded = True
+                    self.logger.info(
+                        f"Loaded YOLO PyTorch model on device={self._device}"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to load YOLO model: {e}")
+                    self._analysis_enabled = False
+                    self._backend = "disabled"
+
+        if not self._analysis_enabled:
+            model_loaded = False
 
         # Log device and optimization info (keep minimal)
-        if self._analysis_enabled and model_loaded:
+        if self._analysis_enabled and model_loaded and self._yolo_model is not None:
             try:
                 name = torch.cuda.get_device_name(0)
                 self.logger.info(
@@ -262,6 +266,12 @@ class D455Analyser(CameraAnalyser):
                 # Allow immediate shutdown via sentinel
                 if isinstance(video_frame, dict) and video_frame.get("STOP"):
                     break
+                if not isinstance(video_frame, D455Frame):
+                    if self.logger is not None:
+                        self.logger.warning(
+                            f"Unexpected camera payload type: {type(video_frame)!r}; dropping frame"
+                        )
+                    continue
                 total_start_time = time.perf_counter()
 
                 # Track frame analysis time separately
