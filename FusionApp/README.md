@@ -16,7 +16,7 @@ This application provides real-time object detection for road safety, specifical
 |:---:|:---:|:---:|
 ### 🎥 Radar and Camera based-detection Demo
 <div align="center">
-  <video src="demo/x.mp4" width="100%" controls muted loop poster="sensing_box.png">
+  <video src="demo/Detection_demo.mp4" width="100%" controls muted loop poster="sensing_box.png">
     Your browser does not support the video tag. You can view the video directly at <a href="demo/x.mp4">demo/x.mp4</a>.
   </video>
 </div>
