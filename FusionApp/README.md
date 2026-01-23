@@ -22,6 +22,7 @@ This application provides real-time object detection for road safety, specifical
     [demo/Detection_demo.mp4](demo/Detection_demo.mp4)
   </video>
 </div>
+
 ## Features
 - Real-time object detection for cars and pedestrians
 - Works in various lighting conditions
