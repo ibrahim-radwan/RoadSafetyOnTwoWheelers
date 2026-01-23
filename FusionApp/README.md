@@ -16,7 +16,7 @@ This application provides real-time object detection for road safety, specifical
 |:---:|:---:|:---:|
 ### 🎥 Radar and Camera based-detection Demo
 <p align="center">
-  <a href="demo/Detection_demo.mp4">
+  <a href="https://ucstaff-my.sharepoint.com/:v:/r/personal/ibrahim_radwan_canberra_edu_au/Documents/research/active_projects/Road_Safety_Project/Demos/Demo2_Jul-Dec2025/Detection_demo.mp4?csf=1&web=1&nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=hxgmgZ">
     ▶️ Click here to watch the Detection Demo video
   </a>
 </p>
