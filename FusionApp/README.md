@@ -19,7 +19,6 @@ This application provides real-time object detection for road safety, specifical
   <video src="demo/x.mp4" width="100%" controls muted loop poster="sensing_box.png">
     Your browser does not support the video tag. You can view the video directly at <a href="demo/x.mp4">demo/x.mp4</a>.
   </video>
-  <p><i>Live Camera + K-Radar Fusion Display (demo/x.mp4)</i></p>
 </div>
 ## Features
 - Real-time object detection for cars and pedestrians
