@@ -14,7 +14,12 @@ This application provides real-time object detection for road safety, specifical
 ### Person Detection
 | ![Person Detection 1](images/persons_1.png) | ![Person Detection 2](images/persons_2.png) | ![Person Detection 3](images/persons_3.png) |
 |:---:|:---:|:---:|
-
+### 🎥 Radar and Camera based-detection Demo
+<div align="center">
+  <video src="demo/x.mp4" width="100%" controls muted loop poster="sensing_box.png">
+    Your browser does not support the video tag. You can view the video directly at <a href="demo/x.mp4">demo/x.mp4</a>.
+  </video>
+</div>
 ## Features
 - Real-time object detection for cars and pedestrians
 - Works in various lighting conditions

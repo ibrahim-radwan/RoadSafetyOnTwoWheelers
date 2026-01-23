@@ -19,11 +19,11 @@ TBA
 [TBA]
 
 ## Research Papers
-**2025 Publications:**  
-1. **"Towards Autonomous Riding: A Review of Perception, Planning, and Control in Intelligent Two-Wheelers"**  
-   - *Authors*: Mohammed Hassanin, Mohammad Abu Alsheikh, Carlos C. N. Kuhn, Damith Herath, Dinh Thai Hoang, Ibrahim Radwan  
-   - *Preprint*: [https://www.arxiv.org/abs/2507.11852](https://www.arxiv.org/abs/2507.11852)
-
+**Publications:**  
+1. Hassanin, M., Alsheikh, M.A., Kuhn, C.C., Herath, D., Hoang, D.T. and Radwan, I., 2025. Towards Autonomous Riding: A Review of Perception, Planning, and Control in Intelligent Two-Wheelers. arXiv preprint arXiv:2507.11852.
+   - Link: https://arxiv.org/pdf/2507.11852 
+3. Deng, W., Tu, W., Radwan, I., Alsheikh, M.A., Gould, S. and Zheng, L., 2025. Confidence and Dispersity as Signals: Unsupervised Model Evaluation and Ranking. arXiv preprint arXiv:2510.02956.
+   - Link: https://arxiv.org/pdf/2510.02956?
 ## Team Members
 1. Ibrahim Radwan
 2. Javad Amiri
