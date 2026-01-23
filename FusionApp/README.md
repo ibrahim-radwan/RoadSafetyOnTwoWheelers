@@ -14,9 +14,7 @@ This application provides real-time object detection for road safety, specifical
 ### Person Detection
 | ![Person Detection 1](images/persons_1.png) | ![Person Detection 2](images/persons_2.png) | ![Person Detection 3](images/persons_3.png) |
 |:---:|:---:|:---:|
-### 🎥 System Demo
-To see the **FusionApp** logic in action—demonstrating real-time radar point cloud generation and camera object detection synchronization—play the interactive demo below:
-
+### 🎥 Radar and Camera based-detection Demo
 <div align="center">
   <video src="demo/x.mp4" width="100%" controls muted loop poster="sensing_box.png">
     Your browser does not support the video tag. You can view the video directly at <a href="demo/x.mp4">demo/x.mp4</a>.
