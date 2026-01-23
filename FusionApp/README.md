@@ -17,7 +17,7 @@ This application provides real-time object detection for road safety, specifical
 ### 🎥 Radar and Camera based-detection Demo
 <p align="center">
   <a href="demo/Detection_demo.mp4">
-    <img src="sensing_box.png" width="100%" alt="Detection Demo Video"/>
+    ▶️ Click here to watch the Detection Demo video
   </a>
 </p>
 
