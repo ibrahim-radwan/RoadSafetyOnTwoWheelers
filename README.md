@@ -6,14 +6,14 @@ Public repository for the road safety on two-wheelers research project at the Un
   <tr>
     <td align="center" valign="bottom" width="50%">
       <a href="https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/tree/main/FusionApp">
-        <img src="FusionApp/images/about_scooter.png" alt="Instrumented two-wheeler sensing setup" width="100%" height="320"/>
+        <img src="FusionApp/images/about_scooter.png" alt="Instrumented two-wheeler sensing setup" width="100%"/>
       </a>
       <br/>
       <a href="https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/tree/main/FusionApp"><b>FusionApp</b></a>
     </td>
     <td align="center" valign="bottom" width="50%">
       <a href="https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/tree/main/FusionApp/vod_conversion">
-        <img src="FusionApp/images/vod_architecture.png" alt="VoD conversion architecture" width="100%" height="320"/>
+        <img src="FusionApp/images/vod_architecture.png" alt="VoD conversion architecture" width="100%"/>
       </a>
       <br/>
       <a href="https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/tree/main/FusionApp/vod_conversion"><b>VoD conversion</b></a>
@@ -22,14 +22,14 @@ Public repository for the road safety on two-wheelers research project at the Un
   <tr>
     <td align="center" valign="bottom" width="50%">
       <a href="https://github.com/ibrahim-radwan/two-wheeler-radar-camera-annotation-tool">
-        <img src="FusionApp/images/annotation_interface.png" alt="Radar–camera annotation interface" width="100%" height="320"/>
+        <img src="FusionApp/images/annotation_interface.png" alt="Radar–camera annotation interface" width="100%"/>
       </a>
       <br/>
       <a href="https://github.com/ibrahim-radwan/two-wheeler-radar-camera-annotation-tool"><b>Annotation tool</b></a>
     </td>
     <td align="center" valign="bottom" width="50%">
       <a href="https://github.com/ibrahim-radwan/twowheeler-safety-dashboard/tree/main">
-        <img src="FusionApp/images/dashboard_overview.png" alt="Two-wheeler safety dashboard overview" width="100%" height="320"/>
+        <img src="FusionApp/images/dashboard_overview.png" alt="Two-wheeler safety dashboard overview" width="100%"/>
       </a>
       <br/>
       <a href="https://github.com/ibrahim-radwan/twowheeler-safety-dashboard/tree/main"><b>Safety dashboard</b></a>
@@ -41,10 +41,10 @@ Public repository for the road safety on two-wheelers research project at the Un
 
 | Component | Repository / path | Role |
 |-----------|-------------------|------|
-| **FusionApp** | [FusionApp](https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/tree/main/FusionApp) | Live and replay fusion of Intel RealSense D455 camera and TI AWR2243 / DCA1000 radar (web UI via `fusion_server.py`) |
-| **VoD conversion** | [FusionApp/vod_conversion](https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/tree/main/FusionApp/vod_conversion) | Offline conversion of raw radar `.bin` + RGB `.png` into [View-of-Delft (VoD)](https://intelligent-vehicles.org/datasets/view-of-delft/) / [KITTI](https://www.cvlibs.net/datasets/kitti/)-style `data/{1,3,5}_scan` packs |
-| **Annotation tool** | [two-wheeler-radar-camera-annotation-tool](https://github.com/ibrahim-radwan/two-wheeler-radar-camera-annotation-tool) | Labelling of synchronised radar–camera frames |
-| **Safety dashboard** | [twowheeler-safety-dashboard](https://github.com/ibrahim-radwan/twowheeler-safety-dashboard/tree/main) | Web dashboard for project / dataset visualisation |
+| **FusionApp** | [FusionApp](https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/tree/main/FusionApp) | Real-time camera + mmWave radar sensing and object detection on the two-wheeler (RealSense D455, AWR2243/DCA1000); live streaming, paired recording, and replay through the web UI (`fusion_server.py`) |
+| **VoD conversion** | [FusionApp/vod_conversion](https://github.com/ibrahim-radwan/RoadSafetyOnTwoWheelers/tree/main/FusionApp/vod_conversion) | Offline tools that rebuild FusionApp recordings (raw radar `.bin` + RGB `.png`) into [VoD](https://intelligent-vehicles.org/datasets/view-of-delft/) / [KITTI](https://www.cvlibs.net/datasets/kitti/)-style `data/{1,3,5}_scan` packs (`image_2`, `radar`, `calib`, …) for annotation and training |
+| **Annotation tool** | [two-wheeler-radar-camera-annotation-tool](https://github.com/ibrahim-radwan/two-wheeler-radar-camera-annotation-tool) | Desktop labelling application (built with the Qt GUI toolkit) for drawing and reviewing 3D ground-truth boxes on synchronised radar BEV + RGB (optional Doppler/track IDs); imports/exports VoD/KITTI `label_2` and rich JSON/CSV |
+| **Safety dashboard** | [twowheeler-safety-dashboard](https://github.com/ibrahim-radwan/twowheeler-safety-dashboard/tree/main) | Browser dashboard (Dash/Plotly) that plays a KITTI-style camera + radar sequence, tracks nearby road users, and shows live risk metrics (e.g. TTC, brake demand, crowding) with optional alerts |
 
 ## Project overview
 
