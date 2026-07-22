@@ -12,13 +12,14 @@ These scripts reuse the same radar analyser, RGB pairing rules, and calibration 
 
 ## Folder contents
 
-| Path | Role |
-|------|------|
-| [`convert_raw_bin_to_vod.py`](./convert_raw_bin_to_vod.py) | Main converter: raw frames → `data/{1,3,5}_scan` |
-| [`rebuild_scans_from_vod.py`](./rebuild_scans_from_vod.py) | Rebuild 1/3/5 packs from existing VoD clouds (e.g. after ego-motion changes) |
-| [`export_5_scan_ranges.py`](./export_5_scan_ranges.py) | Split a `5_scan` pack into sequence ranges |
-| [`sample_data/`](./sample_data/) | Sample recording (raw radar `.bin` + RGB `.png`) for testing the converter |
-| [`figures/`](./figures/) | Pipeline diagrams (PNG counterparts of the `doc_14_july` vector figures) |
+| Item | Type | Purpose |
+|------|------|---------|
+| [`convert_raw_bin_to_vod.py`](./convert_raw_bin_to_vod.py) | Script | Convert raw radar + RGB into `data/{1,3,5}_scan` |
+| [`rebuild_scans_from_vod.py`](./rebuild_scans_from_vod.py) | Script | Rebuild 1/3/5 packs from existing VoD clouds (e.g. after ego-motion changes) |
+| [`export_5_scan_ranges.py`](./export_5_scan_ranges.py) | Script | Split `data/5_scan` into sequence-range folders |
+| [`sample_data/`](./sample_data/) | Data | Small raw `.bin` + `.png` recording for a quick conversion test |
+| [`figures/`](./figures/) | Images | Pipeline diagrams used below (PNG counterparts of `doc_14_july` vectors) |
+| [`README.md`](./README.md) | Docs | This guide |
 
 Run every command from the **FusionApp** root so `config_files/` and Python packages resolve.
 
@@ -55,6 +56,8 @@ Output is written under `vod_conversion\sample_data\data\{1,3,5}_scan` with VoD/
 
 ## Output layout
 
+Default tree:
+
 ```text
 YOUR_RECORDING_FOLDER/
   data/
@@ -69,23 +72,50 @@ YOUR_RECORDING_FOLDER/
       manifest.csv
 ```
 
-- Camera folder is VoD / KITTI-style **`image_2`**.
-- Every paired file shares the **calib naming**: zero-based five-digit stem (`00000`, `00001`, …).
-- `1_scan` / `3_scan` / `5_scan` are the same current RGB+calib frame with 1, 3, or 5 accumulated radar clouds.
-- `manifest.csv` keeps 1-based `sequence` plus `sample_id` / `calib_source` matching the stem on disk.
+| Path under each `N_scan/` | Contents |
+|---------------------------|----------|
+| `image_2/` | Synchronized RGB camera frame (VoD / KITTI camera folder name) |
+| `radar/` | Accumulated VoD point cloud for that sample (`1`, `3`, or `5` scans) |
+| `radar_raw/` | Current-frame raw DCA1000 `.bin` |
+| `radarref/` | Detection CSV for the accumulated cloud |
+| `calib/` | Camera–radar calibration text (`00000.txt`, `00001.txt`, …) |
+| `manifest.csv` | Per-sample index: timing, sources, `sample_id`, point count |
+
+| Naming rule | Example (first sample) |
+|-------------|------------------------|
+| Shared five-digit stem (same as calib) | `00000` |
+| Camera | `image_2/00000.png` |
+| VoD cloud | `radar/00000.bin` |
+| Raw radar | `radar_raw/00000.bin` |
+| Detections | `radarref/00000.csv` |
+| Calibration | `calib/00000.txt` |
+| Manifest `sequence` | `1` (1-based); `sample_id` = `00000` |
+
+`1_scan` / `3_scan` / `5_scan` share the same current RGB + calib; only the radar accumulation window changes.
 
 ## How this fits FusionApp
 
-1. **Live recording** (FusionApp UI / DCA1000 + RealSense) stores timestamped raw radar bins and RGB frames.
-2. **Synchronization** picks the latest readable camera image at or before each radar timestamp (same rule as `organize_recording_data`).
-3. **This converter** runs the FusionApp radar analyser offline and writes VoD-compatible packs under `data/`.
-4. **Annotation / training** consumes `image_2`, `radar`, and `calib` with shared sample ids.
+| Step | What happens |
+|------|----------------|
+| 1. Live recording | FusionApp UI / DCA1000 + RealSense stores timestamped raw radar bins and RGB frames |
+| 2. Synchronization | Latest readable camera image at or before each radar timestamp (`organize_recording_data` rule) |
+| 3. Offline conversion | This folder’s converter runs the FusionApp analyser and writes VoD-compatible `data/` packs |
+| 4. Annotation / training | Tools consume `image_2`, `radar`, and `calib` with shared sample ids |
 
 ---
 
 ## Pipeline
 
 How FusionApp recording becomes VoD-style `data/{1,3,5}_scan` packs. Diagrams are the PNG counterparts of the vector figures in `doc_14_july/figures`, stored under [`figures/`](./figures/) so they render on GitHub.
+
+| Step | Diagram | Brief explanation |
+|------|---------|-------------------|
+| 1 | [`fig01_real_architecture.png`](./figures/fig01_real_architecture.png) | Live RGB + radar capture → sync → conversion → annotation outputs |
+| 2 | [`fig06_fusionapp_synchronization.png`](./figures/fig06_fusionapp_synchronization.png) | Radar-led RGB pairing when each radar frame is saved |
+| 3 | [`fig03_real_conversion_vector.png`](./figures/fig03_real_conversion_vector.png) | Raw `.bin` → analyser → `1` / `3` / `5` scan packs + manifest |
+| 4 | [`fig02_real_pairing.png`](./figures/fig02_real_pairing.png) | Synchronized RGB / BEV radar and the annotation folder contract |
+| 5 | [`fig04_real_velocity_compensation.png`](./figures/fig04_real_velocity_compensation.png) | Ego-motion handling for denser multi-scan clouds (`--is-moving`) |
+| 6 | [`fig05_speed_compensation_mechanism.png`](./figures/fig05_speed_compensation_mechanism.png) | Bearing, ego projection, residual Doppler → `velocities_comp` |
 
 ### 1. End-to-end architecture
 
@@ -108,7 +138,7 @@ Radar-led pairing inside FusionApp: when a radar frame is saved, the corrected R
 `convert_raw_bin_to_vod.py` turns raw `.bin` frames into analyser detections and numbered `1` / `3` / `5` scan folders with a shared manifest.
 
 <p align="center">
-  <img src="./figures/fig03_real_conversion.png" alt="Raw radar to VoD conversion flow" width="100%">
+  <img src="./figures/fig03_real_conversion_vector.png" alt="Raw radar to VoD conversion flow (vector)" width="100%">
 </p>
 
 ### 4. Pairing and annotation layout
@@ -155,12 +185,18 @@ python vod_conversion\export_5_scan_ranges.py `
   "E:\Twowheelers_18_5\recordings\YOUR_RECORDING_FOLDER"
 ```
 
-**Optional extras** on the main converter: `--save-vod-pc`, `--save-previews`, `--save-detections-csv`, `--save-range-doppler`, `--save-scan-comparison`.
+| Optional flag | Effect |
+|---------------|--------|
+| `--save-vod-pc` | Also write per-frame `vod_pc/*_pc.bin` |
+| `--save-previews` | Also write PC-2D SNR / raw-power PNGs |
+| `--save-detections-csv` | Also write standalone detection CSVs |
+| `--save-range-doppler` | Also write range-Doppler matrices and grid PNGs |
+| `--save-scan-comparison` | Also write 1/3/5 scan comparison grids |
+| `--overwrite` | Replace existing managed outputs |
 
 ## Calibration template
 
-Default calib text copied into every sample:
-
-`FusionApp/config_files/camera_radar_calib.txt`
-
-Override with `--calib-template` if needed.
+| Setting | Value |
+|---------|-------|
+| Default calib file | `FusionApp/config_files/camera_radar_calib.txt` |
+| Override | `--calib-template <path>` |
