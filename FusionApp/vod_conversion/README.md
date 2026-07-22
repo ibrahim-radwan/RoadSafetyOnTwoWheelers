@@ -18,7 +18,7 @@ These scripts reuse the same radar analyser, RGB pairing rules, and calibration 
 | [`rebuild_scans_from_vod.py`](./rebuild_scans_from_vod.py) | Rebuild 1/3/5 packs from existing VoD clouds (e.g. after ego-motion changes) |
 | [`export_5_scan_ranges.py`](./export_5_scan_ranges.py) | Split a `5_scan` pack into sequence ranges |
 | [`sample_data/`](./sample_data/) | Sample recording (raw radar `.bin` + RGB `.png`) for testing the converter |
-| [`figures/`](./figures/) | Pipeline diagrams shown below |
+| [`figures/`](./figures/) | Pipeline diagrams (PNG counterparts of the `doc_14_july` vector figures) |
 
 Run every command from the **FusionApp** root so `config_files/` and Python packages resolve.
 
@@ -31,10 +31,11 @@ cd E:\Twowheelers_18_5\RoadSafetyOnTwoWheelers-main\FusionApp
 
 python vod_conversion\convert_raw_bin_to_vod.py `
   "E:\Twowheelers_18_5\recordings\YOUR_RECORDING_FOLDER" `
-  --config "config_files\AWR2243_87m_17cm_64_3_256.txt"
+  --config "config_files\AWR2243_87m_17cm_64_3_256.txt" `
+  --is-moving
 ```
 
-Use the **exact** AWR2243 profile that recorded the session. Add `--overwrite` if `data/` already exists. For a moving platform, add `--is-moving`.
+Use the **exact** AWR2243 profile that recorded the session. Prefer `--is-moving` for road / moving-platform captures (ego-motion compensation). Add `--overwrite` if `data/` already exists.
 
 ### Try with the included sample data
 
@@ -46,6 +47,7 @@ cd E:\Twowheelers_18_5\RoadSafetyOnTwoWheelers-main\FusionApp
 python vod_conversion\convert_raw_bin_to_vod.py `
   "vod_conversion\sample_data" `
   --config "config_files\AWR2243_87m_17cm_64_3_256.txt" `
+  --is-moving `
   --overwrite
 ```
 
@@ -81,57 +83,57 @@ YOUR_RECORDING_FOLDER/
 
 ---
 
-## Figures
+## Pipeline
 
-Pipeline overview for recording → sync → conversion → annotation-ready VoD-style packs. Images live next to this README under [`figures/`](./figures/) so they render on GitHub when this folder is pushed.
+How FusionApp recording becomes VoD-style `data/{1,3,5}_scan` packs. Diagrams are the PNG counterparts of the vector figures in `doc_14_july/figures`, stored under [`figures/`](./figures/) so they render on GitHub.
 
-### Fig. 1 — End-to-end architecture
+### 1. End-to-end architecture
 
-<p align="center">
-  <img src="./figures/fig01_real_architecture.png" alt="Fig. 1 — FusionApp end-to-end architecture from capture to annotation" width="100%">
-</p>
-
-FusionApp capture (D455 RGB + AWR2243 radar) through sync, conversion, and annotation-ready outputs.
-
-### Fig. 6 — FusionApp synchronization
+From live D455 RGB + AWR2243 radar capture through synchronization, offline conversion, and annotation-ready outputs.
 
 <p align="center">
-  <img src="./figures/fig06_fusionapp_synchronization.png" alt="Fig. 6 — FusionApp radar-led RGB synchronization" width="100%">
+  <img src="./figures/fig01_real_architecture.png" alt="FusionApp end-to-end architecture" width="100%">
 </p>
 
-Radar-led pairing: when a radar frame is saved, the corrected RGB buffer supplies the matching image for the VoD sample.
+### 2. FusionApp synchronization
 
-### Fig. 3 — Raw radar to VoD conversion
+Radar-led pairing inside FusionApp: when a radar frame is saved, the corrected RGB buffer supplies the matching camera image for that sample.
 
 <p align="center">
-  <img src="./figures/fig03_real_conversion.png" alt="Fig. 3 — Raw radar to VoD conversion flow" width="100%">
+  <img src="./figures/fig06_fusionapp_synchronization.png" alt="FusionApp radar-led RGB synchronization" width="100%">
 </p>
 
-Offline conversion flow: raw `.bin` → analyser detections → numbered `1` / `3` / `5` scan folders and manifest fields.
+### 3. Raw radar to VoD conversion
 
-### Fig. 2 — Pairing and annotation contract
+`convert_raw_bin_to_vod.py` turns raw `.bin` frames into analyser detections and numbered `1` / `3` / `5` scan folders with a shared manifest.
 
 <p align="center">
-  <img src="./figures/fig02_real_pairing.png" alt="Fig. 2 — RGB and radar pairing for annotation" width="100%">
+  <img src="./figures/fig03_real_conversion.png" alt="Raw radar to VoD conversion flow" width="100%">
 </p>
 
-Synchronized RGB, bird’s-eye radar view, and how calibrated footprints relate to the annotation layout.
+### 4. Pairing and annotation layout
 
-### Fig. 4 — Velocity compensation (moving platform)
+Synchronized RGB and bird’s-eye radar view, and how calibrated footprints map onto the annotation contract (`image_2`, `radar`, `calib`).
 
 <p align="center">
-  <img src="./figures/fig04_real_velocity_compensation.png" alt="Fig. 4 — Velocity compensation for multi-scan stacks" width="100%">
+  <img src="./figures/fig02_real_pairing.png" alt="RGB and radar pairing for annotation" width="100%">
 </p>
 
-Why multi-scan stacks need ego-motion handling: compensated velocity / accumulation for denser clouds.
+### 5. Velocity compensation on a moving platform
 
-### Fig. 5 — Speed-compensation mechanism
+Why multi-scan stacks need ego-motion handling: compensated velocity and accumulation produce denser, consistent clouds when using `--is-moving`.
 
 <p align="center">
-  <img src="./figures/fig05_speed_compensation_mechanism.png" alt="Fig. 5 — Speed-compensation mechanism" width="100%">
+  <img src="./figures/fig04_real_velocity_compensation.png" alt="Velocity compensation for multi-scan stacks" width="100%">
 </p>
 
-Bearing, ego-velocity projection, and residual Doppler used when converting with `--is-moving`.
+### 6. Speed-compensation mechanism
+
+Bearing, ego-velocity projection, and residual Doppler used to update `velocities_comp` during conversion with `--is-moving`.
+
+<p align="center">
+  <img src="./figures/fig05_speed_compensation_mechanism.png" alt="Speed-compensation mechanism" width="100%">
+</p>
 
 ---
 
