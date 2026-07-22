@@ -67,7 +67,6 @@ YOUR_RECORDING_FOLDER/
       image_2/00000.png
       radar/00000.bin
       radar_raw/00000.bin
-      radarref/00000.csv
       calib/00000.txt
       manifest.csv
 ```
@@ -77,7 +76,6 @@ YOUR_RECORDING_FOLDER/
 | `image_2/` | Synchronized RGB camera frame (VoD / KITTI camera folder name) |
 | `radar/` | Accumulated VoD point cloud for that sample (`1`, `3`, or `5` scans) |
 | `radar_raw/` | Current-frame raw DCA1000 `.bin` |
-| `radarref/` | Detection CSV for the accumulated cloud |
 | `calib/` | Camera–radar calibration text (`00000.txt`, `00001.txt`, …) |
 | `manifest.csv` | Per-sample index: timing, sources, `sample_id`, point count |
 
@@ -87,7 +85,6 @@ YOUR_RECORDING_FOLDER/
 | Camera | `image_2/00000.png` |
 | VoD cloud | `radar/00000.bin` |
 | Raw radar | `radar_raw/00000.bin` |
-| Detections | `radarref/00000.csv` |
 | Calibration | `calib/00000.txt` |
 | Manifest `sequence` | `1` (1-based); `sample_id` = `00000` |
 
@@ -189,7 +186,6 @@ python vod_conversion\export_5_scan_ranges.py `
 |---------------|--------|
 | `--save-vod-pc` | Also write per-frame `vod_pc/*_pc.bin` |
 | `--save-previews` | Also write PC-2D SNR / raw-power PNGs |
-| `--save-detections-csv` | Also write standalone detection CSVs |
 | `--save-range-doppler` | Also write range-Doppler matrices and grid PNGs |
 | `--save-scan-comparison` | Also write 1/3/5 scan comparison grids |
 | `--overwrite` | Replace existing managed outputs |

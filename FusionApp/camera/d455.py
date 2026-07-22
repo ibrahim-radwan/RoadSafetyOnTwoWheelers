@@ -2,7 +2,9 @@ import os
 import sys
 import time
 import queue
-from typing import Optional
+from collections import deque
+from dataclasses import dataclass
+from typing import Deque, Optional
 import pyrealsense2 as rs
 import threading
 import multiprocessing
@@ -12,15 +14,40 @@ import cv2
 from config_params import CFGS
 from engine.interfaces import CameraFeed
 from camera.png_utils import generate_camera_filename
+from radar.bin_utils import generate_radar_filename
+from recording.clock import (
+    CLOCK_DOMAIN,
+    capture_clock_ns,
+    calibrate_realsense_offset,
+    realsense_ms_to_capture_ns,
+)
+from recording.sync_recording import (
+    RecordingManifest,
+    RecordingPairState,
+    parse_start_recording_command,
+    relative_timestamp_s,
+)
 from utils import setup_logger
 
 
 class D455Config:
     def __init__(
         self,
-        dest_dir: str = CFGS.DEST_DIR,
+        dest_dir: Optional[str] = None,
+        timestamp_origin: Optional[float] = None,
+        recording_pair_meta: Optional[dict] = None,
     ):
-        self.dest_dir = dest_dir
+        self.dest_dir = dest_dir or CFGS.new_recording_dir()
+        self.timestamp_origin = timestamp_origin
+        self.recording_pair_meta = recording_pair_meta
+
+
+@dataclass
+class _BufferedCameraFrame:
+    capture_mono_ns: int
+    rs_ms: float
+    frame_number: int
+    image: np.ndarray
 
 
 class D455Frame:
@@ -50,9 +77,29 @@ class D455(CameraFeed):
         # Recording control
         self._is_recording = False
         self._control_queue: Optional[multiprocessing.Queue] = None
+        self._recording_pair_state: Optional[RecordingPairState] = None
+        self._recording_manifest: Optional[RecordingManifest] = None
+        self._recording_epoch_ns: int = 0
+        self._last_pair_request_gen: int = 0
+        self._frame_ring: Deque[_BufferedCameraFrame] = deque(maxlen=20)
+        self._rs_mono_offset_ns: Optional[int] = None
+        self._pair_lock = threading.Lock()
+        self._stop_event = None
+        self._frame_timeout_streak: int = 0
         # Diagnostics
         self._seq_counter: int = 0
         self._drops_total: int = 0
+
+    def __getstate__(self):
+        # Windows spawn pickles feed instances into child processes; locks and
+        # other runtime handles are recreated in the child after unpickling.
+        state = self.__dict__.copy()
+        state.pop("_pair_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._pair_lock = threading.Lock()
 
     def __enter__(self):
         return self
@@ -71,78 +118,224 @@ class D455(CameraFeed):
         try:
             while True:
                 command = self._control_queue.get_nowait()
-                # Support dynamic recording dir: start_recording[:<path>]
                 if isinstance(command, str) and command.startswith("start_recording"):
+                    start_cmd = parse_start_recording_command(command)
                     try:
-                        if ":" in command:
-                            _, rec_dir = command.split(":", 1)
-                            rec_dir = rec_dir.strip()
-                            if rec_dir:
-                                self._dest_dir = rec_dir
-                                if self.logger:
-                                    self.logger.info(
-                                        f"Recording directory set to: {self._dest_dir}"
-                                    )
+                        if start_cmd.directory:
+                            self._dest_dir = start_cmd.directory
+                            if self.logger:
+                                self.logger.info(
+                                    f"Recording directory set to: {self._dest_dir}"
+                                )
                     except Exception:
                         pass
                     self._is_recording = True
-                    self._is_recording = True
+                    self._recording_epoch_ns = int(start_cmd.epoch_ns)
+                    self._last_pair_request_gen = 0
+                    with self._pair_lock:
+                        self._frame_ring.clear()
+                    if self._recording_pair_state is not None:
+                        if self._recording_pair_state.recording_epoch_ns() <= 0:
+                            self._recording_pair_state.begin_recording(
+                                self._recording_epoch_ns
+                            )
+                    if self._dest_dir:
+                        self._recording_manifest = RecordingManifest(self._dest_dir)
                     if self.logger:
-                        self.logger.info("Recording started")
-                    else:
-                        # Fallback: initialize logger if not available
+                        self.logger.info(
+                            "Recording started (epoch_ns=%d, paired=%s)",
+                            self._recording_epoch_ns,
+                            self._recording_pair_state is not None,
+                        )
+                    elif not self.logger:
                         self.logger = setup_logger("D455")
                         self.logger.info("Recording started")
                 elif command == "stop_recording":
                     self._is_recording = False
+                    self._recording_epoch_ns = 0
+                    with self._pair_lock:
+                        self._frame_ring.clear()
+                    if self._recording_pair_state is not None:
+                        if self._recording_pair_state.recording_epoch_ns() > 0:
+                            self._recording_pair_state.end_recording()
                     if self.logger:
                         self.logger.info("Recording stopped")
                     else:
-                        # Fallback: initialize logger if not available
                         self.logger = setup_logger("D455")
                         self.logger.info("Recording stopped")
         except queue.Empty:
             pass
 
-    def _read_and_store_frame(self):
+    def _select_buffered_frame(
+        self, target_camera_mono_ns: int
+    ) -> Optional[_BufferedCameraFrame]:
+        if not self._frame_ring:
+            return None
+        return min(
+            self._frame_ring,
+            key=lambda frame: abs(frame.capture_mono_ns - target_camera_mono_ns),
+        )
+
+    def _save_camera_frame(
+        self,
+        buffered: _BufferedCameraFrame,
+        pair_seq: int,
+        *,
+        radar_capture_mono_ns: int = 0,
+        filename_mono_ns: Optional[int] = None,
+    ) -> Optional[str]:
+        try:
+            if not os.path.exists(self._dest_dir):
+                os.makedirs(self._dest_dir, exist_ok=True)
+        except Exception:
+            pass
+
+        name_mono_ns = (
+            int(filename_mono_ns)
+            if filename_mono_ns is not None
+            else int(buffered.capture_mono_ns)
+        )
+        timestamp = relative_timestamp_s(name_mono_ns, self._recording_epoch_ns)
+        filename = generate_camera_filename(timestamp, pair_seq)
+        filepath = os.path.join(self._dest_dir, filename)
+        cv2.imwrite(filepath, buffered.image)
+        if self.logger:
+            self.logger.debug(f"Saved paired camera frame to {filepath}")
+        if self._recording_manifest is not None:
+            delta_ns = int(radar_capture_mono_ns) - int(buffered.capture_mono_ns)
+            radar_file = generate_radar_filename(timestamp, pair_seq)
+            self._recording_manifest.append(
+                {
+                    "pair_seq": int(pair_seq),
+                    "clock_domain": CLOCK_DOMAIN,
+                    "recording_epoch_mono_ns": int(self._recording_epoch_ns),
+                    "radar_file": radar_file,
+                    "camera_file": filename,
+                    "filename_mono_ns": int(name_mono_ns),
+                    "radar_capture_mono_ns": int(radar_capture_mono_ns),
+                    "camera_capture_mono_ns": int(buffered.capture_mono_ns),
+                    "camera_rs_ms": float(buffered.rs_ms),
+                    "camera_frame_number": int(buffered.frame_number),
+                    "delta_ns": int(delta_ns),
+                }
+            )
+        return filepath
+
+    def _process_pair_save_requests(self) -> None:
+        if (
+            not self._is_recording
+            or self._recording_pair_state is None
+            or self._recording_epoch_ns <= 0
+        ):
+            return
+
+        request = self._recording_pair_state.read_pair_request()
+        if request.generation <= self._last_pair_request_gen:
+            return
+        self._last_pair_request_gen = request.generation
+
+        with self._pair_lock:
+            buffered = self._select_buffered_frame(request.target_camera_mono_ns)
+        if buffered is None:
+            if self.logger:
+                self.logger.warning(
+                    "Paired camera save skipped: no buffered frame for seq %d",
+                    request.pair_seq,
+                )
+            return
+        # Disk I/O runs on the send thread so capture can keep polling RealSense.
+        self._save_camera_frame(
+            buffered,
+            request.pair_seq,
+            radar_capture_mono_ns=request.radar_capture_mono_ns,
+            filename_mono_ns=request.radar_capture_mono_ns,
+        )
+
+    def _wait_for_color_frames(self):
+        """Poll RealSense without letting disk I/O on other threads stall capture."""
         assert self._pipeline is not None, "D455 camera is not initialized"
-        # Read the data from the D455
-        frames = self._pipeline.wait_for_frames()
-        end = time.perf_counter()
+        timeout_ms = 10000
+        max_timeouts = 12
+        while True:
+            if self._stop_event is not None and self._stop_event.is_set():
+                raise RuntimeError("Camera stop requested while waiting for frames")
+            try:
+                frames = self._pipeline.wait_for_frames(timeout_ms)
+                self._frame_timeout_streak = 0
+                return frames
+            except RuntimeError as exc:
+                if "Frame didn't arrive" not in str(exc):
+                    raise
+                self._frame_timeout_streak += 1
+                if self.logger is not None:
+                    self.logger.warning(
+                        "RealSense frame timeout (%d/%d): %s",
+                        self._frame_timeout_streak,
+                        max_timeouts,
+                        exc,
+                    )
+                if self._frame_timeout_streak >= max_timeouts:
+                    raise RuntimeError(
+                        f"RealSense stopped delivering frames after "
+                        f"{max_timeouts} timeouts"
+                    ) from exc
+                time.sleep(0.05)
+
+    def _read_and_store_frame(self):
+        frames = self._wait_for_color_frames()
+
+        rgb_frame = frames.get_color_frame()
+        if not rgb_frame:
+            raise RuntimeError("RealSense frame set did not include a color frame")
+        rgb_data = np.asanyarray(rgb_frame.get_data())
+        rs_ms = float(rgb_frame.get_timestamp())
+        frame_number = int(frames.get_frame_number())
+
+        if self._rs_mono_offset_ns is None:
+            self._rs_mono_offset_ns = calibrate_realsense_offset(rs_ms)
+        capture_mono_ns = realsense_ms_to_capture_ns(rs_ms, self._rs_mono_offset_ns)
+
+        if self._recording_pair_state is not None:
+            self._recording_pair_state.publish_camera_frame(capture_mono_ns, rs_ms)
+
+        with self._pair_lock:
+            self._frame_ring.append(
+                _BufferedCameraFrame(
+                    capture_mono_ns=capture_mono_ns,
+                    rs_ms=rs_ms,
+                    frame_number=frame_number,
+                    image=rgb_data.copy(),
+                )
+            )
 
         assert self._start_time is not None, "Start time is not initialized"
-        timestamp = end - self._start_time
+        timestamp = (capture_mono_ns / 1_000_000_000.0) - self._start_time
 
-        # Only use color stream to reduce bandwidth and CPU
-        rgb_frame = frames.get_color_frame()
-
-        rgb_data = np.asanyarray(rgb_frame.get_data())
-
-        # Only save frame if recording is enabled
-        if self._is_recording:
-            # Ensure directory exists
+        # Legacy fallback when paired recording SHM is unavailable.
+        if self._is_recording and self._recording_pair_state is None:
+            rel_ts = relative_timestamp_s(
+                capture_mono_ns,
+                self._recording_epoch_ns or int(self._start_time * 1_000_000_000),
+            )
             try:
                 if not os.path.exists(self._dest_dir):
                     os.makedirs(self._dest_dir, exist_ok=True)
             except Exception:
                 pass
-
-            # Use shared utility to generate filename
-            filename = generate_camera_filename(timestamp, frames.get_frame_number())
+            legacy_ts = rel_ts if self._recording_epoch_ns > 0 else timestamp
+            filename = generate_camera_filename(legacy_ts, frame_number)
             filepath = os.path.join(self._dest_dir, filename)
-
-            # Save as numpy array
             cv2.imwrite(filepath, rgb_data)
             if self.logger:
                 self.logger.debug(f"Saved data to {filepath}")
 
-        return D455Frame(timestamp, rgb_data)
+        return D455Frame(timestamp, rgb_data.copy())
 
     def _send_frame(self, stream_queue: multiprocessing.Queue, stop_event):
         assert self._frame_queue is not None, "Frame queue is not initialized"
         while not stop_event.is_set():
-            # Check for control commands periodically
             self._check_control_commands()
+            self._process_pair_save_requests()
 
             # Wait for a frame to be available
             try:
@@ -183,6 +376,7 @@ class D455(CameraFeed):
         # Initialize logger in target process
         self.logger = setup_logger("D455")
         self.logger.info("Starting...")
+        self._stop_event = stop_event
 
         # Avoid hang on process exit if consumer stops reading the queue.
         # This prevents waiting for the queue's feeder thread during interpreter shutdown.
@@ -193,9 +387,24 @@ class D455(CameraFeed):
 
         # Store control queue reference
         self._control_queue = control_queue
+        if self._config.recording_pair_meta is not None:
+            try:
+                self._recording_pair_state = RecordingPairState.attach(
+                    self._config.recording_pair_meta
+                )
+            except Exception as exc:
+                self._recording_pair_state = None
+                if self.logger:
+                    self.logger.warning(
+                        "Paired recording disabled; SHM attach failed: %s", exc
+                    )
 
         # Initialize components in target process
-        self._start_time = time.perf_counter()
+        self._start_time = (
+            float(self._config.timestamp_origin)
+            if self._config.timestamp_origin is not None
+            else capture_clock_ns() / 1_000_000_000.0
+        )
         self._frame_queue = queue.Queue(maxsize=2)
 
         self.logger.info("Initializing D455 camera")
@@ -253,6 +462,13 @@ class D455(CameraFeed):
                         self._frame_queue.put_nowait(video_frame)
                     except Exception:
                         pass
+            except RuntimeError as exc:
+                if stop_event.is_set():
+                    break
+                if self.logger is not None:
+                    self.logger.error("Camera capture failed: %s", exc)
+                stop_event.set()
+                break
             except KeyboardInterrupt:
                 self.logger.info("Keyboard interrupt received, stopping...")
                 stop_event.set()

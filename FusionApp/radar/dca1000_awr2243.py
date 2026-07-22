@@ -19,6 +19,12 @@ from radar.bin_utils import (
 )
 from utils import setup_logger, disable_shm_resource_tracker
 from engine.sync_state import SyncStateUtils, PlaybackState as SyncPlaybackState
+from recording.clock import capture_clock_ns
+from recording.sync_recording import (
+    RecordingPairState,
+    parse_start_recording_command,
+    relative_timestamp_s,
+)
 
 
 class DCA1000Config:
@@ -29,12 +35,14 @@ class DCA1000Config:
         dca_config_file: str = CFGS.DCA_CONFIG_FILE,
         radar_config_file: str = CFGS.AWR2243_CONFIG_FILE,
         dest_dir: str = CFGS.DEST_DIR,
+        timestamp_origin: Optional[float] = None,
     ):
         self.cli_port = cli_port
         self.data_port = data_port
         self.dca_config_file = dca_config_file
         self.radar_config_file = radar_config_file
         self.dest_dir = dest_dir
+        self.timestamp_origin = timestamp_origin
 
 
 class DCA1000Frame:
@@ -74,6 +82,7 @@ class DCA1000EVM(RadarFeed):
         dca1000_config: DCA1000Config = DCA1000Config(),
         *,
         prealloc_shm_meta: Optional[dict] = None,
+        recording_pair_meta: Optional[dict] = None,
     ):
         """Capture settings and shared-memory handles are provided by the fusion engine."""
         # Store only serializable configuration
@@ -95,6 +104,7 @@ class DCA1000EVM(RadarFeed):
         self._shm_seq: int = 0
         self._shm_inited: bool = False
         self._prealloc_shm_meta: Optional[dict] = prealloc_shm_meta
+        self._recording_pair_meta: Optional[dict] = recording_pair_meta
 
         # Enforce that SHM is always preallocated by the parent (engine)
         if self._prealloc_shm_meta is None:
@@ -105,6 +115,8 @@ class DCA1000EVM(RadarFeed):
         # Recording control
         self._is_recording = False
         self._control_queue: Optional[multiprocessing.Queue] = None
+        self._recording_pair_state: Optional[RecordingPairState] = None
+        self._recording_epoch_ns: int = 0
 
     def __enter__(self):
         """Support context-manager usage so higher layers can manage setup/teardown."""
@@ -139,28 +151,40 @@ class DCA1000EVM(RadarFeed):
                 command = self._control_queue.get_nowait()
                 # Support dynamic recording dir: start_recording[:<path>]
                 if isinstance(command, str) and command.startswith("start_recording"):
+                    start_cmd = parse_start_recording_command(command)
                     try:
-                        if ":" in command:
-                            _, rec_dir = command.split(":", 1)
-                            rec_dir = rec_dir.strip()
-                            if rec_dir:
-                                self._dest_dir = rec_dir
-                                if self.logger:
-                                    self.logger.info(
-                                        f"Recording directory set to: {self._dest_dir}"
-                                    )
+                        if start_cmd.directory:
+                            self._dest_dir = start_cmd.directory
+                            if self.logger:
+                                self.logger.info(
+                                    f"Recording directory set to: {self._dest_dir}"
+                                )
                     except Exception:
                         pass
                     self._is_recording = True
-                    self._is_recording = True
+                    self._recording_epoch_ns = int(start_cmd.epoch_ns)
+                    self._last_frame_number = 0
+                    if self._recording_pair_state is not None:
+                        if self._recording_pair_state.recording_epoch_ns() <= 0:
+                            self._recording_pair_state.begin_recording(
+                                self._recording_epoch_ns
+                            )
                     if self.logger:
-                        self.logger.info("Recording started")
+                        self.logger.info(
+                            "Recording started (epoch_ns=%d, paired=%s)",
+                            self._recording_epoch_ns,
+                            self._recording_pair_state is not None,
+                        )
                     else:
                         # Fallback: initialize logger if not available
                         self.logger = setup_logger("DCA1000EVM")
                         self.logger.info("Recording started")
                 elif command == "stop_recording":
                     self._is_recording = False
+                    self._recording_epoch_ns = 0
+                    if self._recording_pair_state is not None:
+                        if self._recording_pair_state.recording_epoch_ns() > 0:
+                            self._recording_pair_state.end_recording()
                     if self.logger:
                         self.logger.info("Recording stopped")
                     else:
@@ -170,40 +194,69 @@ class DCA1000EVM(RadarFeed):
         except queue.Empty:
             pass
 
-    def _read_and_store_frame(self):
+    def _read_and_store_frame(self) -> Optional[DCA1000Frame]:
         """Fetch a single radar frame from the card and optionally write it to disk."""
-        # Read the data from the DCA1000
-        start = time.perf_counter()
+        capture_mono_ns = capture_clock_ns()
+        read_start = capture_mono_ns / 1_000_000_000.0
         assert self._dca is not None, "DCA1000 is not initialized"
         data_buf = self._dca.fastRead_in_Cpp_thread_get()
-        end = time.perf_counter()
+        read_end = time.perf_counter()
+
+        actual_nbytes = int(getattr(data_buf, "nbytes", 0))
+        expected_nbytes = int(
+            (self._prealloc_shm_meta or {}).get("nbytes") or 0
+        )
+        if actual_nbytes == 0 or (
+            expected_nbytes > 0 and actual_nbytes != expected_nbytes
+        ):
+            if self._is_recording and self._recording_pair_state is None:
+                self._last_frame_number += 1
+            if self.logger:
+                self.logger.warning(
+                    "Dropping incomplete radar frame: received %d bytes, expected %d",
+                    actual_nbytes,
+                    expected_nbytes,
+                )
+            return None
 
         if self.logger:
-            self.logger.debug(f"Read {data_buf.nbytes/1024:.3f} KBs in {end-start:.6f}")
-            self.logger.debug(f"Bandwidth: {data_buf.nbytes/(end-start)/1e6:.4f} MB/s")
+            self.logger.debug(
+                f"Read {actual_nbytes/1024:.3f} KBs in {read_end-read_start:.6f}"
+            )
+            self.logger.debug(
+                f"Bandwidth: {actual_nbytes/(read_end-read_start)/1e6:.4f} MB/s"
+            )
 
         assert self._start_time is not None, "Start time is not initialized"
-        # Legacy relative timestamp (seconds)
-        timestamp = end - self._start_time
-        # Absolute capture times (nanoseconds)
-        capture_monotonic_ns = time.perf_counter_ns()
+        timestamp = (capture_mono_ns / 1_000_000_000.0) - self._start_time
         capture_wall_ns = time.time_ns()
 
-        # Only save frame if recording is enabled
+        filepath = None
         if self._is_recording:
-            # Ensure dest directory exists
             try:
                 if not os.path.exists(self._dest_dir):
                     os.makedirs(self._dest_dir, exist_ok=True)
             except Exception:
                 pass
 
-            # Use shared utility to generate filename
-            filename = generate_radar_filename(timestamp, self._last_frame_number)
-            filepath = os.path.join(self._dest_dir, filename)
-
-            with open(filepath, "wb") as bin_file:
-                data_buf.tofile(bin_file)
+            if self._recording_pair_state is not None and self._recording_epoch_ns > 0:
+                pair_seq, target_camera_mono_ns = (
+                    self._recording_pair_state.request_pair_save(capture_mono_ns)
+                )
+                rel_ts = relative_timestamp_s(
+                    capture_mono_ns, self._recording_epoch_ns
+                )
+                filename = generate_radar_filename(rel_ts, pair_seq)
+                filepath = os.path.join(self._dest_dir, filename)
+                with open(filepath, "wb") as bin_file:
+                    data_buf.tofile(bin_file)
+                self._last_frame_number = pair_seq
+            else:
+                self._last_frame_number += 1
+                filename = generate_radar_filename(timestamp, self._last_frame_number)
+                filepath = os.path.join(self._dest_dir, filename)
+                with open(filepath, "wb") as bin_file:
+                    data_buf.tofile(bin_file)
 
             if self.logger:
                 self.logger.debug(f"Saved data to {filepath}")
@@ -211,8 +264,9 @@ class DCA1000EVM(RadarFeed):
         return DCA1000Frame(
             timestamp,
             data_buf,
-            capture_monotonic_ns=capture_monotonic_ns,
+            capture_monotonic_ns=capture_mono_ns,
             capture_wall_ns=capture_wall_ns,
+            filepath=filepath,
         )
 
     def _init_shm_if_needed(self, dca_frame) -> bool:
@@ -254,6 +308,8 @@ class DCA1000EVM(RadarFeed):
             try:
                 # Read next frame
                 dca_frame = self._read_and_store_frame()
+                if dca_frame is None:
+                    continue
                 # Initialize or attach shared memory on first frame
                 if not self._shm_inited:
                     if not self._init_shm_if_needed(dca_frame):
@@ -290,26 +346,24 @@ class DCA1000EVM(RadarFeed):
                             dca_frame, "capture_monotonic_ns", 0
                         ),
                         "frame_timestamp": dca_frame.timestamp,
+                        "src_filepath": getattr(dca_frame, "filepath", None),
                     }
                     try:
-                        if os.environ.get("FULL_ANALYSIS", "0") in (
+                        full_analysis = os.environ.get("FULL_ANALYSIS", "0") in (
                             "1",
                             "true",
                             "True",
-                        ):
-                            # Block until consumer ready to enforce backpressure (slow acquisition to analysis)
+                        )
+                        if self._is_recording or full_analysis:
+                            # Block until consumer is ready, to preserve recorded frames
                             stream_queue.put(meta)
                         else:
                             stream_queue.put_nowait(meta)
                     except queue.Full as e:
                         if self.logger is not None:
-                            if os.environ.get("FULL_ANALYSIS", "0") in (
-                                "1",
-                                "true",
-                                "True",
-                            ):
+                            if self._is_recording or full_analysis:
                                 self.logger.error(
-                                    f"Unexpected full queue in full-analysis (should have blocked): {type(e).__name__}: {e}"
+                                    f"Unexpected full queue while recording/full-analysis (should have blocked): {type(e).__name__}: {e}"
                                 )
                             else:
                                 self.logger.warning(
@@ -356,6 +410,17 @@ class DCA1000EVM(RadarFeed):
                 )
 
         self._control_queue = control_queue
+        if self._recording_pair_meta is not None:
+            try:
+                self._recording_pair_state = RecordingPairState.attach(
+                    self._recording_pair_meta
+                )
+            except Exception as exc:
+                self._recording_pair_state = None
+                if self.logger:
+                    self.logger.warning(
+                        "Paired recording disabled; SHM attach failed: %s", exc
+                    )
         self.logger.info("Starting live DCA1000 acquisition...")
 
         if not os.path.exists(self._dest_dir):
@@ -364,7 +429,11 @@ class DCA1000EVM(RadarFeed):
         else:
             self.logger.info(f"Using existing destination directory: {self._dest_dir}")
 
-        self._start_time = time.perf_counter()
+        self._start_time = (
+            float(self._config.timestamp_origin)
+            if self._config.timestamp_origin is not None
+            else capture_clock_ns() / 1_000_000_000.0
+        )
 
         # Initialize board
         try:

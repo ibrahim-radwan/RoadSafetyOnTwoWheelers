@@ -2,6 +2,8 @@ import time
 from config_params import CFGS
 from utils import setup_logger
 
+from recording.clock import capture_clock_ns
+
 from typing import Optional
 from multiprocessing import Process, Queue, Event
 import os
@@ -70,7 +72,9 @@ class FusionEngine:
             if "dest_dir" in config:
                 radar_config.dest_dir = config["dest_dir"]
             return DCA1000EVM(
-                radar_config, prealloc_shm_meta=config.get("prealloc_shm_meta")
+                radar_config,
+                prealloc_shm_meta=config.get("prealloc_shm_meta"),
+                recording_pair_meta=config.get("recording_pair_meta"),
             )
         elif feed_type == "DCA1000Recording":
             from radar.dca1000_awr2243 import DCA1000Recording, DCA1000Config
@@ -116,6 +120,8 @@ class FusionEngine:
             camera_config = D455Config()
             if "dest_dir" in config:
                 camera_config.dest_dir = config["dest_dir"]
+            if "recording_pair_meta" in config:
+                camera_config.recording_pair_meta = config["recording_pair_meta"]
             return D455(camera_config)
         elif feed_type == "PNGCamera":
             from camera.png_camera import PNGCamera, PNGCameraConfig
@@ -292,6 +298,32 @@ class FusionEngine:
             self._radar_shm_blocks = []
             self._radar_res_shm_blocks = {}
 
+        recording_pair_meta = None
+        recording_pair_state = None
+        if (
+            self.radar_feed_config.get("type") == "DCA1000EVM"
+            and self.camera_feed_config is not None
+            and self.camera_feed_config.get("type") == "D455"
+        ):
+            try:
+                from recording.sync_recording import (
+                    RecordingPairState,
+                    create_recording_pair_shm,
+                )
+
+                pair_shm, recording_pair_meta = create_recording_pair_shm()
+                self._recording_pair_shm = pair_shm
+                recording_pair_state = RecordingPairState(pair_shm)
+                self._recording_pair_shm_name = recording_pair_meta["name"]
+                self.radar_feed_config["recording_pair_meta"] = recording_pair_meta
+                self.camera_feed_config["recording_pair_meta"] = recording_pair_meta
+                self.logger.info(
+                    "Created paired recording SHM: name=%s",
+                    recording_pair_meta["name"],
+                )
+            except Exception as e:
+                self.logger.error("Failed to create paired recording SHM: %s", e)
+
         # Create instances using configuration in the target process
         self.logger.info("Creating feed and analyzer instances...")
         try:
@@ -327,6 +359,23 @@ class FusionEngine:
         except Exception as e:
             self.logger.error(f"Failed to create feed/analyzer instances: {e}")
             raise
+
+        # Live camera and radar filenames must share one monotonic time origin.
+        # Separate child-process origins make otherwise valid timestamps differ
+        # by the process launch delay.
+        if (
+            self.radar_feed_config.get("type") == "DCA1000EVM"
+            and camera_feed is not None
+            and self.camera_feed_config is not None
+            and self.camera_feed_config.get("type") == "D455"
+        ):
+            shared_timestamp_origin = capture_clock_ns() / 1_000_000_000.0
+            radar_feed._config.timestamp_origin = shared_timestamp_origin
+            camera_feed._config.timestamp_origin = shared_timestamp_origin
+            self.logger.info(
+                "Using shared live sensor timestamp origin: %.9f",
+                shared_timestamp_origin,
+            )
 
         processes = []
         timeline_thread = None
@@ -497,6 +546,62 @@ class FusionEngine:
                     command = control_queue.get_nowait()
                     self.logger.info(f"Received control command: {command}")
 
+                    if isinstance(command, str) and command.startswith(
+                        "start_recording"
+                    ):
+                        try:
+                            from recording.clock import wall_clock_ns
+                            from recording.sync_recording import (
+                                parse_start_recording_command,
+                                write_recording_session,
+                            )
+
+                            start_cmd = parse_start_recording_command(command)
+                            if recording_pair_state is not None:
+                                recording_pair_state.begin_recording(
+                                    int(start_cmd.epoch_ns)
+                                )
+                            if start_cmd.directory:
+                                radar_cfg_path = None
+                                try:
+                                    raw_cfg = None
+                                    if isinstance(self.radar_feed_config, dict):
+                                        raw_cfg = self.radar_feed_config.get(
+                                            "config_file"
+                                        )
+                                    if not raw_cfg and isinstance(
+                                        self.radar_analyser_config, dict
+                                    ):
+                                        raw_cfg = self.radar_analyser_config.get(
+                                            "config_file"
+                                        )
+                                    if raw_cfg:
+                                        radar_cfg_path = CFGS.resolve_radar_config_path(
+                                            raw_cfg
+                                        )
+                                except Exception:
+                                    pass
+                                write_recording_session(
+                                    start_cmd.directory,
+                                    recording_epoch_mono_ns=int(start_cmd.epoch_ns),
+                                    recording_epoch_wall_ns=wall_clock_ns(),
+                                    paired_recording=recording_pair_state is not None,
+                                    radar_config_file=radar_cfg_path,
+                                )
+                        except Exception as exc:
+                            self.logger.error(
+                                "Failed to arm paired recording before forward: %s",
+                                exc,
+                            )
+                    elif command == "stop_recording":
+                        try:
+                            if recording_pair_state is not None:
+                                recording_pair_state.end_recording()
+                        except Exception as exc:
+                            self.logger.error(
+                                "Failed to disarm paired recording: %s", exc
+                            )
+
                     # Forward command to radar feed
                     if radar_control_queue is not None:
                         try:
@@ -645,6 +750,26 @@ class FusionEngine:
                             self.logger.error(
                                 f"Engine: SHM unlink failed for res block ({getattr(shm,'name','?')}): {e}"
                             )
+            pair_shm = getattr(self, "_recording_pair_shm", None)
+            if pair_shm is not None:
+                try:
+                    pair_shm.close()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            "Engine: SHM close failed for recording pair block (%s): %s",
+                            getattr(pair_shm, "name", "?"),
+                            e,
+                        )
+                try:
+                    pair_shm.unlink()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            "Engine: SHM unlink failed for recording pair block (%s): %s",
+                            getattr(pair_shm, "name", "?"),
+                            e,
+                        )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Engine: unexpected error cleaning SHM: {e}")

@@ -5,7 +5,7 @@ By default this writes only ``data/{1,3,5}_scan`` packs. Each pack uses the
 VoD camera folder ``image_2`` and the same zero-based five-digit sample id for
 every paired file (``00000.png``, ``00000.bin``, ``00000.txt``, …).
 
-Optional extras (``vod_pc``, previews, CSVs, range-Doppler) are off unless
+Optional extras (``vod_pc``, previews, range-Doppler) are off unless
 explicitly requested.
 """
 from __future__ import annotations
@@ -34,7 +34,6 @@ import numpy as np
 from analysis.radar_heatmap_analyser import RadarHeatmapAnalyser
 from camera.png_utils import is_valid_camera_frame, scan_png_directory
 from radar.bin_utils import parse_bin_timestamp, scan_bin_directory
-from recording.detections_csv import save_expected_detections_csv
 from recording.sync_recording import RecordingManifest
 from radar.dca1000_awr2243 import DCA1000Frame
 from radar.point_cloud import write_vod_pc_bin
@@ -59,12 +58,11 @@ DEFAULT_OUTDOOR_TUNING = (
 SCAN_COUNTS = (1, 3, 5)
 # VoD-compatible layout: camera images live in image_2; every paired modality
 # shares the calib-style zero-based five-digit stem (00000, 00001, ...).
-SCAN_DATA_FOLDERS = ("image_2", "radar", "radar_raw", "radarref", "calib")
+SCAN_DATA_FOLDERS = ("image_2", "radar", "radar_raw", "calib")
 SCAN_FOLDER_EXTENSIONS = {
     "image_2": ".png",
     "radar": ".bin",
     "radar_raw": ".bin",
-    "radarref": ".csv",
     "calib": ".txt",
 }
 SCAN_MANIFEST_FIELDS = (
@@ -179,11 +177,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--save-previews",
         action="store_true",
         help="Also save per-frame SNR and raw-power PC-2D PNGs.",
-    )
-    parser.add_argument(
-        "--save-detections-csv",
-        action="store_true",
-        help="Also save compact expected-detection CSVs for each frame.",
     )
     parser.add_argument(
         "--save-vod-pc",
@@ -578,26 +571,6 @@ def _take(values: np.ndarray, count: int, fill: float = np.nan) -> np.ndarray:
     return np.pad(values, (0, count - values.size), constant_values=fill)
 
 
-def save_detections_csv(
-    pc: Dict[str, Any],
-    output_path: Path,
-    *,
-    camera_objects: Optional[Any] = None,
-    max_radar_detections: int = 10,
-    min_snr_db: float = 5.0,
-    min_abs_velocity_mps: float = 0.25,
-) -> int:
-    """Save compact expected detections (top moving radar points, optional camera rows)."""
-    return save_expected_detections_csv(
-        pc,
-        output_path,
-        camera_objects=camera_objects,
-        max_radar_detections=max_radar_detections,
-        min_snr_db=min_snr_db,
-        min_abs_velocity_mps=min_abs_velocity_mps,
-    )
-
-
 def accumulate_point_clouds(
     point_clouds: Sequence[Dict[str, Any]],
 ) -> Dict[str, np.ndarray]:
@@ -986,7 +959,6 @@ def save_range_doppler_grid(
 def output_directories(output_root: Path) -> Dict[str, Path]:
     return {
         "vod_pc": output_root / "vod_pc",
-        "detections_csv": output_root / "detections_csv",
         "snr": output_root / "pc2d_snr",
         "raw_power": output_root / "pc2d_raw_power",
         "range_doppler_data": output_root / "range_doppler_data",
@@ -1174,24 +1146,6 @@ def save_vod_pc_atomic(
         temporary.unlink(missing_ok=True)
 
 
-def save_detections_csv_atomic(
-    pc: Dict[str, Any],
-    destination: Path,
-) -> int:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".partial")
-    try:
-        count = save_detections_csv(pc, temporary)
-        if not temporary.is_file():
-            raise FileNotFoundError(
-                f"Detection CSV was not written: {temporary}"
-            )
-        os.replace(temporary, destination)
-        return count
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def filename_time_ns(path: Path) -> int:
     parts = path.name.split("_", 2)
     if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
@@ -1263,10 +1217,6 @@ def save_scan_dataset_sample(
         feature_mode,
     )
     if not radar_bin_only:
-        save_detections_csv_atomic(
-            accumulated_pc,
-            layout["radarref"] / sample_filename(sequence, ".csv"),
-        )
         copy_atomic(calib_template, layout["calib"] / calib_name)
 
     radar_time_ns = filename_time_ns(current["raw_path"])
@@ -1353,10 +1303,6 @@ def write_ego_motion_diagnostics(
 
 def output_path_for(raw_path: Path, vod_dir: Path) -> Path:
     return vod_dir / f"{raw_path.stem}_pc.bin"
-
-
-def detections_csv_path_for(raw_path: Path, csv_dir: Path) -> Path:
-    return csv_dir / f"{raw_path.stem}_detections.csv"
 
 
 def preview_paths(
@@ -1528,12 +1474,11 @@ def convert(args: argparse.Namespace) -> int:
         and args.no_scan_datasets
         and not save_vod_pc_files
         and not args.save_previews
-        and not args.save_detections_csv
         and not args.save_range_doppler
     ):
         raise ValueError(
             "Nothing to write: keep scan datasets enabled (default) or pass "
-            "--save-vod-pc / --save-previews / --save-detections-csv / "
+            "--save-vod-pc / --save-previews / "
             "--save-range-doppler / --save-scan-comparison"
         )
 
@@ -1543,8 +1488,6 @@ def convert(args: argparse.Namespace) -> int:
     extra_dirs: List[Path] = []
     if save_vod_pc_files:
         extra_dirs.append(directories["vod_pc"])
-    if args.save_detections_csv:
-        extra_dirs.append(directories["detections_csv"])
     if args.save_previews:
         extra_dirs.extend((directories["snr"], directories["raw_power"]))
     if args.save_range_doppler:
@@ -1656,11 +1599,6 @@ def convert(args: argparse.Namespace) -> int:
             print(f"Scan datasets already complete: {data_root}")
         if comparison_dir is not None:
             print(f"Scan comparison grid: {comparison_dir}")
-    if args.save_detections_csv and not args.comparison_only:
-        print(
-            "Detection CSVs (top 10 moving radar points): "
-            f"{directories['detections_csv']}"
-        )
     if args.save_previews and not args.comparison_only:
         print(f"SNR previews: {directories['snr']}")
         print(f"Raw-power previews: {directories['raw_power']}")
@@ -1721,8 +1659,6 @@ def convert(args: argparse.Namespace) -> int:
     skipped = 0
     failed = 0
     total_points = 0
-    detection_csv_files = 0
-    detection_csv_rows = 0
     snr_images = 0
     raw_power_images = 0
     range_doppler_files = 0
@@ -1742,20 +1678,12 @@ def convert(args: argparse.Namespace) -> int:
 
     for index, raw_path in enumerate(frames):
         output_path = output_path_for(raw_path, directories["vod_pc"])
-        detections_csv_path = detections_csv_path_for(
-            raw_path, directories["detections_csv"]
-        )
         paths = preview_paths(args.preview, directories, raw_path)
         rd_paths = range_doppler_paths(directories, raw_path)
         need_vod = (
             not args.comparison_only
             and save_vod_pc_files
             and (args.overwrite or not output_path.exists())
-        )
-        need_detections_csv = (
-            not args.comparison_only
-            and args.save_detections_csv
-            and (args.overwrite or not detections_csv_path.exists())
         )
         need_snr = (
             not args.comparison_only
@@ -1782,7 +1710,6 @@ def convert(args: argparse.Namespace) -> int:
         )
         if not (
             need_vod
-            or need_detections_csv
             or need_snr
             or need_raw_power
             or need_rd_data
@@ -1830,11 +1757,6 @@ def convert(args: argparse.Namespace) -> int:
                 count = save_vod_pc(pc, output_path, args.feature)
                 converted += 1
                 total_points += count
-            if need_detections_csv:
-                detection_csv_rows += save_detections_csv(
-                    pc, detections_csv_path
-                )
-                detection_csv_files += 1
             show_selected = args.show_preview and index == args.preview_frame
             modes = []
             if need_snr:
@@ -1991,8 +1913,6 @@ def convert(args: argparse.Namespace) -> int:
         f"Done in {elapsed:.2f}s: converted={converted}, skipped={skipped}, "
         f"failed={failed}, points={total_points}, snr_images={snr_images}, "
         f"raw_power_images={raw_power_images}, "
-        f"detection_csv_files={detection_csv_files}, "
-        f"detection_csv_rows={detection_csv_rows}, "
         f"range_doppler_files={range_doppler_files}, "
         f"range_doppler_images={range_doppler_images}, "
         f"scan_samples={scan_samples}, "

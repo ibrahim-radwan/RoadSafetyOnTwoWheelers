@@ -132,7 +132,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--full-scan-export",
         action="store_true",
         help=(
-            "Copy images, raw radar, calibration, and radarref CSVs for every "
+            "Copy images, raw radar, and calibration for every "
             "sample. Default rebuild mode updates only radar/*.bin and manifest."
         ),
     )

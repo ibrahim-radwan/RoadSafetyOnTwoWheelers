@@ -71,3 +71,24 @@ class CFGS:
         "../../recordings/",
         time.strftime("%Y_%m_%d_%H_%M_00", time.localtime()),
     )
+
+    @staticmethod
+    def resolve_radar_config_path(path: Optional[str] = None) -> str:
+        """Return an absolute path to a radar profile file."""
+        raw = (path or CFGS.AWR2243_CONFIG_FILE or "").strip()
+        if not raw:
+            raw = CFGS.AWR2243_CONFIG_FILE
+        if not os.path.isabs(raw):
+            raw = os.path.join(os.getcwd(), raw)
+        return os.path.abspath(os.path.normpath(raw))
+
+    @staticmethod
+    def new_recording_dir() -> str:
+        """Create a unique session folder under DEST_STORAGE (YYYY_MM_DD_HH_MM_SS)."""
+        os.makedirs(CFGS.DEST_STORAGE, exist_ok=True)
+        session_dir = os.path.join(
+            CFGS.DEST_STORAGE,
+            time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime()),
+        )
+        os.makedirs(session_dir, exist_ok=True)
+        return session_dir

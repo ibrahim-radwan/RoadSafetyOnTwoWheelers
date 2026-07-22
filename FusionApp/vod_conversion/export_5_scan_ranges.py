@@ -29,7 +29,7 @@ DEFAULT_RANGES = [
     (11730, 14266),
 ]
 
-FOLDERS = ("image_2", "radar", "radar_raw", "radarref", "calib")
+FOLDERS = ("image_2", "radar", "radar_raw", "calib")
 
 
 def sample_stem(row: dict[str, str]) -> str:
@@ -60,10 +60,6 @@ def row_paths(src_root: Path, row: dict[str, str]) -> dict[str, Path]:
         "radar_raw": [
             src_root / "radar_raw" / f"{stem}.bin",
             src_root / "radar_raw" / f"{seq}.bin",
-        ],
-        "radarref": [
-            src_root / "radarref" / f"{stem}.csv",
-            src_root / "radarref" / f"{seq}.csv",
         ],
         "calib": [src_root / "calib" / row["calib_source"]],
     }
@@ -119,7 +115,6 @@ def export_ranges(
             shutil.copy2(paths["image_2"], dst_root / "image_2" / f"{stem}.png")
             shutil.copy2(paths["radar"], dst_root / "radar" / f"{stem}.bin")
             shutil.copy2(paths["radar_raw"], dst_root / "radar_raw" / f"{stem}.bin")
-            shutil.copy2(paths["radarref"], dst_root / "radarref" / f"{stem}.csv")
             shutil.copy2(paths["calib"], dst_root / "calib" / calib_name)
 
             out = dict(row)
