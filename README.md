@@ -88,20 +88,20 @@ Open `http://127.0.0.1:8081`. For offline VoD packs, see [FusionApp/vod_conversi
 
 ## Team members
 
-<table>
+<table width="100%">
   <tr>
-    <td width="33%">Ibrahim Radwan</td>
-    <td width="33%">Mohammad Abu Alsheikh</td>
-    <td width="34%">Dinh Thai Hoang</td>
+    <td width="33%">Ibrahim&nbsp;Radwan</td>
+    <td width="34%">Mohammad&nbsp;Abu&nbsp;Alsheikh</td>
+    <td width="33%">Dinh&nbsp;Thai&nbsp;Hoang</td>
   </tr>
   <tr>
-    <td>Javad Amiri</td>
-    <td>Carlos C. N. Kuhn</td>
-    <td>Weijian Deng</td>
+    <td>Javad&nbsp;Amiri</td>
+    <td>Carlos&nbsp;C.&nbsp;N.&nbsp;Kuhn</td>
+    <td>Weijian&nbsp;Deng</td>
   </tr>
   <tr>
-    <td>Mohammed Hassanin</td>
-    <td>Damith Herath</td>
-    <td>Wael Issa</td>
+    <td>Mohammed&nbsp;Hassanin</td>
+    <td>Damith&nbsp;Herath</td>
+    <td>Wael&nbsp;Issa</td>
   </tr>
 </table>
