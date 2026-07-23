@@ -101,7 +101,12 @@ Open `http://127.0.0.1:8081`. For offline VoD packs, see [FusionApp/vod_conversi
   </tr>
   <tr>
     <td>Mohammed&nbsp;Hassanin</td>
+    <td>Mohammed&nbsp;Alotaibi</td>
     <td>Damith&nbsp;Herath</td>
+  </tr>
+  <tr>
     <td>Wael&nbsp;Issa</td>
+    <td></td>
+    <td></td>
   </tr>
 </table>

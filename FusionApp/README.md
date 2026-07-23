@@ -332,3 +332,30 @@ Various AWR2243 radar configurations for different range/resolution tradeoffs:
 - `AWR2243_180m_70cm_64_3_512.txt`: Long range (180m), lower resolution (70cm)
 
 Select configuration based on application requirements (urban vs. highway scenarios).
+
+---
+
+## Team members
+
+<table width="100%">
+  <tr>
+    <td width="33%">Ibrahim&nbsp;Radwan</td>
+    <td width="34%">Mohammad&nbsp;Abu&nbsp;Alsheikh</td>
+    <td width="33%">Dinh&nbsp;Thai&nbsp;Hoang</td>
+  </tr>
+  <tr>
+    <td>Javad&nbsp;Amiri</td>
+    <td>Carlos&nbsp;C.&nbsp;N.&nbsp;Kuhn</td>
+    <td>Weijian&nbsp;Deng</td>
+  </tr>
+  <tr>
+    <td>Mohammed&nbsp;Hassanin</td>
+    <td>Mohammed&nbsp;Alotaibi</td>
+    <td>Damith&nbsp;Herath</td>
+  </tr>
+  <tr>
+    <td>Wael&nbsp;Issa</td>
+    <td></td>
+    <td></td>
+  </tr>
+</table>
